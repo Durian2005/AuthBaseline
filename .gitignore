@@ -1,0 +1,40 @@
+# .NET build output
+**/bin/
+**/obj/
+**/publish/
+
+# Frontend dependencies and build output
+**/node_modules/
+AuthClient/dist/
+
+# Rust/Tauri build output
+src-tauri/target/
+
+# Local IDE and OS files
+.vs/
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# WorkBuddy local project state
+.workbuddy/
+
+# Local runtime and secret configuration
+.env
+.env.*
+**/appsettings.Development.json
+**/appsettings.Local.json
+
+# Generated installers and local test packages
+*.exe
+*.msi
+*.zip
+pkg_src/
+test_install/
+_old_dist_bak/
+_old_dist_old_bak/
+
+# Diagnostic logs and screenshots
+*.log
+screen.png

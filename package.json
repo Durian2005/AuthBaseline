@@ -1,0 +1,19 @@
+{
+  "name": "auth-baseline-desktop",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "description": "口令认证基线系统 · 桌面端（Tauri v2 + Vue 3 + .NET sidecar）",
+  "scripts": {
+    "dev:frontend": "npm --prefix AuthClient run dev",
+    "build:frontend": "npm --prefix AuthClient run build:desktop",
+    "publish:backend": "dotnet publish AuthServer/AuthServer.csproj -c Release -r win-x64 --self-contained false -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -p:DebugType=none -o AuthServer/publish",
+    "sync:sidecar": "node scripts/sync-sidecar.mjs",
+    "tauri": "tauri",
+    "dev": "tauri dev",
+    "build": "tauri build"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2"
+  }
+}

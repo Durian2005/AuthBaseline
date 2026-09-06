@@ -1,0 +1,212 @@
+/* ============================================================
+   设计令牌 - AuthBaseline Desktop Client
+   来源：ui-ux-pro-max --design-system "enterprise security admin
+   console desktop tool" (Minimalism & Swiss Style, density 8/10)
+   ============================================================ */
+
+:root {
+  /* ---- 字体 ---- */
+  --font-sans: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI',
+    'PingFang SC', 'Microsoft YaHei', 'Hiragino Sans GB', 'Noto Sans SC',
+    sans-serif;
+  --font-mono: 'JetBrains Mono', 'Cascadia Mono', Consolas, 'Courier New',
+    monospace;
+
+  /* ---- 字号（桌面应用紧凑刻度） ---- */
+  --fs-xs: 11px;
+  --fs-sm: 12px;
+  --fs-base: 13px;
+  --fs-md: 14px;
+  --fs-lg: 16px;
+  --fs-xl: 20px;
+  --fs-2xl: 26px;
+  --fs-3xl: 34px;
+
+  /* ---- 间距（density 8/10：8-32px 主导） ---- */
+  --sp-1: 4px;
+  --sp-2: 8px;
+  --sp-3: 12px;
+  --sp-4: 16px;
+  --sp-5: 20px;
+  --sp-6: 24px;
+  --sp-8: 32px;
+  --sp-10: 40px;
+
+  /* ---- 圆角 ---- */
+  --r-xs: 3px;
+  --r-sm: 4px;
+  --r-md: 6px;
+  --r-lg: 10px;
+  --r-xl: 14px;
+  --r-full: 999px;
+
+  /* ---- 动效 ---- */
+  --t-fast: 120ms;
+  --t-base: 180ms;
+  --t-slow: 260ms;
+  --ease: cubic-bezier(0.4, 0, 0.2, 1);
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+
+  /* ---- 布局 ---- */
+  --titlebar-h: 38px;
+  --sidebar-w: 216px;
+  --sidebar-w-collapsed: 56px;
+  --statusbar-h: 26px;
+}
+
+/* ============================ 浅色主题 ============================ */
+:root,
+[data-theme='light'] {
+  color-scheme: light;
+
+  /* 桌面壁纸 / 应用外区域 */
+  --c-desktop: #e8edf4;
+  --c-desktop-2: #d9e1ec;
+
+  /* 窗口与面板 */
+  --c-window: #ffffff;
+  --c-titlebar: #f4f7fb;
+  --c-panel: #f7f9fc;
+  --c-surface: #ffffff;
+  --c-surface-2: #f1f5f9;
+  --c-surface-hover: #eef3f9;
+  --c-surface-active: #e3ecf7;
+
+  /* 描边 */
+  --c-border: #e4e7eb;
+  --c-border-strong: #cbd5e1;
+
+  /* 文本 */
+  --c-text: #0f172a;
+  --c-text-muted: #475569;
+  --c-text-subtle: #64748b;
+  --c-text-inverse: #ffffff;
+
+  /* 品牌与语义 */
+  --c-primary: #1e3a5f;
+  --c-primary-hover: #162c49;
+  --c-primary-soft: #e8eef6;
+  --c-on-primary: #ffffff;
+
+  --c-accent: #059669;
+  --c-accent-hover: #047857;
+  --c-accent-soft: #e6f5f0;
+  --c-on-accent: #ffffff;
+
+  --c-secondary: #2563eb;
+  --c-secondary-soft: #e8f0fe;
+
+  --c-warn: #b45309;
+  --c-warn-soft: #fdf3e3;
+
+  --c-danger: #dc2626;
+  --c-danger-hover: #b91c1c;
+  --c-danger-soft: #fdeceb;
+
+  --c-info: #0369a1;
+  --c-info-soft: #e5f3fb;
+
+  --c-ring: #1e3a5f;
+
+  /* 状态色 */
+  --st-enabled-fg: #047857;
+  --st-enabled-bg: #e6f5f0;
+  --st-pending-fg: #b45309;
+  --st-pending-bg: #fdf3e3;
+  --st-locked-fg: #b91c1c;
+  --st-locked-bg: #fdeceb;
+  --st-disabled-fg: #475569;
+  --st-disabled-bg: #eef1f5;
+
+  /* 阴影 */
+  --sh-window: 0 24px 64px -12px rgba(15, 23, 42, 0.28),
+    0 8px 20px -8px rgba(15, 23, 42, 0.16);
+  --sh-card: 0 1px 2px rgba(15, 23, 42, 0.05);
+  --sh-popover: 0 12px 32px -8px rgba(15, 23, 42, 0.22);
+  --sh-dialog: 0 28px 70px -14px rgba(15, 23, 42, 0.4);
+  --sh-focus: 0 0 0 3px rgba(30, 58, 95, 0.18);
+  --sh-inset-top: inset 0 1px 0 rgba(255, 255, 255, 0.6);
+}
+
+/* ============================ 深色主题 ============================ */
+[data-theme='dark'] {
+  color-scheme: dark;
+
+  --c-desktop: #070c16;
+  --c-desktop-2: #0d1526;
+
+  --c-window: #101a2b;
+  --c-titlebar: #0c1422;
+  --c-panel: #0c1523;
+  --c-surface: #16223a;
+  --c-surface-2: #1b2942;
+  --c-surface-hover: #1e2e49;
+  --c-surface-active: #243a5c;
+
+  --c-border: #24314b;
+  --c-border-strong: #35476b;
+
+  --c-text: #e6edf7;
+  --c-text-muted: #a9b8cf;
+  --c-text-subtle: #8b9bb5;
+  --c-text-inverse: #0f172a;
+
+  --c-primary: #5b8fd0;
+  --c-primary-hover: #74a3dc;
+  --c-primary-soft: #1a2c47;
+  --c-on-primary: #08101d;
+
+  --c-accent: #34d399;
+  --c-accent-hover: #55e0b0;
+  --c-accent-soft: #10332a;
+  --c-on-accent: #04150f;
+
+  --c-secondary: #60a5fa;
+  --c-secondary-soft: #14294a;
+
+  --c-warn: #fbbf24;
+  --c-warn-soft: #3a2a08;
+
+  --c-danger: #f87171;
+  --c-danger-hover: #fb8f8f;
+  --c-danger-soft: #3d1717;
+
+  --c-info: #7dd3fc;
+  --c-info-soft: #0d2c3c;
+
+  --c-ring: #7dd3fc;
+
+  --st-enabled-fg: #34d399;
+  --st-enabled-bg: #10332a;
+  --st-pending-fg: #fbbf24;
+  --st-pending-bg: #3a2a08;
+  --st-locked-fg: #f87171;
+  --st-locked-bg: #3d1717;
+  --st-disabled-fg: #a9b8cf;
+  --st-disabled-bg: #23314c;
+
+  --sh-window: 0 24px 64px -12px rgba(0, 0, 0, 0.6),
+    0 8px 20px -8px rgba(0, 0, 0, 0.5);
+  --sh-card: 0 1px 2px rgba(0, 0, 0, 0.3);
+  --sh-popover: 0 12px 32px -8px rgba(0, 0, 0, 0.55);
+  --sh-dialog: 0 28px 70px -14px rgba(0, 0, 0, 0.7);
+  --sh-focus: 0 0 0 3px rgba(125, 211, 252, 0.28);
+  --sh-inset-top: inset 0 1px 0 rgba(255, 255, 255, 0.04);
+}
+
+/* ===================== 尊重系统减弱动效偏好 ===================== */
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --t-fast: 0ms;
+    --t-base: 0ms;
+    --t-slow: 0ms;
+  }
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}

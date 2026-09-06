@@ -1,0 +1,22 @@
+{
+  "name": "auth-baseline-client",
+  "version": "2.0.0",
+  "private": true,
+  "type": "module",
+  "description": "口令认证基线系统 - Vue 3 桌面端前端",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "build:desktop": "vite build --mode desktop",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2",
+    "pinia": "^2.2.6",
+    "vue": "^3.5.13"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-vue": "^5.2.1",
+    "vite": "^6.0.7"
+  }
+}

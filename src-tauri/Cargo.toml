@@ -1,0 +1,30 @@
+[package]
+name = "auth-baseline-desktop"
+version = "1.0.0"
+description = "口令认证基线系统 · 桌面端（Tauri v2 + Vue 3 + .NET sidecar）"
+authors = ["dio"]
+edition = "2021"
+
+[lib]
+# `_lib` 后缀是必要的：避免 lib 名与 bin 名冲突（Windows 上尤其明显）
+# 详见 https://github.com/rust-lang/cargo/issues/8519
+name = "auth_baseline_desktop_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+# `protocol-asset` 启用内置的 asset:// 协议：Tauri v2.11+ 在 Windows 上需要它
+# 把前端资源映射到 http://.localhost/，由 Tauri 内嵌 HTTP 服务器提供。
+# 缺这个 feature 会导致 WebView2 看到 localhost 拒绝连接。
+tauri = { version = "2", features = ["protocol-asset"] }
+# 用于把 .NET 后端作为 sidecar 子进程启动 / 终止
+tauri-plugin-shell = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[profile.release]
+# 体积优先（生成的安装包更小），同时保持可接受的构建速度
+opt-level = "s"
+strip = true

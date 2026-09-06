@@ -1,0 +1,138 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>口令认证基线系统</title>
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>🔐 口令认证基线系统</h1>
+            <p class="subtitle">实验一：建立可运行的口令认证基线</p>
+        </header>
+
+        <main id="app">
+            <!-- 未登录：登录/注册 -->
+            <section id="auth-section" class="card">
+                <div class="tabs">
+                    <button class="tab-btn active" data-tab="login">登录</button>
+                    <button class="tab-btn" data-tab="register">注册</button>
+                </div>
+
+                <div id="login-panel" class="tab-panel active">
+                    <form id="login-form">
+                        <div class="form-group">
+                            <label for="login-username">用户名</label>
+                            <input type="text" id="login-username" placeholder="请输入用户名" required>
+                        </div>
+                        <div class="form-group">
+                            <label for="login-password">密码</label>
+                            <input type="password" id="login-password" placeholder="请输入密码" required>
+                        </div>
+                        <button type="submit" class="btn btn-primary">登录</button>
+                    </form>
+                </div>
+
+                <div id="register-panel" class="tab-panel">
+                    <form id="register-form">
+                        <div class="form-group">
+                            <label for="register-username">用户名</label>
+                            <input type="text" id="register-username" placeholder="请输入用户名" required>
+                        </div>
+                        <div class="form-group">
+                            <label for="register-password">密码</label>
+                            <input type="password" id="register-password" placeholder="至少8位，含大小写字母和数字" required>
+                        </div>
+                        <div class="form-group">
+                            <label for="register-password2">确认密码</label>
+                            <input type="password" id="register-password2" placeholder="再次输入密码" required>
+                        </div>
+                        <div class="hint">密码必须至少8位，且同时包含大写字母、小写字母和数字。</div>
+                        <button type="submit" class="btn btn-primary">注册</button>
+                    </form>
+                </div>
+            </section>
+
+            <!-- 已登录：用户面板 -->
+            <section id="user-section" class="card hidden">
+                <div class="panel-header">
+                    <h2>欢迎，<span id="current-user"></span></h2>
+                    <button id="logout-btn" class="btn btn-secondary">退出</button>
+                </div>
+
+                <div class="status-bar" id="user-status-bar">
+                    <span class="status-label">当前状态：</span>
+                    <span id="user-status" class="status-badge"></span>
+                    <span id="lock-timer" class="lock-timer hidden"></span>
+                </div>
+
+                <div class="form-group">
+                    <label>修改密码</label>
+                    <form id="change-password-form">
+                        <input type="password" id="old-password" placeholder="旧密码" required>
+                        <input type="password" id="new-password" placeholder="新密码（至少8位，含大小写字母和数字）" required>
+                        <input type="password" id="new-password2" placeholder="确认新密码" required>
+                        <button type="submit" class="btn btn-primary">修改密码</button>
+                    </form>
+                </div>
+            </section>
+
+            <!-- 管理员面板 -->
+            <section id="admin-section" class="card hidden">
+                <h2>管理员控制台</h2>
+
+                <div class="admin-grid">
+                    <div class="admin-box">
+                        <h3>待审核用户</h3>
+                        <table class="data-table">
+                            <thead>
+                                <tr><th>用户名</th><th>注册时间</th><th>操作</th></tr>
+                            </thead>
+                            <tbody id="pending-users"></tbody>
+                        </table>
+                    </div>
+
+                    <div class="admin-box">
+                        <h3>用户列表</h3>
+                        <table class="data-table">
+                            <thead>
+                                <tr><th>用户名</th><th>状态</th><th>失败次数</th><th>锁定截止</th><th>操作</th></tr>
+                            </thead>
+                            <tbody id="all-users"></tbody>
+                        </table>
+                    </div>
+
+                    <div class="admin-box full-width">
+                        <h3>审计日志（最近 200 条）</h3>
+                        <div class="log-filters">
+                            <button class="btn btn-small" onclick="app.refreshLogs()">刷新日志</button>
+                        </div>
+                        <div class="log-table-wrapper">
+                            <table class="data-table log-table">
+                                <thead>
+                                    <tr>
+                                        <th>时间</th>
+                                        <th>操作者</th>
+                                        <th>动作</th>
+                                        <th>操作前状态</th>
+                                        <th>操作后状态</th>
+                                        <th>请求</th>
+                                        <th>响应</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="audit-logs"></tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+            </section>
+        </main>
+
+        <div id="toast" class="toast hidden"></div>
+    </div>
+
+    <script src="app.js"></script>
+</body>
+</html>
