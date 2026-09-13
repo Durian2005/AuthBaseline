@@ -26,6 +26,15 @@ public interface IEmailSender
 /// <summary>控制台发件器：验证码直接打印到后端日志，完全离线可用。</summary>
 public sealed class ConsoleEmailSender : IEmailSender
 {
+    /// <summary>
+    /// 桌面端以 GUI 方式启动、没有控制台窗口，只往 stdout 打印等于看不见。
+    /// 因此同时落一份文件，保证"未配 SMTP 也能离线演示"这条退路真的可用。
+    /// </summary>
+    private static readonly string LogFile =
+        Path.Combine(AppContext.BaseDirectory, "email-codes.log");
+
+    private static readonly object FileLock = new();
+
     public string Name => "Console";
     public bool DeliversRealMail => false;
 
@@ -38,10 +47,31 @@ public sealed class ConsoleEmailSender : IEmailSender
         Console.WriteLine($"  收件邮箱: {toEmail}");
         Console.WriteLine($"  验证码  : {code}");
         Console.WriteLine($"  有效期  : {validMinutes} 分钟");
+        Console.WriteLine($"  日志文件: {LogFile}");
         Console.WriteLine("  （当前为控制台模式，未真实投递；填入 SMTP 授权码后自动切换）");
         Console.WriteLine("===================================================================");
         Console.WriteLine();
+
+        AppendToFile(toEmail, code, purpose, validMinutes);
         return Task.CompletedTask;
+    }
+
+    /// <summary>把验证码追加写入程序目录下的 email-codes.log，供无控制台的桌面端查看。</summary>
+    private static void AppendToFile(string toEmail, string code, string purpose, int validMinutes)
+    {
+        try
+        {
+            var line = $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] 用途={EmailCodePurposeLabel(purpose)}"
+                     + $" 收件邮箱={toEmail} 验证码={code} 有效期={validMinutes}分钟{Environment.NewLine}";
+            lock (FileLock)
+            {
+                File.AppendAllText(LogFile, line);
+            }
+        }
+        catch
+        {
+            // 落盘失败（例如安装目录只读）不应影响发码主流程
+        }
     }
 
     private static string EmailCodePurposeLabel(string purpose) => purpose switch

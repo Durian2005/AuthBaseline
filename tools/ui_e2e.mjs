@@ -1,19 +1,26 @@
 /**
- * 真实浏览器界面端到端验证（Edge 无头 + CDP）。
+ * 真实界面端到端验证（CDP 驱动，真实点击）。
  *
  * 验证两条新流程在界面层是否真的可用：
  *   功能一 注册绑定邮箱：填邮箱 -> 获取验证码 -> 填码 -> 提交 -> 转待审核
  *   功能二 忘记密码：用户名+邮箱 -> 验证码 -> 设置新密码 -> 用新密码登录
  *
- * 驱动方式：Runtime.evaluate 注入 JS 操作 DOM / 触发 Vue 的 input 事件。
+ * 两种用法：
+ *   浏览器联调（Edge 无头 + 调试端口 9222）
+ *   桌面程序（安装后，带 --remote-debugging-port=9333 启动 WebView2）
+ *
+ * 环境变量：
+ *   E2E_CDP  调试端口地址，默认 http://127.0.0.1:9222
+ *   E2E_LOG  验证码日志位置，默认 %TEMP%\be.log
+ *   E2E_APP  应用首页地址；不填则自动取调试目标当前页面地址（桌面端端口是动态的）
  */
 import fs from 'node:fs'
 import path from 'node:path'
 import os from 'node:os'
 
-const CDP = 'http://127.0.0.1:9222'
-const APP = 'http://localhost:5007/'
-const LOG = path.join(os.tmpdir(), 'be.log')
+const CDP = process.env.E2E_CDP || 'http://127.0.0.1:9222'
+const LOG = process.env.E2E_LOG || path.join(os.tmpdir(), 'be.log')
+let APP = process.env.E2E_APP || ''
 
 const pass = []
 const fail = []
@@ -25,10 +32,19 @@ function check(name, ok, detail = '') {
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 
+/**
+ * 兼容两种控制台发件器输出格式：
+ *   控制台样式「验证码  : 123456」
+ *   文件样式  「验证码=123456」
+ */
 function codesInLog() {
   try {
     const txt = fs.readFileSync(LOG, 'utf8')
-    return [...txt.matchAll(/:\s*(\d{6})\s*$/gm)].map((m) => m[1])
+    const out = []
+    for (const m of txt.matchAll(/验证码\s*[:=]\s*(\d{6})|:\s*(\d{6})\s*$/gm)) {
+      out.push(m[1] || m[2])
+    }
+    return out
   } catch {
     return []
   }
@@ -49,14 +65,14 @@ async function connect() {
     try {
       const res = await fetch(`${CDP}/json/list`)
       const list = await res.json()
-      const page = list.find((t) => t.type === 'page')
-      if (page?.webSocketDebuggerUrl) return page.webSocketDebuggerUrl
+      const page = list.find((t) => t.type === 'page' && t.webSocketDebuggerUrl)
+      if (page) return { wsUrl: page.webSocketDebuggerUrl, pageUrl: page.url }
     } catch {
-      /* 浏览器还没起来 */
+      /* 调试端口还没起来 */
     }
     await sleep(500)
   }
-  throw new Error('无法连接 Edge 调试端口 9222')
+  throw new Error(`无法连接调试端口 ${CDP}`)
 }
 
 function makeClient(wsUrl) {
@@ -120,9 +136,14 @@ const HELPERS = `
 `
 
 async function main() {
-  const wsUrl = await connect()
+  const { wsUrl, pageUrl } = await connect()
+  if (!APP) APP = pageUrl
+  const API = APP.replace(/\/+$/, '')
   const c = makeClient(wsUrl)
   await c.ready
+
+  console.log(`驱动目标：${APP}`)
+  console.log(`验证码来源：${LOG}`)
 
   await c.send('Page.enable')
   await c.send('Runtime.enable')
@@ -184,7 +205,7 @@ async function main() {
   check('提示注册成功等待审核', body.includes('注册成功') || body.includes('等待管理员审核'), body.slice(0, 120).replace(/\n/g, ' / '))
 
   /* ---------------- 审核通过，便于测试找回密码 ---------------- */
-  const approve = await fetch('http://localhost:5007/api/auth/approve', {
+  const approve = await fetch(`${API}/api/auth/approve`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ username: user, adminUsername: 'admin' })
