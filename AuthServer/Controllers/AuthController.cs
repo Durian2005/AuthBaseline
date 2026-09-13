@@ -12,12 +12,16 @@ namespace AuthServer.Controllers;
 public class AuthController : ControllerBase
 {
     private readonly MongoDbService _db;
+    private readonly VerificationService _codes;
+    private readonly EmailOptions _emailOptions;
     private const int MaxFailedAttempts = 3;
     private static readonly TimeSpan LockoutDuration = TimeSpan.FromMinutes(3);
 
-    public AuthController(MongoDbService db)
+    public AuthController(MongoDbService db, VerificationService codes, EmailOptions emailOptions)
     {
         _db = db;
+        _codes = codes;
+        _emailOptions = emailOptions;
     }
 
     // 密码复杂度校验：至少8位，包含大小写字母和数字
@@ -41,6 +45,9 @@ public class AuthController : ControllerBase
         Id = u.Id,
         Username = u.Username,
         Status = u.Status.ToString(),
+        // 邮箱一律脱敏后返回，管理员能看到"有没有绑、绑没绑好"，但拿不到完整地址
+        Email = EmailUtil.Mask(u.Email),
+        EmailVerified = u.EmailVerified,
         FailedLoginAttempts = u.FailedLoginAttempts,
         LockoutEnd = u.LockoutEnd,
         CreatedAt = u.CreatedAt,
@@ -103,13 +110,25 @@ public class AuthController : ControllerBase
         return Unauthorized(resp);
     }
 
-    /* ==================== 注册 ==================== */
+    /* ==================== 注册（绑定邮箱） ==================== */
 
+    /**
+     * 注册流程改为"先验证邮箱、后落库"：
+     *   1. 前端先调用 send-email-code（purpose=REGISTER）拿到验证码；
+     *   2. 本接口校验通过后才创建账号（状态仍为待审核）。
+     *
+     * 这样库里不会出现"邮箱是乱填的"垃圾账号，也不必再维护未验证账号的清理逻辑。
+     * 注意：发码与校验之间存在几分钟空档，用户名/邮箱可能在此期间被他人占用，
+     *       因此建号前会再查一次重。
+     */
     [HttpPost("register")]
     public async Task<IActionResult> Register([FromBody] RegisterRequest req)
     {
         var sanitizedUsername = Norm(req.Username);
-        var requestLog = new { req.Username };
+        var email = EmailUtil.Normalize(req.Email);
+        // 口令与验证码都不入日志，邮箱脱敏
+        var requestLog = new { req.Username, Email = EmailUtil.Mask(req.Email) };
+        var emailRequired = _emailOptions.Enabled;
 
         if (string.IsNullOrWhiteSpace(sanitizedUsername) || string.IsNullOrWhiteSpace(req.Password))
         {
@@ -132,6 +151,14 @@ public class AuthController : ControllerBase
             return BadRequest(resp);
         }
 
+        if (emailRequired && !EmailUtil.IsValid(email))
+        {
+            var resp = new ApiResponse { Success = false, Code = "INVALID_EMAIL", Message = "请输入有效的邮箱地址" };
+            await WriteAuditLogAsync("anonymous", sanitizedUsername, AuditAction.Register, "N/A", requestLog, resp, "N/A",
+                sanitizedUsername, AuditResult.Failed);
+            return BadRequest(resp);
+        }
+
         var existing = await _db.Users.Find(u => u.Username == sanitizedUsername).FirstOrDefaultAsync();
         if (existing != null)
         {
@@ -141,11 +168,48 @@ public class AuthController : ControllerBase
             return Conflict(resp);
         }
 
+        if (emailRequired)
+        {
+            var boundUser = await _db.Users.Find(u => u.Email == email).FirstOrDefaultAsync();
+            if (boundUser != null)
+            {
+                var resp = new ApiResponse { Success = false, Code = "EMAIL_ALREADY_BOUND", Message = "该邮箱已被其它账号绑定" };
+                await WriteAuditLogAsync("anonymous", sanitizedUsername, AuditAction.Register, "N/A", requestLog, resp, boundUser.Status.ToString(),
+                    sanitizedUsername, AuditResult.Failed);
+                return Conflict(resp);
+            }
+
+            // 用途隔离：只接受 purpose=REGISTER 的验证码；
+            // 并把所填邮箱一并传入比对，防止"用 A 邮箱的码去绑 B 邮箱"。
+            // 该比对发生在消耗验证码之前，用户只是填错邮箱时不会白白烧掉一次验证码。
+            var verify = await _codes.VerifyAsync(sanitizedUsername, EmailCodePurpose.Register, req.Code, email);
+            if (!verify.Success)
+            {
+                var resp = new ApiResponse { Success = false, Code = verify.Code, Message = verify.Message };
+                await WriteAuditLogAsync("anonymous", sanitizedUsername, AuditAction.Register, "N/A", requestLog, resp, "N/A",
+                    sanitizedUsername, AuditResult.Failed);
+                return BadRequest(resp);
+            }
+
+            // 建号前再查一次重（发码/校验期间可能已被抢注）
+            existing = await _db.Users.Find(u => u.Username == sanitizedUsername).FirstOrDefaultAsync();
+            if (existing != null)
+            {
+                var resp = new ApiResponse { Success = false, Code = "DUPLICATE_USERNAME", Message = "用户名已存在" };
+                await WriteAuditLogAsync("anonymous", sanitizedUsername, AuditAction.Register, "N/A", requestLog, resp, existing.Status.ToString(),
+                    sanitizedUsername, AuditResult.Failed);
+                return Conflict(resp);
+            }
+        }
+
         var user = new User
         {
             Username = sanitizedUsername,
             PasswordHash = BCrypt.Net.BCrypt.HashPassword(req.Password),
             Status = UserStatus.Pending,
+            // 邮件功能关闭时回退为"无邮箱的老流程"，避免外部依赖不可用就完全无法注册
+            Email = emailRequired ? email : null,
+            EmailVerified = emailRequired,
             FailedLoginAttempts = 0,
             CreatedAt = DateTime.UtcNow
         };
@@ -156,11 +220,296 @@ public class AuthController : ControllerBase
         {
             Success = true,
             Code = "OK",
-            Message = "注册成功，等待管理员审核",
+            Message = emailRequired
+                ? "注册成功，邮箱已验证，等待管理员审核"
+                : "注册成功，等待管理员审核",
             Data = ToUserResponse(user)
         };
         await WriteAuditLogAsync("anonymous", sanitizedUsername, AuditAction.Register, "N/A", requestLog, response, user.Status.ToString(),
             sanitizedUsername, AuditResult.Success);
+        return Ok(response);
+    }
+
+    /* ==================== 发送邮箱验证码 ==================== */
+
+    /**
+     * 发送邮箱验证码，支持两种用途：
+     *   REGISTER —— 注册绑定邮箱；
+     *   RESET    —— 忘记密码（用户名 + 邮箱必须与库中已绑定且已验证的邮箱一致）。
+     *
+     * 安全要点：
+     *   - 用途隔离：REGISTER 与 RESET 的验证码互不通用；
+     *   - 防枚举：RESET 场景下账号不存在或邮箱不匹配时，返回与成功**完全相同**的响应，
+     *     只是不真正发信，避免把"哪些用户名存在、绑了哪个邮箱"暴露出去；
+     *   - 状态门禁：待审核 / 已禁用 / 锁定中一律拒绝（能走到这一步说明用户名+邮箱已对得上）。
+     */
+    [HttpPost("send-email-code")]
+    public async Task<IActionResult> SendEmailCode([FromBody] SendEmailCodeRequest req)
+    {
+        const string action = AuditAction.SendEmailCode;
+        var username = Norm(req.Username);
+        var email = EmailUtil.Normalize(req.Email);
+        var purpose = (req.Purpose ?? string.Empty).Trim().ToUpperInvariant();
+        var requestLog = new { Purpose = purpose, req.Username, Email = EmailUtil.Mask(req.Email) };
+
+        if (!_emailOptions.Enabled)
+        {
+            var resp = new ApiResponse { Success = false, Code = "EMAIL_DISABLED", Message = "邮件服务当前未启用，请联系管理员" };
+            await WriteAuditLogAsync("anonymous", username, action, "N/A", requestLog, resp, "N/A",
+                username, AuditResult.Failed);
+            return StatusCode(503, resp);
+        }
+
+        if (!EmailCodePurpose.IsValid(purpose))
+        {
+            var resp = new ApiResponse { Success = false, Code = "INVALID_PURPOSE", Message = "验证码用途不合法" };
+            await WriteAuditLogAsync("anonymous", username, action, "N/A", requestLog, resp, "N/A",
+                username, AuditResult.Failed);
+            return BadRequest(resp);
+        }
+
+        if (string.IsNullOrWhiteSpace(username) || !EmailUtil.IsValid(email))
+        {
+            var resp = new ApiResponse { Success = false, Code = "INVALID_EMAIL", Message = "请填写用户名和有效的邮箱地址" };
+            await WriteAuditLogAsync("anonymous", username, action, "N/A", requestLog, resp, "N/A",
+                username, AuditResult.Failed);
+            return BadRequest(resp);
+        }
+
+        if (purpose == EmailCodePurpose.Register)
+        {
+            var taken = await _db.Users.Find(u => u.Username == username).FirstOrDefaultAsync();
+            if (taken != null)
+            {
+                var resp = new ApiResponse { Success = false, Code = "DUPLICATE_USERNAME", Message = "用户名已存在" };
+                await WriteAuditLogAsync("anonymous", username, action, "N/A", requestLog, resp, taken.Status.ToString(),
+                    username, AuditResult.Failed);
+                return Conflict(resp);
+            }
+
+            var boundUser = await _db.Users.Find(u => u.Email == email).FirstOrDefaultAsync();
+            if (boundUser != null)
+            {
+                var resp = new ApiResponse { Success = false, Code = "EMAIL_ALREADY_BOUND", Message = "该邮箱已被其它账号绑定" };
+                await WriteAuditLogAsync("anonymous", username, action, "N/A", requestLog, resp, boundUser.Status.ToString(),
+                    username, AuditResult.Failed);
+                return Conflict(resp);
+            }
+        }
+        else
+        {
+            var user = await _db.Users.Find(u => u.Username == username).FirstOrDefaultAsync();
+            var matched = user != null
+                && !string.IsNullOrEmpty(user.Email)
+                && string.Equals(user.Email, email, StringComparison.Ordinal)
+                && user.EmailVerified;
+
+            if (!matched)
+            {
+                // 防枚举：与成功响应逐字一致，仅不发信
+                var generic = BuildSendCodeSuccess(email);
+                await WriteAuditLogAsync("anonymous", username, action, "N/A", requestLog, generic,
+                    user?.Status.ToString() ?? "N/A", username, AuditResult.Failed);
+                return Ok(generic);
+            }
+
+            var statusBefore = user!.Status.ToString();
+
+            if (user.Status == UserStatus.Pending)
+            {
+                var resp = new ApiResponse { Success = false, Code = "PENDING_APPROVAL", Message = "账号待审核，暂不能重置密码" };
+                await WriteAuditLogAsync(user.Id, user.Username, action, statusBefore, requestLog, resp, statusBefore,
+                    username, AuditResult.Failed);
+                return StatusCode(403, resp);
+            }
+
+            if (user.Status == UserStatus.Disabled)
+            {
+                var resp = new ApiResponse { Success = false, Code = "ACCOUNT_DISABLED", Message = "账号已被禁用，无法重置密码" };
+                await WriteAuditLogAsync(user.Id, user.Username, action, statusBefore, requestLog, resp, statusBefore,
+                    username, AuditResult.Failed);
+                return StatusCode(403, resp);
+            }
+
+            if (user.Status == UserStatus.Locked && user.LockoutEnd.HasValue && user.LockoutEnd.Value > DateTime.UtcNow)
+            {
+                var remaining = (int)(user.LockoutEnd.Value - DateTime.UtcNow).TotalSeconds;
+                var resp = new ApiResponse
+                {
+                    Success = false,
+                    Code = "ACCOUNT_LOCKED",
+                    Message = $"账号处于锁定状态，请 {remaining} 秒后再试",
+                    Data = new { LockoutEnd = user.LockoutEnd, RemainingSeconds = remaining }
+                };
+                await WriteAuditLogAsync(user.Id, user.Username, action, statusBefore, requestLog, resp, statusBefore,
+                    username, AuditResult.Failed);
+                return StatusCode(423, resp);
+            }
+
+            // 锁定已到期：顺手恢复启用态，避免"锁定期已过但仍被拒"的错觉
+            if (user.Status == UserStatus.Locked)
+            {
+                user.Status = UserStatus.Enabled;
+                user.FailedLoginAttempts = 0;
+                user.LockoutEnd = null;
+                await _db.Users.ReplaceOneAsync(u => u.Id == user.Id, user);
+            }
+        }
+
+        var send = await _codes.SendAsync(username, email, purpose);
+        if (!send.Success)
+        {
+            var failure = new ApiResponse { Success = false, Code = send.Code, Message = send.Message };
+            var httpCode = send.Code == "RESEND_TOO_SOON" ? 429 : 502;
+            await WriteAuditLogAsync("anonymous", username, action, "N/A", requestLog, failure, "N/A",
+                username, AuditResult.Failed);
+            return StatusCode(httpCode, failure);
+        }
+
+        var success = BuildSendCodeSuccess(email);
+        await WriteAuditLogAsync("anonymous", username, action, "N/A", requestLog, success, "N/A",
+            username, AuditResult.Success);
+        return Ok(success);
+    }
+
+    /**
+     * 发送成功响应：注册与找回密码共用，保证外形一致（防枚举）。
+     * 同时告知当前发件通道，界面据此提示"验证码在后端日志里"还是"请查收邮件"。
+     */
+    private ApiResponse BuildSendCodeSuccess(string email) => new()
+    {
+        Success = true,
+        Code = "OK",
+        Message = "若该账号与邮箱匹配，验证码已发送，5 分钟内有效",
+        Data = new
+        {
+            MaskedEmail = EmailUtil.Mask(email),
+            ExpiresIn = 300,
+            ResendAfter = 60,
+            Channel = _codes.SenderName,
+            DeliversRealMail = _codes.DeliversRealMail
+        }
+    };
+
+    /* ==================== 忘记密码：重置密码 ==================== */
+
+    /**
+     * 通过邮箱验证码重置口令。
+     *
+     * 刻意不提供"验证码直接登录"：本接口只改密码，不签发任何会话，
+     * 系统里因此不存在"不凭口令就能建立会话"的通道。
+     * 锁定 / 待审核 / 已禁用状态一律拒绝，防止用验证码绕过 3 次锁定策略。
+     */
+    [HttpPost("reset-password")]
+    public async Task<IActionResult> ResetPassword([FromBody] ResetPasswordRequest req)
+    {
+        const string action = AuditAction.ResetPassword;
+        var username = Norm(req.Username);
+        var email = EmailUtil.Normalize(req.Email);
+        // 新旧口令、验证码都不入日志
+        var requestLog = new { req.Username, Email = EmailUtil.Mask(req.Email) };
+
+        if (!_emailOptions.Enabled)
+        {
+            var resp = new ApiResponse { Success = false, Code = "EMAIL_DISABLED", Message = "邮件服务当前未启用，请联系管理员" };
+            await WriteAuditLogAsync("anonymous", username, action, "N/A", requestLog, resp, "N/A",
+                username, AuditResult.Failed);
+            return StatusCode(503, resp);
+        }
+
+        if (string.IsNullOrWhiteSpace(username) || string.IsNullOrWhiteSpace(req.NewPassword))
+        {
+            var resp = new ApiResponse { Success = false, Code = "EMPTY_FIELDS", Message = "用户名与新密码不能为空" };
+            await WriteAuditLogAsync("anonymous", username, action, "N/A", requestLog, resp, "N/A",
+                username, AuditResult.Failed);
+            return BadRequest(resp);
+        }
+
+        if (!IsPasswordComplex(req.NewPassword))
+        {
+            var resp = new ApiResponse
+            {
+                Success = false,
+                Code = "WEAK_PASSWORD",
+                Message = "新密码必须至少8位，并同时包含大写字母、小写字母和数字"
+            };
+            await WriteAuditLogAsync("anonymous", username, action, "N/A", requestLog, resp, "N/A",
+                username, AuditResult.Failed);
+            return BadRequest(resp);
+        }
+
+        var user = await _db.Users.Find(u => u.Username == username).FirstOrDefaultAsync();
+
+        // 账号不存在 / 未绑邮箱 / 邮箱不匹配：统一话术，不透露具体是哪一种
+        if (user == null
+            || string.IsNullOrEmpty(user.Email)
+            || !string.Equals(user.Email, email, StringComparison.Ordinal)
+            || !user.EmailVerified)
+        {
+            var resp = new ApiResponse { Success = false, Code = "INVALID_CREDENTIALS", Message = "用户名与邮箱不匹配" };
+            await WriteAuditLogAsync("anonymous", username, action, "N/A", requestLog, resp,
+                user?.Status.ToString() ?? "N/A", username, AuditResult.Failed);
+            return Unauthorized(resp);
+        }
+
+        var statusBefore = user.Status.ToString();
+
+        if (user.Status == UserStatus.Pending)
+        {
+            var resp = new ApiResponse { Success = false, Code = "PENDING_APPROVAL", Message = "账号待审核，暂不能重置密码" };
+            await WriteAuditLogAsync(user.Id, user.Username, action, statusBefore, requestLog, resp, statusBefore,
+                username, AuditResult.Failed);
+            return StatusCode(403, resp);
+        }
+
+        if (user.Status == UserStatus.Disabled)
+        {
+            var resp = new ApiResponse { Success = false, Code = "ACCOUNT_DISABLED", Message = "账号已被禁用，无法重置密码" };
+            await WriteAuditLogAsync(user.Id, user.Username, action, statusBefore, requestLog, resp, statusBefore,
+                username, AuditResult.Failed);
+            return StatusCode(403, resp);
+        }
+
+        if (user.Status == UserStatus.Locked && user.LockoutEnd.HasValue && user.LockoutEnd.Value > DateTime.UtcNow)
+        {
+            var remaining = (int)(user.LockoutEnd.Value - DateTime.UtcNow).TotalSeconds;
+            var resp = new ApiResponse
+            {
+                Success = false,
+                Code = "ACCOUNT_LOCKED",
+                Message = $"账号处于锁定状态，请 {remaining} 秒后再试",
+                Data = new { LockoutEnd = user.LockoutEnd, RemainingSeconds = remaining }
+            };
+            await WriteAuditLogAsync(user.Id, user.Username, action, statusBefore, requestLog, resp, statusBefore,
+                username, AuditResult.Failed);
+            return StatusCode(423, resp);
+        }
+
+        var verify = await _codes.VerifyAsync(username, EmailCodePurpose.Reset, req.Code, email);
+        if (!verify.Success)
+        {
+            var resp = new ApiResponse { Success = false, Code = verify.Code, Message = verify.Message };
+            await WriteAuditLogAsync(user.Id, user.Username, action, statusBefore, requestLog, resp, statusBefore,
+                username, AuditResult.Failed);
+            return BadRequest(resp);
+        }
+
+        // 重置成功：换口令，并一并清掉锁定与失败计数（否则改完密码仍被锁在门外）
+        user.PasswordHash = BCrypt.Net.BCrypt.HashPassword(req.NewPassword);
+        user.FailedLoginAttempts = 0;
+        user.LockoutEnd = null;
+        if (user.Status == UserStatus.Locked) user.Status = UserStatus.Enabled;
+        await _db.Users.ReplaceOneAsync(u => u.Id == user.Id, user);
+
+        var response = new ApiResponse<UserResponse>
+        {
+            Success = true,
+            Code = "OK",
+            Message = "密码已重置，请使用新密码登录",
+            Data = ToUserResponse(user)
+        };
+        await WriteAuditLogAsync(user.Id, user.Username, action, statusBefore, requestLog, response, user.Status.ToString(),
+            username, AuditResult.Success);
         return Ok(response);
     }
 

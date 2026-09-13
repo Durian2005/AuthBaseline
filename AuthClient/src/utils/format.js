@@ -78,7 +78,9 @@ export const ACTION_META = {
   UNLOCK: { label: '解锁账号', tone: 'warn' },
   DELETE_USER: { label: '注销账号', tone: 'locked' },
   CHANGE_PASSWORD: { label: '修改密码', tone: 'info' },
-  TRANSFER_ADMIN: { label: '权限转让', tone: 'primary' }
+  TRANSFER_ADMIN: { label: '权限转让', tone: 'primary' },
+  SEND_EMAIL_CODE: { label: '发送验证码', tone: 'info' },
+  RESET_PASSWORD: { label: '重置密码', tone: 'warn' }
 }
 
 export function actionMeta(action) {
