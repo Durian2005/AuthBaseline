@@ -84,4 +84,16 @@ public class LoginResult
     public string Username { get; set; } = string.Empty;
     public string Status { get; set; } = string.Empty;
     public bool IsAdmin { get; set; }
+
+    /// <summary>
+    /// 服务端签发的会话票据。后续管理员接口需通过
+    /// `Authorization: Bearer &lt;ticket&gt;` 携带该值。
+    ///
+    /// 注意：这是凭证，前端只应保存在本地会话存储中，
+    /// 绝不能写进审计日志或任何可被他人读取的位置。
+    /// </summary>
+    public string Ticket { get; set; } = string.Empty;
+
+    /// <summary>票据过期时刻（滑动续期的当前值）。</summary>
+    public DateTime ExpiresAt { get; set; }
 }

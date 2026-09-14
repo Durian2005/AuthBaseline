@@ -34,6 +34,11 @@ public class Program
         builder.Services.AddSingleton(emailSender);
         builder.Services.AddSingleton<VerificationService>();
 
+        // ---- 实验二：审计服务与会话票据 ----
+        // AuditService 由它统一串行化哈希链写入；SessionService 负责票据签发与校验。
+        builder.Services.AddSingleton<AuditService>();
+        builder.Services.AddSingleton<SessionService>();
+
         // 允许前端跨域访问
         builder.Services.AddCors(options =>
         {

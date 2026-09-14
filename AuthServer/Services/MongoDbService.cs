@@ -10,6 +10,8 @@ public class MongoDbService
     private readonly IMongoCollection<User> _users;
     private readonly IMongoCollection<AuditLog> _auditLogs;
     private readonly IMongoCollection<EmailCode> _emailCodes;
+    private readonly IMongoCollection<Session> _sessions;
+    private readonly IMongoCollection<AuditChainHead> _auditChainHeads;
 
     public MongoDbService(IConfiguration configuration)
     {
@@ -23,6 +25,8 @@ public class MongoDbService
         _users = _database.GetCollection<User>("Users");
         _auditLogs = _database.GetCollection<AuditLog>("AuditLogs");
         _emailCodes = _database.GetCollection<EmailCode>("EmailCodes");
+        _sessions = _database.GetCollection<Session>("Sessions");
+        _auditChainHeads = _database.GetCollection<AuditChainHead>("AuditChainHeads");
 
         EnsureIndexes();
 
@@ -76,6 +80,49 @@ public class MongoDbService
         {
             Console.WriteLine($"[Mongo] 验证码索引创建失败（不影响主流程）: {ex.Message}");
         }
+
+        try
+        {
+            // 会话票据：ticket 唯一，且必须能按票据快速查（每次请求都要校验）
+            var ticketKeys = Builders<Session>.IndexKeys.Ascending(s => s.Ticket);
+            _sessions.Indexes.CreateOne(new CreateIndexModel<Session>(
+                ticketKeys, new CreateIndexOptions { Unique = true, Name = "uniq_ticket" }));
+
+            // 过期票据自动清理：与 EmailCodes 同样的 TTL 手法，无需定时任务
+            var ttlKeys = Builders<Session>.IndexKeys.Ascending(s => s.ExpiresAt);
+            _sessions.Indexes.CreateOne(new CreateIndexModel<Session>(
+                ttlKeys, new CreateIndexOptions { ExpireAfter = TimeSpan.Zero, Name = "ttl_session_expires" }));
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[Mongo] 会话索引创建失败（不影响主流程）: {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// 取出某个审计分片的集合句柄。
+    /// 分片名由 AuditService 决定（AuditLogs_yyyyMM 或按条数滚动），
+    /// 集合不存在时 MongoDB 会在首次写入时自动创建。
+    /// </summary>
+    public IMongoCollection<AuditLog> GetAuditShard(string shard) =>
+        _database.GetCollection<AuditLog>(shard);
+
+    /// <summary>
+    /// 列举所有审计分片名：以 AuditLogs 开头，但排除链尾锚点等非分片集合。
+    /// 含改造前的 AuditLogs 主集合（它作为"历史分片"继续可查、可展示）。
+    /// </summary>
+    public async Task<List<string>> ListAuditShardNamesAsync()
+    {
+        var names = new List<string>();
+        using var cursor = await _database.ListCollectionNamesAsync();
+        var all = await cursor.ToListAsync();
+        foreach (var n in all)
+        {
+            if (n.StartsWith("AuditLogs", StringComparison.Ordinal))
+                names.Add(n);
+        }
+        names.Sort(StringComparer.Ordinal);
+        return names;
     }
 
     private void SeedAdmin()
@@ -98,4 +145,6 @@ public class MongoDbService
     public IMongoCollection<User> Users => _users;
     public IMongoCollection<AuditLog> AuditLogs => _auditLogs;
     public IMongoCollection<EmailCode> EmailCodes => _emailCodes;
+    public IMongoCollection<Session> Sessions => _sessions;
+    public IMongoCollection<AuditChainHead> AuditChainHeads => _auditChainHeads;
 }

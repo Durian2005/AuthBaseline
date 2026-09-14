@@ -14,14 +14,19 @@ public class AuthController : ControllerBase
     private readonly MongoDbService _db;
     private readonly VerificationService _codes;
     private readonly EmailOptions _emailOptions;
+    private readonly AuditService _audit;
+    private readonly SessionService _sessions;
     private const int MaxFailedAttempts = 3;
     private static readonly TimeSpan LockoutDuration = TimeSpan.FromMinutes(3);
 
-    public AuthController(MongoDbService db, VerificationService codes, EmailOptions emailOptions)
+    public AuthController(MongoDbService db, VerificationService codes, EmailOptions emailOptions,
+        AuditService audit, SessionService sessions)
     {
         _db = db;
         _codes = codes;
         _emailOptions = emailOptions;
+        _audit = audit;
+        _sessions = sessions;
     }
 
     // 密码复杂度校验：至少8位，包含大小写字母和数字
@@ -54,15 +59,6 @@ public class AuthController : ControllerBase
         IsAdmin = u.IsAdmin
     };
 
-    /** 管理员身份校验：仅当账号存在且 IsAdmin 为真时放行 */
-    private async Task<User?> GetAdminAsync(string adminUsername)
-    {
-        var found = await _db.Users
-            .Find(u => u.Username == Norm(adminUsername) && u.IsAdmin)
-            .FirstOrDefaultAsync();
-        return found is null ? null : found;
-    }
-
     /**
      * 写入审计日志。
      *
@@ -73,41 +69,122 @@ public class AuthController : ControllerBase
      *   - target 记录被操作对象（注册/审核/解锁/注销/转让），便于按用户检索。
      *   - 任何分支（含越权、参数校验失败、目标不存在）都要落日志，
      *     否则"失败的操作"会在审计中凭空消失，形成盲区。
+     *   - reasonCode 说明"为什么失败"，让越权尝试与口令错误可被分开检索。
+     *   - 来源信息（IP / UA）由本方法自动补齐，调用方不必关心。
+     *
+     * 实际写入委托给 AuditService：由它串行化计算哈希链并选择分片集合，
+     * 从而保证并发写入不破坏链的完整性。
      */
-    private async Task WriteAuditLogAsync(string operatorId, string operatorName, string action,
+    private Task WriteAuditLogAsync(string operatorId, string operatorName, string action,
         string statusBefore, object request, object response, string statusAfter,
-        string target = "", string result = AuditResult.Success)
+        string target = "", string result = AuditResult.Success, string reasonCode = "",
+        string actorType = "")
     {
-        try
+        return _audit.WriteAsync(new AuditEntry
         {
-            await _db.AuditLogs.InsertOneAsync(new AuditLog
-            {
-                OperatorId = operatorId,
-                OperatorName = operatorName,
-                Action = action,
-                StatusBefore = statusBefore,
-                Request = JsonSerializer.Serialize(request),
-                Response = JsonSerializer.Serialize(response),
-                StatusAfter = statusAfter,
-                Result = result,
-                Target = target,
-                Timestamp = DateTime.UtcNow
-            });
-        }
-        catch (Exception ex)
-        {
-            Console.WriteLine($"[AuditLog] 写入失败（不影响主流程）: {ex.Message}");
-        }
+            OperatorId = operatorId,
+            OperatorName = operatorName,
+            Action = action,
+            StatusBefore = statusBefore,
+            Request = request,
+            Response = response,
+            StatusAfter = statusAfter,
+            Target = target,
+            Result = result,
+            ReasonCode = reasonCode,
+            ActorType = actorType,
+            SourceIp = ClientIp(),
+            SourceUserAgent = Request.Headers.UserAgent.ToString()
+        });
     }
 
-    /** 管理员权限不足：统一返回 401，并留下"失败"审计记录 */
-    private async Task<IActionResult> AdminDeniedAsync(string adminUsername, string action,
-        object request, string target = "")
+    /** 取调用方 IP。桌面端与浏览器都经本机回环，因此优先读 X-Forwarded-For（若有代理）。 */
+    private string ClientIp()
     {
-        var resp = new ApiResponse { Success = false, Code = "UNAUTHORIZED", Message = "无管理员权限" };
-        await WriteAuditLogAsync("anonymous", Norm(adminUsername), action, "N/A", request, resp, "N/A",
-            target, AuditResult.Failed);
-        return Unauthorized(resp);
+        var forwarded = Request.Headers["X-Forwarded-For"].ToString();
+        if (!string.IsNullOrWhiteSpace(forwarded))
+            return forwarded.Split(',')[0].Trim();
+        return HttpContext.Connection.RemoteIpAddress?.ToString() ?? "unknown";
+    }
+
+    /* ==================== 会话票据鉴权 ==================== */
+
+    /** 从 Authorization: Bearer <ticket> 中取出票据。 */
+    private string? ReadTicket()
+    {
+        var raw = Request.Headers.Authorization.ToString();
+        if (string.IsNullOrWhiteSpace(raw)) return null;
+        const string prefix = "Bearer ";
+        return raw.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)
+            ? raw[prefix.Length..].Trim()
+            : null;
+    }
+
+    /**
+     * 管理员接口的统一入口守卫。
+     *
+     * 与改造前的本质区别：
+     *   改造前 = 读请求里的 adminUsername 字符串，客户端说什么就是什么；
+     *   改造后 = 校验服务端签发的票据，并**实时查库**确认该账号当前仍是管理员。
+     *
+     * 鉴权失败时**本身也要留下审计记录** —— 这是实验二「02 看不到」的关键证据：
+     * 光有拒绝响应不够，必须证明系统把这次越权尝试也记下来了。
+     */
+    private async Task<(User? Admin, IActionResult? Deny)> RequireAdminAsync(string action, string target = "")
+    {
+        var ticket = ReadTicket();
+        var auth = await _sessions.ValidateAsync(ticket, requireAdmin: true);
+
+        if (!auth.Success)
+        {
+            var resp = new ApiResponse
+            {
+                Success = false,
+                Code = auth.ReasonCode,
+                Message = auth.Message
+            };
+            var statusBefore = auth.User?.Status.ToString() ?? "N/A";
+            await WriteAuditLogAsync(
+                auth.User?.Id ?? "anonymous",
+                auth.User?.Username ?? "anonymous",
+                action, statusBefore,
+                new { AttemptedTarget = target, Reason = auth.ReasonCode },
+                resp, statusBefore, target, AuditResult.Failed, auth.ReasonCode);
+            return (null, StatusCode(auth.HttpStatus, resp));
+        }
+
+        return (auth.User, null);
+    }
+
+    /* ==================== 登出 ==================== */
+
+    /**
+     * 主动登出：吊销当前票据。
+     *
+     * 有了服务端会话，登出才真正"登出"——
+     * 改造前前端清掉本地状态即可，令牌本身仍有效；现在服务端一吊销，票据立刻作废。
+     */
+    [HttpPost("logout")]
+    public async Task<IActionResult> Logout()
+    {
+        var ticket = ReadTicket();
+        var auth = await _sessions.ValidateAsync(ticket, requireAdmin: false);
+
+        if (!auth.Success)
+        {
+            // 登出失败不值得打断用户，但仍留痕
+            var quiet = new ApiResponse { Success = false, Code = auth.ReasonCode, Message = auth.Message };
+            await WriteAuditLogAsync("anonymous", "anonymous", AuditAction.Logout, "N/A",
+                new { Reason = auth.ReasonCode }, quiet, "N/A", "", AuditResult.Failed, auth.ReasonCode);
+            return StatusCode(auth.HttpStatus, quiet);
+        }
+
+        await _sessions.RevokeAsync(ticket!, "用户主动登出");
+        var resp = new ApiResponse { Success = true, Code = "OK", Message = "已安全退出" };
+        await WriteAuditLogAsync(auth.User!.Id, auth.User.Username, AuditAction.Logout,
+            auth.User.Status.ToString(), new { }, resp, auth.User.Status.ToString(),
+            auth.User.Username, AuditResult.Success);
+        return Ok(resp);
     }
 
     /* ==================== 注册（绑定邮箱） ==================== */
@@ -620,6 +697,10 @@ public class AuthController : ControllerBase
             await _db.Users.ReplaceOneAsync(u => u.Id == user.Id, user);
         }
 
+        // 登录成功 → 签发服务端会话票据。
+        // 票据是后续所有管理员接口的凭证，也是"普通用户无权查看审计日志"能成立的前提。
+        var session = await _sessions.IssueAsync(user);
+
         var successResp = new ApiResponse<LoginResult>
         {
             Success = true,
@@ -629,11 +710,15 @@ public class AuthController : ControllerBase
             {
                 Username = user.Username,
                 Status = user.Status.ToString(),
-                IsAdmin = user.IsAdmin
+                IsAdmin = user.IsAdmin,
+                Ticket = session.Ticket,
+                ExpiresAt = session.ExpiresAt
             }
         };
-        await WriteAuditLogAsync(user.Id, user.Username, AuditAction.LoginSuccess, statusBefore, requestLog, successResp, user.Status.ToString(),
-            sanitizedUsername, AuditResult.Success);
+        // 审计里绝不记录票据本体，只记"已签发"这一事实
+        await WriteAuditLogAsync(user.Id, user.Username, AuditAction.LoginSuccess, statusBefore, requestLog,
+            new { user.Username, user.Status, user.IsAdmin, TicketIssued = true },
+            user.Status.ToString(), sanitizedUsername, AuditResult.Success);
         return Ok(successResp);
     }
 
@@ -642,15 +727,16 @@ public class AuthController : ControllerBase
     [HttpPost("approve")]
     public async Task<IActionResult> Approve([FromBody] ApproveRequest req)
     {
-        var admin = await GetAdminAsync(req.AdminUsername);
-        if (admin == null) return await AdminDeniedAsync(req.AdminUsername, AuditAction.Approve, new { req.AdminUsername, req.Username }, Norm(req.Username));
+        var (admin, deny) = await RequireAdminAsync(AuditAction.Approve, Norm(req.Username));
+        if (deny != null) return deny;
+        var requestLog = new { req.Username };
 
         var user = await _db.Users.Find(u => u.Username == Norm(req.Username)).FirstOrDefaultAsync();
         if (user == null)
         {
             var missing = new ApiResponse { Success = false, Code = "NOT_FOUND", Message = "用户不存在" };
-            await WriteAuditLogAsync(admin.Id, admin.Username, AuditAction.Approve, "N/A", new { req.AdminUsername, req.Username }, missing, "N/A",
-                Norm(req.Username), AuditResult.Failed);
+            await WriteAuditLogAsync(admin!.Id, admin.Username, AuditAction.Approve, "N/A", requestLog, missing, "N/A",
+                Norm(req.Username), AuditResult.Failed, AuditReason.NotFound);
             return NotFound(missing);
         }
 
@@ -658,8 +744,8 @@ public class AuthController : ControllerBase
         if (user.Status != UserStatus.Pending)
         {
             var resp = new ApiResponse { Success = false, Code = "NOT_PENDING", Message = "该用户不处于待审核状态" };
-            await WriteAuditLogAsync(admin.Id, admin.Username, AuditAction.Approve, statusBefore, new { req.AdminUsername, req.Username }, resp, user.Status.ToString(),
-                user.Username, AuditResult.Failed);
+            await WriteAuditLogAsync(admin!.Id, admin.Username, AuditAction.Approve, statusBefore, requestLog, resp, user.Status.ToString(),
+                user.Username, AuditResult.Failed, AuditReason.NotPending);
             return BadRequest(resp);
         }
 
@@ -673,7 +759,7 @@ public class AuthController : ControllerBase
             Message = "审核通过",
             Data = ToUserResponse(user)
         };
-        await WriteAuditLogAsync(admin.Id, admin.Username, AuditAction.Approve, statusBefore, new { req.AdminUsername, req.Username }, response, user.Status.ToString(),
+        await WriteAuditLogAsync(admin!.Id, admin.Username, AuditAction.Approve, statusBefore, requestLog, response, user.Status.ToString(),
             user.Username, AuditResult.Success);
         return Ok(response);
     }
@@ -683,15 +769,16 @@ public class AuthController : ControllerBase
     [HttpPost("unlock")]
     public async Task<IActionResult> Unlock([FromBody] UnlockRequest req)
     {
-        var admin = await GetAdminAsync(req.AdminUsername);
-        if (admin == null) return await AdminDeniedAsync(req.AdminUsername, AuditAction.Unlock, new { req.AdminUsername, req.Username }, Norm(req.Username));
+        var (admin, deny) = await RequireAdminAsync(AuditAction.Unlock, Norm(req.Username));
+        if (deny != null) return deny;
+        var requestLog = new { req.Username };
 
         var user = await _db.Users.Find(u => u.Username == Norm(req.Username)).FirstOrDefaultAsync();
         if (user == null)
         {
             var missing = new ApiResponse { Success = false, Code = "NOT_FOUND", Message = "用户不存在" };
-            await WriteAuditLogAsync(admin.Id, admin.Username, AuditAction.Unlock, "N/A", new { req.AdminUsername, req.Username }, missing, "N/A",
-                Norm(req.Username), AuditResult.Failed);
+            await WriteAuditLogAsync(admin!.Id, admin.Username, AuditAction.Unlock, "N/A", requestLog, missing, "N/A",
+                Norm(req.Username), AuditResult.Failed, AuditReason.NotFound);
             return NotFound(missing);
         }
 
@@ -699,8 +786,8 @@ public class AuthController : ControllerBase
         if (user.Status != UserStatus.Locked)
         {
             var resp = new ApiResponse { Success = false, Code = "NOT_LOCKED", Message = "该用户未被锁定" };
-            await WriteAuditLogAsync(admin.Id, admin.Username, AuditAction.Unlock, statusBefore, new { req.AdminUsername, req.Username }, resp, user.Status.ToString(),
-                user.Username, AuditResult.Failed);
+            await WriteAuditLogAsync(admin!.Id, admin.Username, AuditAction.Unlock, statusBefore, requestLog, resp, user.Status.ToString(),
+                user.Username, AuditResult.Failed, AuditReason.NotLocked);
             return BadRequest(resp);
         }
 
@@ -716,7 +803,7 @@ public class AuthController : ControllerBase
             Message = "账号已解锁",
             Data = ToUserResponse(user)
         };
-        await WriteAuditLogAsync(admin.Id, admin.Username, AuditAction.Unlock, statusBefore, new { req.AdminUsername, req.Username }, response, user.Status.ToString(),
+        await WriteAuditLogAsync(admin!.Id, admin.Username, AuditAction.Unlock, statusBefore, requestLog, response, user.Status.ToString(),
             user.Username, AuditResult.Success);
         return Ok(response);
     }
@@ -726,16 +813,17 @@ public class AuthController : ControllerBase
     [HttpPost("delete-user")]
     public async Task<IActionResult> DeleteUser([FromBody] DeleteUserRequest req)
     {
-        var admin = await GetAdminAsync(req.AdminUsername);
-        if (admin == null) return await AdminDeniedAsync(req.AdminUsername, AuditAction.DeleteUser, new { req.AdminUsername, req.Username }, Norm(req.Username));
+        var (admin, deny) = await RequireAdminAsync(AuditAction.DeleteUser, Norm(req.Username));
+        if (deny != null) return deny;
+        var requestLog = new { req.Username };
 
         var username = Norm(req.Username);
         var user = await _db.Users.Find(u => u.Username == username).FirstOrDefaultAsync();
         if (user == null)
         {
             var missing = new ApiResponse { Success = false, Code = "NOT_FOUND", Message = "用户不存在" };
-            await WriteAuditLogAsync(admin.Id, admin.Username, AuditAction.DeleteUser, "N/A", new { req.AdminUsername, req.Username }, missing, "N/A",
-                username, AuditResult.Failed);
+            await WriteAuditLogAsync(admin!.Id, admin.Username, AuditAction.DeleteUser, "N/A", requestLog, missing, "N/A",
+                username, AuditResult.Failed, AuditReason.NotFound);
             return NotFound(missing);
         }
 
@@ -745,12 +833,16 @@ public class AuthController : ControllerBase
         if (user.IsAdmin)
         {
             var denied = new ApiResponse { Success = false, Code = "CANNOT_DELETE_ADMIN", Message = "不能注销管理员账号" };
-            await WriteAuditLogAsync(admin.Id, admin.Username, AuditAction.DeleteUser, statusBefore, new { req.AdminUsername, req.Username }, denied, statusBefore,
-                user.Username, AuditResult.Failed);
+            await WriteAuditLogAsync(admin!.Id, admin.Username, AuditAction.DeleteUser, statusBefore, requestLog, denied, statusBefore,
+                user.Username, AuditResult.Failed, AuditReason.NotAdmin);
             return BadRequest(denied);
         }
 
         await _db.Users.DeleteOneAsync(u => u.Id == user.Id);
+
+        // 账号已被注销，其名下所有票据必须立即失效 ——
+        // 否则被注销的人手里若还留着票据，仍能继续调用接口。
+        await _sessions.RevokeAllForUserAsync(user.Username, "账号被管理员注销");
 
         var response = new ApiResponse
         {
@@ -759,7 +851,7 @@ public class AuthController : ControllerBase
             Message = $"已注销用户「{user.Username}」",
             Data = new { Username = user.Username }
         };
-        await WriteAuditLogAsync(admin.Id, admin.Username, AuditAction.DeleteUser, statusBefore, new { req.AdminUsername, req.Username }, response, "Deleted",
+        await WriteAuditLogAsync(admin!.Id, admin.Username, AuditAction.DeleteUser, statusBefore, requestLog, response, "Deleted",
             user.Username, AuditResult.Success);
         return Ok(response);
     }
@@ -781,24 +873,25 @@ public class AuthController : ControllerBase
         const string action = AuditAction.TransferAdmin;
         var targetName = Norm(req.TargetUsername);
         // 口令不入日志
-        var requestLog = new { req.AdminUsername, req.TargetUsername };
+        var requestLog = new { req.TargetUsername };
 
         if (string.IsNullOrWhiteSpace(targetName) || string.IsNullOrWhiteSpace(req.Password))
         {
             var resp = new ApiResponse { Success = false, Code = "EMPTY_FIELDS", Message = "目标用户名与管理员口令不能为空" };
-            await WriteAuditLogAsync("anonymous", Norm(req.AdminUsername), action, "N/A", requestLog, resp, "N/A",
-                targetName, AuditResult.Failed);
+            await WriteAuditLogAsync("anonymous", "anonymous", action, "N/A", requestLog, resp, "N/A",
+                targetName, AuditResult.Failed, AuditReason.EmptyFields);
             return BadRequest(resp);
         }
 
-        var admin = await GetAdminAsync(req.AdminUsername);
-        if (admin == null) return await AdminDeniedAsync(req.AdminUsername, action, requestLog, targetName);
+        var (admin, deny) = await RequireAdminAsync(action, targetName);
+        if (deny != null) return deny;
 
-        if (!BCrypt.Net.BCrypt.Verify(req.Password, admin.PasswordHash))
+        // 二次口令校验：转让属于特权变更，仅凭会话不足以证明是本人操作
+        if (!BCrypt.Net.BCrypt.Verify(req.Password, admin!.PasswordHash))
         {
             var resp = new ApiResponse { Success = false, Code = "INVALID_CREDENTIALS", Message = "管理员口令校验失败，已拒绝转让" };
             await WriteAuditLogAsync(admin.Id, admin.Username, action, $"{admin.Username}·管理员", requestLog, resp, $"{admin.Username}·管理员",
-                targetName, AuditResult.Failed);
+                targetName, AuditResult.Failed, AuditReason.InvalidCredentials);
             return Unauthorized(resp);
         }
 
@@ -806,7 +899,7 @@ public class AuthController : ControllerBase
         {
             var resp = new ApiResponse { Success = false, Code = "CANNOT_TRANSFER_SELF", Message = "不能把权限转让给自己" };
             await WriteAuditLogAsync(admin.Id, admin.Username, action, $"{admin.Username}·管理员", requestLog, resp, $"{admin.Username}·管理员",
-                targetName, AuditResult.Failed);
+                targetName, AuditResult.Failed, AuditReason.NotAdmin);
             return BadRequest(resp);
         }
 
@@ -815,7 +908,7 @@ public class AuthController : ControllerBase
         {
             var resp = new ApiResponse { Success = false, Code = "NOT_FOUND", Message = "目标用户不存在" };
             await WriteAuditLogAsync(admin.Id, admin.Username, action, $"{admin.Username}·管理员", requestLog, resp, $"{admin.Username}·管理员",
-                targetName, AuditResult.Failed);
+                targetName, AuditResult.Failed, AuditReason.NotFound);
             return NotFound(resp);
         }
 
@@ -831,7 +924,7 @@ public class AuthController : ControllerBase
                 Message = $"目标账号当前状态为「{target.Status}」，只有已启用的账号才能接管管理员权限"
             };
             await WriteAuditLogAsync(admin.Id, admin.Username, action, statusBefore, requestLog, resp, statusBefore,
-                target.Username, AuditResult.Failed);
+                target.Username, AuditResult.Failed, AuditReason.AccountNotEnabled);
             return BadRequest(resp);
         }
 
@@ -839,7 +932,7 @@ public class AuthController : ControllerBase
         {
             var resp = new ApiResponse { Success = false, Code = "TARGET_ALREADY_ADMIN", Message = "该用户已经是管理员" };
             await WriteAuditLogAsync(admin.Id, admin.Username, action, statusBefore, requestLog, resp, statusBefore,
-                target.Username, AuditResult.Failed);
+                target.Username, AuditResult.Failed, AuditReason.NotAdmin);
             return BadRequest(resp);
         }
 
@@ -850,12 +943,18 @@ public class AuthController : ControllerBase
         admin.IsAdmin = false;
         await _db.Users.ReplaceOneAsync(u => u.Id == admin.Id, admin);
 
+        // 权限变更后立刻吊销双方既有票据：
+        // 原管理员的票据可能仍带着管理员快照，受让方也需要用新身份重新登录，
+        // 否则会出现"权限已转出但旧会话还能操作"的授权残留。
+        await _sessions.RevokeAllForUserAsync(admin.Username, "管理员权限已转出，需重新登录");
+        await _sessions.RevokeAllForUserAsync(target.Username, "已获得管理员权限，需重新登录以生效");
+
         var response = new ApiResponse
         {
             Success = true,
             Code = "OK",
-            Message = $"已将管理员权限转让给「{target.Username}」，您已变为普通用户",
-            Data = new { Username = target.Username, PreviousAdmin = admin.Username }
+            Message = $"已将管理员权限转让给「{target.Username}」，您已变为普通用户，请重新登录",
+            Data = new { Username = target.Username, PreviousAdmin = admin.Username, ReLoginRequired = true }
         };
         await WriteAuditLogAsync(admin.Id, admin.Username, action, $"{admin.Username}·管理员", requestLog, response, $"{target.Username}·管理员",
             target.Username, AuditResult.Success);
@@ -928,14 +1027,18 @@ public class AuthController : ControllerBase
 
     /* ==================== 查询 ==================== */
 
+    /**
+     * 用户列表。
+     *
+     * 改造前：靠 `?adminUsername=xxx` 判断身份 —— 客户端在 URL 里声明自己是管理员即可通过。
+     * 改造后：必须持有服务端签发的有效票据，且该账号**当前**仍是管理员。
+     * 鉴权失败会写入一条 AUDIT_ACCESS_DENIED 事件，使越权尝试可追溯。
+     */
     [HttpGet("users")]
-    public async Task<IActionResult> GetUsers([FromQuery] string adminUsername)
+    public async Task<IActionResult> GetUsers()
     {
-        var admin = await _db.Users.Find(u => u.Username == Norm(adminUsername) && u.IsAdmin).FirstOrDefaultAsync();
-        if (admin == null)
-        {
-            return Unauthorized(new ApiResponse { Success = false, Code = "UNAUTHORIZED", Message = "无管理员权限" });
-        }
+        var (admin, deny) = await RequireAdminAsync(AuditAction.AuditAccessDenied, "users");
+        if (deny != null) return deny;
 
         var users = await _db.Users.Find(_ => true).ToListAsync();
         return Ok(new ApiResponse<List<UserResponse>>
@@ -946,21 +1049,34 @@ public class AuthController : ControllerBase
         });
     }
 
+    /**
+     * 审计日志查询（兼容旧路径）。
+     *
+     * 旧版是 `Limit(200)` 硬编码 —— 写多少都只看得到最近 200 条，"撑得住"无从谈起。
+     * 现在改为分页 + 跨分片，完整实现见 AuditController.Query。
+     * 此路径保留以兼容既有前端，内部转调同一套分页逻辑。
+     */
     [HttpGet("logs")]
-    public async Task<IActionResult> GetLogs([FromQuery] string adminUsername)
+    public async Task<IActionResult> GetLogs([FromQuery] string? shard,
+        [FromQuery] string? keyword, [FromQuery] string? action, [FromQuery] string? result,
+        [FromQuery] int page = 1, [FromQuery] int pageSize = 50,
+        [FromQuery] bool includeArchived = true)
     {
-        var admin = await _db.Users.Find(u => u.Username == Norm(adminUsername) && u.IsAdmin).FirstOrDefaultAsync();
-        if (admin == null)
-        {
-            return Unauthorized(new ApiResponse { Success = false, Code = "UNAUTHORIZED", Message = "无管理员权限" });
-        }
+        var (admin, deny) = await RequireAdminAsync(AuditAction.AuditQuery, "logs");
+        if (deny != null) return deny;
 
-        var logs = await _db.AuditLogs.Find(_ => true).SortByDescending(l => l.Timestamp).Limit(200).ToListAsync();
-        return Ok(new ApiResponse<List<AuditLog>>
+        var (items, total) = await _audit.QueryAsync(shard, keyword, action, result, page, pageSize, includeArchived);
+
+        await WriteAuditLogAsync(admin!.Id, admin.Username, AuditAction.AuditQuery, "N/A",
+            new { shard, keyword, action, result, page, pageSize },
+            new { Returned = items.Count, Total = total },
+            "N/A", "logs", AuditResult.Success);
+
+        return Ok(new ApiResponse<object>
         {
             Success = true,
             Code = "OK",
-            Data = logs
+            Data = new { Items = items, Total = total, Page = page, PageSize = pageSize }
         });
     }
 }
