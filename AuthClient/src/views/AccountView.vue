@@ -87,7 +87,7 @@ async function submit() {
               v-model="form.old"
               label="当前密码"
               placeholder="请输入当前使用的密码"
-              autocomplete="current-password"
+              autocomplete="off"
               :invalid="touched && !!errors.old"
               :error="touched ? errors.old : ''"
               autofocus

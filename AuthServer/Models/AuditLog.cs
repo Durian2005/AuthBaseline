@@ -66,4 +66,8 @@ public static class AuditAction
     public const string DeleteUser = "DELETE_USER";
     public const string ChangePassword = "CHANGE_PASSWORD";
     public const string TransferAdmin = "TRANSFER_ADMIN";
+
+    // ---- 邮箱验证码相关 ----
+    public const string SendEmailCode = "SEND_EMAIL_CODE";
+    public const string ResetPassword = "RESET_PASSWORD";
 }

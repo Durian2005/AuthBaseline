@@ -143,8 +143,20 @@ export async function probe() {
 }
 
 export const api = {
-  register: (username, password) =>
-    request('/auth/register', { method: 'POST', body: { username, password } }),
+  /** 注册：邮箱验证通过后才真正建号（email/code 在老流程下可为空串） */
+  register: (username, password, email, code) =>
+    request('/auth/register', { method: 'POST', body: { username, password, email, code } }),
+
+  /** 发送邮箱验证码。purpose 取 'REGISTER' | 'RESET'，用途严格隔离 */
+  sendEmailCode: (purpose, username, email) =>
+    request('/auth/send-email-code', { method: 'POST', body: { purpose, username, email } }),
+
+  /** 忘记密码：用户名 + 邮箱 + 验证码 → 直接设置新密码（不建立任何会话） */
+  resetPassword: (username, email, code, newPassword) =>
+    request('/auth/reset-password', {
+      method: 'POST',
+      body: { username, email, code, newPassword }
+    }),
 
   login: (username, password) =>
     request('/auth/login', { method: 'POST', body: { username, password } }),

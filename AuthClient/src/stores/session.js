@@ -33,6 +33,8 @@ export const useSessionStore = defineStore('session', () => {
   const logs = ref([])
 
   const submitting = ref(false)
+  /** 验证码发送中的独立状态：不能与 submitting 混用，否则点"获取验证码"会连带锁住提交按钮 */
+  const sendingCode = ref(false)
   const loadingUsers = ref(false)
   const loadingLogs = ref(false)
 
@@ -102,14 +104,49 @@ export const useSessionStore = defineStore('session', () => {
   }
 
   // ---------------- actions ----------------
-  async function register(username, password) {
+  async function register(username, password, email, code) {
     submitting.value = true
     try {
-      const res = await api.register(username, password)
+      const res = await api.register(username, password, email, code)
       markOnline()
       return res
     } catch (err) {
       throw fail(err, '注册失败')
+    } finally {
+      submitting.value = false
+    }
+  }
+
+  /**
+   * 发送邮箱验证码。
+   * purpose: 'REGISTER'（注册绑定邮箱）| 'RESET'（忘记密码）
+   * 成功时返回后端给的 maskedEmail / expiresIn / resendAfter，界面据此显示倒计时。
+   */
+  async function sendEmailCode(purpose, username, email) {
+    sendingCode.value = true
+    try {
+      const res = await api.sendEmailCode(purpose, username, email)
+      markOnline()
+      return res
+    } catch (err) {
+      throw fail(err, '验证码发送失败')
+    } finally {
+      sendingCode.value = false
+    }
+  }
+
+  /**
+   * 忘记密码：用户名 + 邮箱 + 验证码 → 直接设置新密码。
+   * 刻意不建立任何本地会话 —— 重置成功后必须用新口令重新登录。
+   */
+  async function resetPassword(username, email, code, newPassword) {
+    submitting.value = true
+    try {
+      const res = await api.resetPassword(username, email, code, newPassword)
+      markOnline()
+      return res
+    } catch (err) {
+      throw fail(err, '重置密码失败')
     } finally {
       submitting.value = false
     }
@@ -289,6 +326,7 @@ export const useSessionStore = defineStore('session', () => {
     users,
     logs,
     submitting,
+    sendingCode,
     loadingUsers,
     loadingLogs,
     connection,
@@ -306,6 +344,8 @@ export const useSessionStore = defineStore('session', () => {
     stats,
     // actions
     register,
+    sendEmailCode,
+    resetPassword,
     login,
     logout,
     changePassword,

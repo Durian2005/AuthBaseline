@@ -274,10 +274,11 @@ onMounted(() => {
         <table class="table table--dense">
           <thead>
             <tr>
-              <th style="width: 26%">用户名</th>
-              <th style="width: 110px">状态</th>
-              <th style="width: 90px">失败次数</th>
-              <th style="width: 170px">锁定截止</th>
+              <th style="width: 22%">用户名</th>
+              <th style="width: 160px">邮箱</th>
+              <th style="width: 100px">状态</th>
+              <th style="width: 84px">失败次数</th>
+              <th style="width: 160px">锁定截止</th>
               <th>注册时间</th>
               <th style="width: 230px">操作</th>
             </tr>
@@ -289,6 +290,20 @@ onMounted(() => {
                   <span class="selectable">{{ u.username }}</span>
                   <span v-if="u.isAdmin" class="tag">管理员</span>
                 </div>
+              </td>
+              <!-- 后端只返回脱敏邮箱：管理员能看到"绑没绑、验没验"，但拿不到完整地址 -->
+              <td class="table__mono">
+                <template v-if="u.email">
+                  <span :title="u.emailVerified ? '邮箱已验证' : '邮箱未验证'">{{ u.email }}</span>
+                  <AppIcon
+                    v-if="u.emailVerified"
+                    name="check-circle"
+                    :size="12"
+                    class="mail-ok"
+                    aria-label="邮箱已验证"
+                  />
+                </template>
+                <span v-else class="muted">未绑定</span>
               </td>
               <td><StatusBadge :status="u.status" /></td>
               <td class="num">{{ u.failedLoginAttempts }}</td>
@@ -337,7 +352,7 @@ onMounted(() => {
             </tr>
 
             <tr v-if="!filteredUsers.length">
-              <td colspan="6">
+              <td colspan="7">
                 <div class="empty">
                   <AppIcon name="search" :size="22" />
                   <p class="empty__title">没有匹配的用户</p>
@@ -513,6 +528,13 @@ onMounted(() => {
 .num {
   font-variant-numeric: tabular-nums;
   font-weight: 600;
+}
+
+/* 邮箱已验证标记：颜色弱化，只作为可信状态的辅助提示 */
+.mail-ok {
+  margin-left: var(--sp-1);
+  vertical-align: -1px;
+  color: var(--st-enabled-fg, var(--c-primary));
 }
 
 .count {
