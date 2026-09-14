@@ -12,7 +12,7 @@
   "app": {
     "windows": [
       {
-        "title": "口令认证基线系统",
+        "title": "基线系统",
         "label": "main",
         "width": 1280,
         "height": 820,

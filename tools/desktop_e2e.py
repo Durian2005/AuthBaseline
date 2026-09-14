@@ -35,7 +35,7 @@ from pathlib import Path
 APP_DIR = Path(os.environ.get(
     "E2E_APPDIR", r"<用户目录>\AppData\Local\AuthBaseline"))
 EXE = APP_DIR / "auth-baseline-desktop.exe"
-TITLE_KEY = "口令认证基线系统"
+TITLE_KEY = "基线系统"
 # 与 tauri.conf.json 保持一致，保证未重装的旧包也能正常渲染
 BROWSER_ARGS = ("--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection "
                 "--single-process --disable-gpu")

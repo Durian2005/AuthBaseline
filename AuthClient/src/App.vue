@@ -109,7 +109,7 @@ onBeforeUnmount(() => {
 
 <template>
   <div class="app">
-    <TitleBar title="口令认证基线系统" @toggle-theme="toggleTheme">
+    <TitleBar title="基线系统" @toggle-theme="toggleTheme">
       <template #center>
         <span v-if="session.isLocked && session.lockRemaining > 0" class="lockchip">
           <AppIcon name="lock" :size="12" :stroke-width="2" />

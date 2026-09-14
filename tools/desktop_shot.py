@@ -28,7 +28,7 @@ from pathlib import Path
 APP_DIR = Path(os.environ.get(
     "E2E_APPDIR", r"<用户目录>\AppData\Local\AuthBaseline"))
 EXE = APP_DIR / "auth-baseline-desktop.exe"
-TITLE_KEY = "口令认证基线系统"
+TITLE_KEY = "基线系统"
 
 user32 = ctypes.windll.user32
 gdi32 = ctypes.windll.gdi32
@@ -227,6 +227,13 @@ def main():
 
     # 再等一会儿让 Vue 完成首屏渲染
     time.sleep(settle)
+
+    # 先清掉可能残留的鼠标按下状态，并把光标挪开。
+    # 否则上一轮遗留的鼠标位置/按键状态会让新窗口一出现就被"点到"，
+    # 截图里就会出现意料之外的标签页或按钮状态。
+    user32.mouse_event(0x0004, 0, 0, 0, 0)   # LEFTUP，清掉卡住的按下状态
+    user32.SetCursorPos(20, 400)
+    time.sleep(0.4)
 
     ok = capture(hwnd, out)
 
