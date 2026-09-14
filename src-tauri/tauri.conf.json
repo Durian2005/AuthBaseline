@@ -42,7 +42,8 @@
     "externalBin": ["binaries/authserver"],
     "resources": {
       "../AuthClient/dist": "wwwroot",
-      "../AuthServer/appsettings.json": "appsettings.json"
+      "../AuthServer/appsettings.json": "appsettings.json",
+      "../AuthServer/appsettings.Local.json": "appsettings.Local.json"
     },
     "icon": [
       "icons/32x32.png",
