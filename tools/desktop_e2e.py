@@ -212,9 +212,17 @@ def type_text(text):
 
 
 def press(key):
-    user32.keybd_event(key, 0, 0, 0)
+    """发送一次按键。
+
+    方向键 / PageUp / PageDown / Home / End 属于**扩展键**，
+    keybd_event 必须带上 KEYEVENTF_EXTENDEDKEY，否则 WebView2 侧收不到，
+    表现为"按了 PageDown 页面纹丝不动"。
+    """
+    EXTENDED = {0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28, 0x2D, 0x2E}
+    ext = 0x0001 if key in EXTENDED else 0
+    user32.keybd_event(key, 0, ext, 0)
     time.sleep(0.04)
-    user32.keybd_event(key, 0, 2, 0)
+    user32.keybd_event(key, 0, ext | 0x0002, 0)
     time.sleep(0.06)
 
 
@@ -308,6 +316,36 @@ def main():
                 rx, ry = step.split(":", 1)[1].split("x")
                 real_click(hwnd, float(rx), float(ry))
                 print(f"点击 ({rx},{ry})")
+            elif step.startswith("key:"):
+                # 发送单个按键：key:esc / key:enter / key:tab / key:space
+                # Esc 用于关闭模态子窗口（AppWindow 监听 document 的 Escape）
+                name = step.split(":", 1)[1].strip().lower()
+                vk = {"esc": 0x1B, "enter": 0x0D, "tab": 0x09, "space": 0x20,
+                      "pgdn": 0x22, "pgup": 0x21, "end": 0x23, "home": 0x24}.get(name)
+                if vk is None:
+                    print(f"未知按键: {name}")
+                else:
+                    press(vk)
+                    print(f"按键 {name}")
+            elif step.startswith("wheel:"):
+                # 滚轮：wheel:-6 向下滚 6 格，wheel:6 向上。
+                # 审计页表格很长，分页控件在最底部，必须先把光标移到页面中间
+                # 再滚，否则滚轮会打在别的窗口上。
+                n = int(step.split(":", 1)[1])
+                rect = wintypes.RECT()
+                user32.GetWindowRect(hwnd, ctypes.byref(rect))
+                user32.SetCursorPos((rect.left + rect.right) // 2,
+                                    (rect.top + rect.bottom) // 2)
+                time.sleep(0.3)
+                user32.mouse_event.argtypes = [
+                    ctypes.c_uint, ctypes.c_uint, ctypes.c_uint,
+                    ctypes.c_uint, ctypes.c_void_p
+                ]
+                step_delta = 0xFFFFFF88 if n < 0 else 120   # -120 的无符号写法
+                for _ in range(abs(n)):
+                    user32.mouse_event(0x0800, 0, 0, step_delta, 0)
+                    time.sleep(0.12)
+                print(f"滚轮 {n}")
             elif step.startswith("shot:"):
                 name = step.split(":", 1)[1]
                 capture(hwnd, Path("tools") / name)

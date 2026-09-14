@@ -49,6 +49,11 @@ public class AuditController : ControllerBase
      * 越权访问（无票据 / 票据无效 / 非管理员）**都会写入一条拒绝事件**，
      * 这是"普通用户查询审计日志必须被拒绝"这件事能被证明的关键：
      * 光返回 403 不够，必须同时留下"谁在什么时候试图看过审计数据"的记录。
+     *
+     * action 一律传 AuditAction.AuditAccessDenied —— 这里记录的是"访问被拒"这件事本身，
+     * 而不是用户当时想做的那类操作。若传 AuditQuery / AuditVerify 之类，
+     * 拒绝事件就和正常查询混在同一个 action 下，只能靠 result=Failed 间接区分，
+     * 验收时没法一条查询列出全部越权尝试。
      */
     private async Task<(User? Admin, IActionResult? Deny)> RequireAdminAsync(string action, string target)
     {
@@ -86,7 +91,7 @@ public class AuditController : ControllerBase
     [HttpGet("verify")]
     public async Task<IActionResult> Verify()
     {
-        var (admin, deny) = await RequireAdminAsync(AuditAction.AuditVerify, "audit/verify");
+        var (admin, deny) = await RequireAdminAsync(AuditAction.AuditAccessDenied, "audit/verify");
         if (deny != null) return deny;
 
         var result = await _audit.VerifyAsync();
@@ -141,7 +146,7 @@ public class AuditController : ControllerBase
     [HttpGet("shards")]
     public async Task<IActionResult> Shards()
     {
-        var (admin, deny) = await RequireAdminAsync(AuditAction.AuditQuery, "audit/shards");
+        var (admin, deny) = await RequireAdminAsync(AuditAction.AuditAccessDenied, "audit/shards");
         if (deny != null) return deny;
 
         var shards = await _audit.ListShardsAsync();
@@ -160,7 +165,7 @@ public class AuditController : ControllerBase
         [FromQuery] int page = 1, [FromQuery] int pageSize = 50,
         [FromQuery] bool includeArchived = true)
     {
-        var (admin, deny) = await RequireAdminAsync(AuditAction.AuditQuery, "audit/logs");
+        var (admin, deny) = await RequireAdminAsync(AuditAction.AuditAccessDenied, "audit/logs");
         if (deny != null) return deny;
 
         var (items, total) = await _audit.QueryAsync(shard, keyword, action, result, page, pageSize, includeArchived);
@@ -192,7 +197,7 @@ public class AuditController : ControllerBase
     [HttpGet("stats")]
     public async Task<IActionResult> Stats()
     {
-        var (admin, deny) = await RequireAdminAsync(AuditAction.AuditQuery, "audit/stats");
+        var (admin, deny) = await RequireAdminAsync(AuditAction.AuditAccessDenied, "audit/stats");
         if (deny != null) return deny;
 
         var (total, failed, tampered) = await _audit.StatsAsync();

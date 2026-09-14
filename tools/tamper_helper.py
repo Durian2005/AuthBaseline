@@ -98,6 +98,23 @@ def cmd_verify():
                 buf += c
             s.close()
             head, _, payload = buf.partition(b"\r\n\r\n")
+            # 后端对大响应会用 chunked 传输，不解码的话 payload 是空的，
+            # json.loads 会直接抛 JSONDecodeError。
+            if "Transfer-Encoding: chunked" in head.decode("latin1"):
+                out, rest = b"", payload
+                while True:
+                    line, _, rest = rest.partition(b"\r\n")
+                    if not line:
+                        break
+                    try:
+                        n = int(line.split(b";")[0], 16)
+                    except ValueError:
+                        break
+                    if n == 0:
+                        break
+                    out += rest[:n]
+                    rest = rest[n + 2:]
+                payload = out
             return json.loads(payload)
 
         j = req("POST", "/api/auth/login", {"username": "admin", "password": "Admin123"})

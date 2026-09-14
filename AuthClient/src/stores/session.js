@@ -54,11 +54,30 @@ export const useSessionStore = defineStore('session', () => {
   const verifying = ref(false)
   /** 篡改告警：非空时界面弹出阻断式对话框 */
   const tamperAlert = ref(null)
+  /**
+   * 已被用户关闭的告警标识（`断裂序号@分片`）。
+   *
+   * 没有这个标记时，自动巡检每 30 秒重算一次链，只要断裂还在就再弹一次 ——
+   * 用户点掉对话框后 30 秒内必然又被弹回来，等于关不掉。
+   * 记下被关闭的断裂标识后，自动巡检对**同一处**断裂保持静默；
+   * 手动点「立即校验」会清掉标记，所以随时还能主动唤起告警。
+   */
+  const dismissedAlertKey = ref(null)
   /** 审计日志当前分页状态 */
   const auditPage = ref({ page: 1, pageSize: 50 })
+  /**
+   * 最近一次审计查询的完整条件（页码 + 筛选）。
+   *
+   * 后台轮询刷新日志时必须沿用它：原先轮询调用无参数的刷新，
+   * 后端默认返回第 1 页，于是用户刚翻到第 2 页就被拉回最新页，
+   * 连筛选条件一起丢掉。
+   */
+  const lastLogQuery = ref({ page: 1, pageSize: 50 })
 
   let adminTimer = null
   let integrityTimer = null
+  /** 审计日志请求序号，用于丢弃被覆盖的过期响应 */
+  let logRequestSeq = 0
 
   // ---------------- getters ----------------
   const isLoggedIn = computed(() => !!currentUser.value)
@@ -229,6 +248,8 @@ export const useSessionStore = defineStore('session', () => {
     shards.value = []
     integrity.value = null
     tamperAlert.value = null
+    dismissedAlertKey.value = null
+    lastLogQuery.value = { page: 1, pageSize: 50 }
     auditTotal.value = 0
     auditFailed.value = 0
     persist()
@@ -270,9 +291,22 @@ export const useSessionStore = defineStore('session', () => {
    */
   async function refreshLogs(query = {}) {
     if (!currentUser.value?.isAdmin) return
+    // 记住本次条件，供后台轮询原样沿用（页码、筛选都不能丢）
+    lastLogQuery.value = {
+      page: query.page ?? 1,
+      pageSize: query.pageSize ?? auditPage.value.pageSize ?? 50,
+      ...(query.shard ? { shard: query.shard } : {}),
+      ...(query.keyword ? { keyword: query.keyword } : {}),
+      ...(query.action ? { action: query.action } : {}),
+      ...(query.result ? { result: query.result } : {})
+    }
+    // 请求序号：后台轮询与用户翻页可能并发，只认最后发出的那一次结果，
+    // 否则先发的慢响应后到，会把已经翻好的页又覆盖回去。
+    const ticket = ++logRequestSeq
     loadingLogs.value = true
     try {
       const res = await api.getLogs(query)
+      if (ticket !== logRequestSeq) return
       logs.value = res.data?.items ?? []
       auditTotal.value = res.data?.total ?? 0
       auditPage.value = {
@@ -283,7 +317,7 @@ export const useSessionStore = defineStore('session', () => {
     } catch (err) {
       throw fail(err, '加载审计日志失败')
     } finally {
-      loadingLogs.value = false
+      if (ticket === logRequestSeq) loadingLogs.value = false
     }
   }
 
@@ -302,10 +336,12 @@ export const useSessionStore = defineStore('session', () => {
    * 完整性校验。
    *
    * 这是「改不掉」的验证入口：后端重算全链哈希，比对存储值。
-   * 一旦发现断裂，除了返回结果，还会**触发界面告警弹窗** ——
-   * 用户明确要求"直接改数据库也要弹窗"，因此这里不做静默处理。
+   * 检出断裂时弹出阻断式告警，弹窗时机按触发来源区分：
+   *   · 手动（auto=false）：每次都弹，并解除此前关闭留下的抑制；
+   *   · 自动巡检（auto=true）：同一处断裂被关闭过就不再打扰，
+   *     只有出现**新的**断裂才弹 —— 新发生的篡改不能被静默。
    *
-   * @param {boolean} auto 是否为后台自动巡检触发（决定提示方式）
+   * @param {boolean} auto 是否为后台自动巡检触发
    */
   async function verifyIntegrity({ auto = false } = {}) {
     if (!currentUser.value?.isAdmin) return null
@@ -315,11 +351,19 @@ export const useSessionStore = defineStore('session', () => {
       const data = res.data
       integrity.value = { ...data, checkedAt: new Date().toISOString() }
 
+      const key = `${data?.firstBrokenSeq}@${data?.brokenShard}`
       if (!data?.intact) {
-        // 篡改被检出：弹出阻断式告警。重复巡检同一处断裂时不再重复弹窗，
-        // 否则每 30 秒弹一次会把界面淹掉；但首次发现必须立刻让用户看见。
-        const key = `${data.firstBrokenSeq}@${data.brokenShard}`
-        if (tamperAlert.value?.key !== key) {
+        // 篡改被检出，是否弹窗按来源区分：
+        //   · 手动点「立即校验」→ 无条件弹，并解除之前关闭留下的抑制。
+        //     用户主动要看的告警，任何时候都该给。
+        //   · 后台自动巡检 → 对**已被关闭过的同一处**断裂保持静默。
+        //     否则用户点掉对话框后，下一个 30 秒巡检周期又会弹回来，
+        //     等于关不掉。若断裂位置变化（出现了新的篡改），仍会弹一次
+        //     —— 新发生的事件不能被静默掉。
+        const isNewBreak = tamperAlert.value?.key !== key
+        if (!auto) dismissedAlertKey.value = null
+        const suppressed = auto && dismissedAlertKey.value === key
+        if (isNewBreak && !suppressed) {
           tamperAlert.value = {
             key,
             seq: data.firstBrokenSeq,
@@ -333,9 +377,10 @@ export const useSessionStore = defineStore('session', () => {
             detectedAt: new Date().toISOString()
           }
         }
-      } else if (tamperAlert.value) {
-        // 链已恢复完整（例如管理员重新灌入正确数据），撤下告警
-        tamperAlert.value = null
+      } else {
+        // 链已恢复完整（例如管理员重新灌入正确数据），撤下告警并解除抑制
+        if (tamperAlert.value) tamperAlert.value = null
+        dismissedAlertKey.value = null
       }
 
       markOnline()
@@ -347,13 +392,29 @@ export const useSessionStore = defineStore('session', () => {
     }
   }
 
+  /**
+   * 关闭告警对话框。
+   *
+   * 同时记下被关闭的断裂标识：自动巡检靠它判断"这处断裂用户已经看过了"，
+   * 从而不再反复弹出。手动校验会清掉这个标记，所以随时还能主动唤起告警。
+   */
   function dismissTamperAlert() {
+    if (tamperAlert.value?.key) dismissedAlertKey.value = tamperAlert.value.key
     tamperAlert.value = null
   }
 
-  async function refreshAdminData() {
+  /**
+   * 刷新管理员视图数据（用户列表 + 审计日志 + 分片清单）。
+   *
+   * @param {boolean} preservePaging 是否沿用用户当前的页码与筛选条件。
+   *   后台轮询**必须**传 true —— 原先无参数刷新日志，后端默认返回第 1 页，
+   *   于是用户刚翻到第 2 页，20 秒后就被拽回最新页，筛选条件也一起丢掉。
+   *   登录 / 恢复会话时传 false：那种场景本来就该落在最新一页。
+   */
+  async function refreshAdminData({ preservePaging = false } = {}) {
     if (!currentUser.value?.isAdmin) return
-    await Promise.allSettled([refreshUsers(), refreshLogs(), refreshShards()])
+    const logQuery = preservePaging ? { ...lastLogQuery.value } : {}
+    await Promise.allSettled([refreshUsers(), refreshLogs(logQuery), refreshShards()])
   }
 
   async function approve(username) {
@@ -413,7 +474,8 @@ export const useSessionStore = defineStore('session', () => {
     stopAdminPolling()
     if (!currentUser.value?.isAdmin) return
     adminTimer = setInterval(() => {
-      if (document.visibilityState === 'visible') refreshAdminData()
+      // preservePaging：轮询只把新数据取回来，不改变用户正在看的页码与筛选
+      if (document.visibilityState === 'visible') refreshAdminData({ preservePaging: true })
     }, ADMIN_REFRESH_MS)
   }
 

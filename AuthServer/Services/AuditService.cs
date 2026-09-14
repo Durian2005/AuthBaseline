@@ -87,9 +87,15 @@ public sealed class AuditService
     /// 当前分片名。
     ///
     /// 默认按月份：AuditLogs_202609。
-    /// 演示 / 压测时可通过 AUDIT_SHARD_UNIT=count 与 AUDIT_SHARD_SIZE=2000
-    /// 切换为"每 N 条滚一片"，这样几十秒就能跑出真实的轮转证据，
+    /// 演示 / 压测时把配置 `Audit:ShardUnit` 设为 `count`、`Audit:ShardSize` 设为期望容量，
+    /// 即可切换为"每 N 条滚一片"，几十秒就能跑出真实的轮转证据，
     /// 不必等到跨月（等不到的东西没法作为验收证据）。
+    ///
+    /// 注意配置键的写法：本项目用的是 .NET 默认配置源，环境变量必须写成
+    /// `Audit__ShardUnit` / `Audit__ShardSize`（**双**下划线分隔层级）。
+    /// 写成 `AUDIT_SHARD_UNIT` 这类单下划线形式**不会**被识别，会被静默忽略、
+    /// 仍然按 month 模式运行 —— 看上去配了却没有任何效果。
+    /// 也可以直接改 appsettings.json 里的 Audit 段。
     /// </summary>
     private string CurrentShard()
     {
