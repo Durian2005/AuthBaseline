@@ -19,7 +19,7 @@ from pathlib import Path
 
 APP_DIR = Path(os.environ.get(
     "E2E_APPDIR",
-    r"<用户目录>\AppData\Local\Programs\AuthBaseline"
+    r"<用户目录>\AppData\Local\AuthBaseline"
 ))
 EXE = APP_DIR / "auth-baseline-desktop.exe"
 CDP_PORT = os.environ.get("E2E_CDP_PORT", "9333")

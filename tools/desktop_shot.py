@@ -26,7 +26,7 @@ from ctypes import wintypes
 from pathlib import Path
 
 APP_DIR = Path(os.environ.get(
-    "E2E_APPDIR", r"<用户目录>\AppData\Local\Programs\AuthBaseline"))
+    "E2E_APPDIR", r"<用户目录>\AppData\Local\AuthBaseline"))
 EXE = APP_DIR / "auth-baseline-desktop.exe"
 TITLE_KEY = "口令认证基线系统"
 
@@ -104,12 +104,24 @@ BIH_FIELDS = [
     ("biClrImportant", wintypes.DWORD)]
 
 
-def capture(hwnd, out):
-    """把窗口置顶，从屏幕抓取窗口矩形区域。"""
+def capture(hwnd, out, settle=1.5):
+    """把窗口置顶，从屏幕抓取窗口矩形区域。
+
+    为了真的让窗口到最前，先最小化再还原（SW_MINIMIZE -> SW_RESTORE），
+    这样能绕开 SetForegroundWindow 在后台进程上的前台锁定。
+    """
+    if user32.IsIconic(hwnd):
+        user32.ShowWindow(hwnd, 9)
+    user32.ShowWindow(hwnd, 6)          # SW_MINIMIZE
+    time.sleep(0.5)
     user32.ShowWindow(hwnd, 9)          # SW_RESTORE
     user32.BringWindowToTop(hwnd)
+
+    # ALT 键"敲"一下，解除前台锁定后再置前
+    user32.keybd_event(0x12, 0, 0, 0)
+    user32.keybd_event(0x12, 0, 2, 0)
     user32.SetForegroundWindow(hwnd)
-    time.sleep(1.5)
+    time.sleep(settle)
 
     rect = wintypes.RECT()
     user32.GetWindowRect(hwnd, ctypes.byref(rect))

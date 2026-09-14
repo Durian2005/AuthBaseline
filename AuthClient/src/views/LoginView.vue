@@ -261,13 +261,135 @@ function switchTab(next) {
 
 <template>
   <div class="auth">
-    <!-- 品牌侧栏：桌面软件登录窗的常规构图 -->
+    <!-- 品牌侧栏：骑士简笔画 + 花体 Baseline，以渐变融入深色背景 -->
     <section class="brand" aria-hidden="true">
-      <div class="brand__logo">
-        <AppIcon name="shield-check" :size="26" :stroke-width="1.6" />
-      </div>
-      <h1 class="brand__name">口令认证基线系统</h1>
-      <p class="brand__tagline">实验一 · 建立可运行的口令认证基线</p>
+      <svg
+        class="brand__art"
+        viewBox="0 0 300 560"
+        preserveAspectRatio="xMidYMid meet"
+        focusable="false"
+      >
+        <defs>
+          <!-- 骑士：自上而下渐隐，脚部完全融进背景 -->
+          <linearGradient
+            id="knightFade"
+            gradientUnits="userSpaceOnUse"
+            x1="0" y1="196" x2="0" y2="536"
+          >
+            <stop offset="0%" stop-color="#ffffff" stop-opacity="1" />
+            <stop offset="24%" stop-color="#d2e4ff" stop-opacity="0.94" />
+            <stop offset="52%" stop-color="#9dc1ef" stop-opacity="0.6" />
+            <stop offset="78%" stop-color="#6d9acd" stop-opacity="0.26" />
+            <stop offset="100%" stop-color="#4a7098" stop-opacity="0" />
+          </linearGradient>
+
+          <!-- 剑光：单独一条更亮的线，凸显冷兵器 -->
+          <linearGradient
+            id="bladeFade"
+            gradientUnits="userSpaceOnUse"
+            x1="0" y1="184" x2="0" y2="296"
+          >
+            <stop offset="0%" stop-color="#ffffff" stop-opacity="0.7" />
+            <stop offset="100%" stop-color="#ffffff" stop-opacity="0" />
+          </linearGradient>
+
+          <!-- 花体 Baseline：左下淡入右上收亮 -->
+          <linearGradient
+            id="nameFade"
+            gradientUnits="userSpaceOnUse"
+            x1="20" y1="92" x2="280" y2="52"
+          >
+            <stop offset="0%" stop-color="#7ba5dd" stop-opacity="0.38" />
+            <stop offset="40%" stop-color="#c3daf8" stop-opacity="0.88" />
+            <stop offset="100%" stop-color="#ffffff" stop-opacity="1" />
+          </linearGradient>
+
+          <!-- 柔光：线条边缘自然晕开，去掉生硬的矢量感 -->
+          <filter id="softGlow" x="-60%" y="-60%" width="220%" height="220%">
+            <feGaussianBlur stdDeviation="3.4" result="blur" />
+            <feMerge>
+              <feMergeNode in="blur" />
+              <feMergeNode in="SourceGraphic" />
+            </feMerge>
+          </filter>
+        </defs>
+
+        <!-- ---------- 骑士简笔画（手绘感线条，留白为主） ---------- -->
+        <g
+          class="brand__knight"
+          fill="none"
+          stroke="url(#knightFade)"
+          stroke-width="2.8"
+          stroke-linecap="round"
+          stroke-linejoin="round"
+        >
+          <!-- 头盔：圆顶 + 面甲开口 + 颈甲 -->
+          <path d="M150,172 C132.3,172 121.7,183 121.7,197 C121.7,208 128.8,217 137,223 L163,223 C171.2,217 178.3,208 178.3,197 C178.3,183 167.7,172 150,172 Z" />
+          <path d="M131.1,195 L168.9,195" />
+          <path d="M150,195 L150,220" />
+          <path d="M137,223 L134.7,231" />
+          <path d="M163,223 L165.3,231" />
+          <!-- 盔顶羽饰 -->
+          <path d="M150,172 C152.4,160 161.8,153 174.8,155 C165.3,162 160.6,168 158.3,175" />
+
+          <!-- 双肩 -->
+          <path d="M150,231 C131.1,231 115.8,238 112.2,252 C124,259 138.2,261 150,260" />
+          <path d="M150,231 C168.9,231 184.2,238 187.8,252 C176,259 161.8,261 150,260" />
+
+          <!-- 胸甲 -->
+          <path d="M112.2,252 C108.7,274 112.2,292 120.5,306" />
+          <path d="M187.8,252 C191.3,274 187.8,292 179.5,306" />
+          <path d="M150,260 L150,306" />
+
+          <!-- 束腰 + 腰带 -->
+          <path d="M120.5,306 C132.3,313 167.7,313 179.5,306" />
+          <path d="M115.8,320 L184.2,320" />
+
+          <!-- 战裙（几道竖向甲片） -->
+          <path d="M122.9,320 L117,356 C128.8,363 171.2,363 183,356 L177.1,320" />
+          <path d="M137,320 L134.7,357" />
+          <path d="M163,320 L165.3,357" />
+
+          <!-- 左腿 -->
+          <path d="M131.1,359 C126.4,384 124,406 125.2,426" />
+          <path d="M125.2,426 C124,438 128.8,446 139.4,447 C146.5,448 148.8,442 147.6,435" />
+
+          <!-- 右腿 -->
+          <path d="M168.9,359 C173.6,384 176,406 174.8,426" />
+          <path d="M174.8,426 C176,438 171.2,446 160.6,447 C153.5,448 151.2,442 152.4,435" />
+
+          <!-- 左臂：自然下垂 -->
+          <path d="M112.2,254 C98.1,268 89.8,284 87.5,302" />
+          <path d="M87.5,302 C85.1,311 87.5,318 95.7,320 C102.8,322 106.3,317 106.3,311" />
+
+          <!-- 右臂：上举握剑，手正好包住剑柄 -->
+          <path d="M187.8,254 C200.7,263 210.2,271 216.1,281" />
+          <path d="M216.1,281 C223.2,289 223.2,297 216.1,301 C209,305 201.9,301 201.9,294" />
+          <!-- 手掌：与剑柄相交，形成握持 -->
+          <path d="M212.5,278 C220.8,282 224.3,288 222,294" />
+
+          <!-- 长剑：柄落在右手掌中，剑身斜举 -->
+          <path d="M219.6,271 L282.2,219" stroke-width="3.6" />
+          <path d="M282.2,219 C289.2,214 296.3,210 303.4,208" />
+          <path d="M219.6,271 C226.7,278 235,282 243.2,283" />
+          <path d="M229.1,279 L257.4,257" stroke-width="2.4" />
+          <path d="M213.7,267 L224.3,276" stroke-width="2.4" />
+        </g>
+
+        <!-- 剑刃反光 -->
+        <path
+          d="M220,269 L265,227"
+          stroke="url(#bladeFade)"
+          stroke-width="1.3"
+          fill="none"
+        />
+
+        <!-- ---------- 花体 Baseline ---------- -->
+        <g class="brand__wordmark">
+          <!-- 行云式装饰线 -->
+          <path class="mark-flourish" d="M18,40 C84,26 190,22 280,30" />
+          <text x="24" y="96">Baseline</text>
+        </g>      </svg>
 
       <div class="brand__foot">
         <AppIcon name="terminal" :size="13" />
@@ -619,27 +741,35 @@ function switchTab(next) {
   pointer-events: none;
 }
 
-.brand__logo {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 46px;
-  height: 46px;
-  border-radius: var(--r-lg);
-  background: rgba(255, 255, 255, 0.12);
-  border: 1px solid rgba(255, 255, 255, 0.2);
-  color: #fff;
+/* 骑士简笔画：铺满侧栏，整体随高度缩放并保持留白 */
+.brand__art {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
 }
 
-.brand__name {
-  font-size: var(--fs-xl);
-  font-weight: 650;
-  letter-spacing: 0.01em;
+/* 骑士简笔画：渐变/描边全部走内联属性，这里只挂柔光 */
+.brand__knight {
+  filter: url(#softGlow);
 }
 
-.brand__tagline {
-  font-size: var(--fs-sm);
-  color: rgba(234, 241, 251, 0.72);
+/* 花体 Baseline：手写衬线字形，颜色随渐变淡入深色背景 */
+.brand__wordmark text {
+  font-family: 'Segoe Script', 'Brush Script MT', 'Lucida Handwriting', 'Palace Script MT',
+    cursive;
+  font-style: italic;
+  font-size: 44px;
+  fill: url(#nameFade);
+}
+
+.mark-flourish {
+  fill: none;
+  stroke: #cfe2ff;
+  stroke-width: 1;
+  stroke-opacity: 0.24;
+  stroke-linecap: round;
 }
 
 .brand__foot {
