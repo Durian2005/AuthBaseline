@@ -53,7 +53,16 @@
 > 已经运行的资源管理器不会立刻看到它，双击桌面快捷方式启动的程序可能读不到新变量，
 > 需要注销重新登录才生效。改 `appsettings.Local.json` 则完全退出程序再打开即可，最省事。
 
-授权码不需要、也不应该发给任何人，包括助手——助手只写"去哪里读授权码"的代码，不接触授权码本身。
+授权码只应该存在于上面那两类"本机敏感位置"（`appsettings.Local.json` / 环境变量）里，
+**绝不写进代码、也绝不提交到版本库**。提交前可以自查一遍：
+
+```bash
+git check-ignore -v AuthServer/appsettings.Local.json
+# 输出 .gitignore:27:**/appsettings.Local.json  ... 即已被忽略
+```
+
+> 现状（2026-09-13）：授权码已由用户本人填入安装目录与开发目录的 `appsettings.Local.json`，
+> 两个文件均在 `.gitignore` 覆盖范围内，未进入任何提交。
 
 ### 启动时如何确认通道
 
@@ -61,6 +70,28 @@
 [Email] 发件通道：SMTP(smtp.qq.com:465)          ← 已配好，真实投递
 [Email] 发件通道：控制台（验证码打印在日志中…）    ← 未配授权码，降级模式
 ```
+
+接口返回值里也能直接看到当前通道，不必翻日志：
+
+```json
+{ "success": true, "data": { "channel": "SMTP(smtp.qq.com:465)", "deliversRealMail": true } }
+```
+
+### 配好了却仍显示"控制台"？先查是不是旧进程没退
+
+配置只在**进程启动时**读取一次。最常见的假故障是：改完配置没有真正重启进程，
+或者端口上还挂着上一次启动的旧实例（它的内存里仍是旧配置）。
+
+排查顺序：
+
+1. 确认进程真的退了：任务管理器里结束所有 `authserver.exe` / `dotnet.exe`，再重新启动；
+2. 确认改的是**当前运行实例所在目录**的那份配置（开发跑 `dotnet run` 看 `AuthServer\appsettings.Local.json`；
+   装好的桌面版看 `%LOCALAPPDATA%\Programs\AuthBaseline\appsettings.Local.json`）；
+3. 看启动日志：`Content root path` 打在哪个目录，读的就是哪个目录的配置。
+
+> 另有一个容易误判的现象：开发调试用的 `dotnet run` 会锁住 `bin\Debug\net8.0\AuthServer.dll`。
+> 旧实例不退，重新 `dotnet run` 会直接**构建失败**（`MSB3027 文件被 .NET Host 锁定`），
+> 此时你以为测的是新代码，其实请求打到了旧进程上。
 
 ### 没配授权码时，怎么看到验证码
 
@@ -129,6 +160,8 @@ notepad "%LOCALAPPDATA%\Programs\AuthBaseline\email-codes.log"
 | 后端接口 | `tools/email_e2e_test.py` | **34 / 34 通过**（含用途隔离、防枚举、锁定/待审核门禁、验证码一次性等失败分支） |
 | 前端界面（浏览器） | `tools/ui_e2e.mjs`（Edge 无头 + CDP 真实点击） | **11 / 11 通过** |
 | **桌面安装版** | 同一个 `tools/ui_e2e.mjs`，改指向安装后的 WebView2 | **11 / 11 通过**（注册绑邮箱 → 审核 → 找回密码 → 新密码登录进主界面） |
+| **真实 SMTP 投递**（2026-09-13） | 填入真实授权码后调用 `POST /api/auth/send-email-code` | **通过**——返回 `channel=SMTP(smtp.qq.com:465)`、`deliversRealMail=true`，验证码邮件真实送达收件箱；同目录未生成 `email-codes.log`，反证未走控制台发件器 |
+| 发布版二进制读配置 | 以安装目录为工作目录直接启动 `authserver.exe` | **通过**——启动日志 `[Email] 发件通道：SMTP(smtp.qq.com:465)`，`Content root path` 指向安装目录 |
 
 `ui_e2e.mjs` 通过环境变量适配两种运行目标，无需改代码：
 
