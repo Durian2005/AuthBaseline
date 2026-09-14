@@ -183,6 +183,15 @@ export const useSessionStore = defineStore('session', () => {
       }
       persist()
       markOnline()
+      // 先立即拉一次管理员数据，再启动轮询。
+      // setInterval 要等一个完整周期才会首次执行，若只启动轮询，
+      // 管理员登录后最长 20 秒内看到的都是空列表（用户数 0、审计 0 条），
+      // 会被误认为数据丢失。这里不阻塞登录返回，失败也不影响登录结果。
+      if (currentUser.value.isAdmin) {
+        refreshAdminData().catch(() => {
+          /* 首次加载失败由轮询兜底，不弹错 */
+        })
+      }
       startAdminPolling()
       // 管理员登录后立即开始完整性巡检：一旦库里被人直接改过，
       // 无需手动点"校验"也能在 30 秒内弹出阻断式告警。

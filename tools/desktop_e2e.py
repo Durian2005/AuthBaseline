@@ -15,9 +15,14 @@
 步骤（逗号分隔）：
   login:用户名:密码   在登录页填写并提交
   wait:秒             等待
-  click:x,y           在当前窗口相对坐标点击
+  click:x坐标x y坐标  在当前窗口相对坐标点击（坐标之间用 x 分隔）
   shot:文件名         再截一张（存到 tools/ 下）
-  tamper              直接改数据库制造篡改（需要 mongosh 或 python 驱动）
+  tamper              直接改数据库制造篡改（需要 python 驱动 pymongo）
+
+环境变量：
+  E2E_APPDIR   覆盖安装目录（默认 %LOCALAPPDATA%\AuthBaseline）
+  E2E_SETTLE   首次截图前的等待秒数（默认 16）
+  E2E_TAMPER_WAIT  篡改后等待自动巡检弹窗的秒数（默认 8，巡检周期 30s 需调大）
 """
 import ctypes
 import os
@@ -28,7 +33,7 @@ from ctypes import wintypes
 from pathlib import Path
 
 APP_DIR = Path(os.environ.get(
-    "E2E_APPDIR", r"<用户目录>\AppData\Local\Programs\AuthBaseline"))
+    "E2E_APPDIR", r"<用户目录>\AppData\Local\AuthBaseline"))
 EXE = APP_DIR / "auth-baseline-desktop.exe"
 TITLE_KEY = "口令认证基线系统"
 # 与 tauri.conf.json 保持一致，保证未重装的旧包也能正常渲染
