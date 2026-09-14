@@ -154,27 +154,83 @@ GET /api/audit/verify
 | 验证项 | 结果 |
 |--------|------|
 | 安装包安装 | ✅ `AuthBaseline_1.0.0_x64-setup.exe` |
+| 安装文件完整性 | ✅ 8 个文件齐全（exe ×2、appsettings.json、wwwroot ×4、uninstall） |
 | 启动后界面渲染 | ✅ 侧边栏 / 登录表单 / 状态栏正常（证据 `desktop_native.png`） |
 | 登录 | ✅ admin 登录成功，仪表盘显示当前用户与角色 |
+| 登录后数据加载 | ✅ 用户总数 2、审计 50 条、最近操作显示"完整性校验 INTACT"（证据 `shot_dash_with_data.png`） |
 | 审计日志页 | ✅ 完整性卡片、筛选、分页、哈希链详情（证据 `shot_audit_view.png`） |
-| 直接改库告警 | ✅ 30 秒内弹窗（证据 `shot_tamper_alert.png`） |
+| 直接改库告警 | ✅ 30 秒内弹窗，断裂序号 339（证据 `shot_tamper_alert_final.png`） |
+| 四组验收脚本 | ✅ `tools/audit_e2e_test.py` 57 项全部通过 |
+| 链完整性 | ✅ `/api/audit/verify` 返回 `intact: true` |
 | 原有功能 | ✅ 注册 / 审核 / 解锁 / 改密 / 邮件验证码 均未受影响 |
 
-### 渲染问题说明（已修复）
+**一键复验命令**：
 
-本机 WebView2 Runtime 为 `152.0.4191.66`，其**多进程 + GPU 合成**路径
-在本环境渲染不出画面：窗口先是全白，随后转全黑，
-但后端与前端实际都已正常加载（无头 Edge 加载 `wwwroot` 时 SPA 完整挂载）。
+```bash
+python tools/verify_install.py     # 校验安装目录文件是否齐全
+python tools/run_audit_e2e.py      # 起后端并跑四组验收（57 项）
+python tools/desktop_e2e.py tools/x.png "login:admin:Admin123,wait:6,shot:x.png"
+```
 
-修复方式是在 `src-tauri/tauri.conf.json` 的窗口配置里增加：
+---
+
+### 排查过程中修复的三个缺陷
+
+排查时定位到**三个独立的缺陷**，现象都表现为"界面不对"，但根因完全不同。
+
+#### 问题一：安装包缺随附文件 → 页面 404 白屏
+
+桌面端 Rust 侧会把窗口**导航到 sidecar 后端地址**（`window.navigate`），
+由后端的 `wwwroot` 提供前端页面。因此 `wwwroot` 与 `appsettings.json`
+**必须随 exe 一起安装**：
+
+| 缺失文件 | 后果 |
+|----------|------|
+| `wwwroot/` | 页面 404，窗口白屏 |
+| `appsettings.json` | 后端连不上 MongoDB |
+
+原 `tauri.conf.json` 只声明了 `externalBin`，**没有 `bundle.resources`**，
+所以重新构建出的安装包只有两个 exe，wwwroot 与 appsettings 全丢。
+
+修复：
 
 ```json
-"additionalBrowserArgs": "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection --single-process --disable-gpu"
+"resources": {
+  "../AuthClient/dist": "wwwroot",
+  "../AuthServer/appsettings.json": "appsettings.json"
+}
+```
+
+指向 `AuthClient/dist`（desktop 模式构建产物，与 `tauri build` 同批产出），
+而不是 `AuthServer/wwwroot`（普通模式产物，重新构建 desktop 时不会更新）。
+
+#### 问题二：WebView2 渲染管线 → 画面全白转全黑
+
+本机 WebView2 Runtime 为 `152.0.4191.66`，其**多进程 + GPU 合成**路径
+在本环境渲染不出画面。修复方式是在窗口配置里增加：
+
+```
+--single-process --disable-gpu
 ```
 
 注意：`additionalBrowserArgs` 会**替换**Tauri 的默认参数，
-所以必须把原本的 `--disable-features=...` 一并带上，
-否则会丢掉 Tauri 默认启用的几项安全/兼容开关。
+所以必须把原本的 `--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection`
+一并带上，否则会丢掉 Tauri 默认启用的几项安全开关。
+
+> 两者容易混淆：渲染问题让**画面出不来**（有色块/全黑），
+> 资源问题让**页面本身 404**。排查时先确认后端 `/` 是否返回 200 + HTML。
+
+#### 问题三：管理员登录后 20 秒内界面全为 0
+
+`login()` 只调用了 `startAdminPolling()`，而它内部是 `setInterval`，
+**要等一个完整周期（20 秒）才首次执行**。会话恢复路径本来就有
+`refreshAdminData()` 的立即调用，登录路径漏了。
+
+现象：登录成功能看到"晚上好，admin"，但用户总数 0、审计日志 0 条、
+最近操作为空，容易被误认为数据丢失。
+
+修复：登录成功且为管理员时，立即拉一次数据再启动轮询
+（失败不阻塞登录，由轮询兜底）。
 
 ---
 
@@ -187,8 +243,11 @@ GET /api/audit/verify
 | `desktop_native.png` | 桌面端原生渲染正常（侧边栏 + 登录表单 + 状态栏） |
 | `shot_login.png` | 登录页 |
 | `shot_after_login.png` | 登录后仪表盘 |
+| `shot_dash_with_data.png` | **修复后仪表盘：用户总数 2、审计 50 条、最近操作含"完整性校验 INTACT"** |
 | `shot_audit_view.png` | 审计日志页：完整性卡片 / 筛选 / 分页 / 哈希链详情 |
-| `shot_tamper_alert.png` | **直接改库后弹出的阻断式篡改告警**（核心证据） |
+| `shot_audit_pre_tamper.png` | 篡改前界面（告警弹窗的前置对照） |
+| `shot_tamper_alert_final.png` | **直接改库后弹出的阻断式篡改告警（最终版证据）** |
+| `shot_tamper_alert.png` | 早前一轮的同类告警截图 |
 | `shot_audit.png` | 早期审计页截图 |
 | `desktop_login_early.png` | 早期桌面端截图 |
 | `chain_backup_before_repair.json` | 修复链断裂前的完整链快照（322 条，备查） |
@@ -213,6 +272,16 @@ GET /api/audit/verify
 
 修复脚本支持 `--dry-run`（默认干跑）与 `--apply`，
 执行前自动把整链备份到 `tools/evidence/`。
+
+同类情况在后续几轮演示中还出现过（`seq=339` 等），处理方式一致：
+`tamper_db()` 只改 `action`/`target` 而不动 `selfHash`，
+因此**恢复原值后哈希自动复原**，无需重签。恢复依据是同型记录的响应体特征
+（如 `{"Returned":50,"Total":...}` 对应 `AUDIT_QUERY` / `target=all`）。
+
+最终状态：`/api/audit/verify` 返回 `intact: true`，全链自洽。
+
+> 说明：`tools/audit_e2e_test.py` 内建的篡改用例会在每个场景结束后
+> **自动还原**测试数据，所以正常跑完验收脚本不会留下断裂。
 
 ---
 
