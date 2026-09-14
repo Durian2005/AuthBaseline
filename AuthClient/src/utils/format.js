@@ -74,13 +74,19 @@ export const ACTION_META = {
   LOGIN_SUCCESS: { label: '登录成功', tone: 'enabled' },
   LOGIN_FAILED: { label: '登录失败', tone: 'locked' },
   LOGIN: { label: '用户登录', tone: 'primary' },
+  LOGOUT: { label: '退出登录', tone: 'disabled' },
   APPROVE: { label: '审核通过', tone: 'enabled' },
   UNLOCK: { label: '解锁账号', tone: 'warn' },
   DELETE_USER: { label: '注销账号', tone: 'locked' },
   CHANGE_PASSWORD: { label: '修改密码', tone: 'info' },
   TRANSFER_ADMIN: { label: '权限转让', tone: 'primary' },
   SEND_EMAIL_CODE: { label: '发送验证码', tone: 'info' },
-  RESET_PASSWORD: { label: '重置密码', tone: 'warn' }
+  RESET_PASSWORD: { label: '重置密码', tone: 'warn' },
+  // 实验二新增：审计访问相关事件
+  AUDIT_QUERY: { label: '查询审计日志', tone: 'info' },
+  AUDIT_VERIFY: { label: '完整性校验', tone: 'primary' },
+  AUDIT_ACCESS_DENIED: { label: '越权访问被拒', tone: 'locked' },
+  AUDIT_TAMPERED: { label: '检出篡改', tone: 'locked' }
 }
 
 export function actionMeta(action) {

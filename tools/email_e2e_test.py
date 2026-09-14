@@ -23,12 +23,14 @@ LOG = os.environ.get("BE_LOG", os.path.join(os.environ.get("TEMP", "."), "be.log
 PASS, FAIL = [], []
 
 
-def call(path, body=None, method="POST"):
+def call(path, body=None, method="POST", ticket=None):
     url = BASE + path
     data = json.dumps(body).encode("utf-8") if body is not None else None
     req = urllib.request.Request(url, data=data, method=method)
     if data:
         req.add_header("Content-Type", "application/json")
+    if ticket:
+        req.add_header("Authorization", f"Bearer {ticket}")
     try:
         with urllib.request.urlopen(req, timeout=15) as r:
             return r.status, json.loads(r.read().decode("utf-8") or "{}")
@@ -38,6 +40,18 @@ def call(path, body=None, method="POST"):
             return e.code, json.loads(raw or "{}")
         except Exception:
             return e.code, {"raw": raw}
+
+
+ADMIN_USER = os.environ.get("ADMIN_USER", "admin")
+ADMIN_PASS = os.environ.get("ADMIN_PASS", "Admin123")
+
+
+def admin_login():
+    """管理员接口已改为服务端票据鉴权，先登录换取 ticket。"""
+    st, r = call("/api/auth/login", {"username": ADMIN_USER, "password": ADMIN_PASS})
+    if st == 200 and r.get("success"):
+        return (r.get("data") or {}).get("ticket")
+    return None
 
 
 def read_log():
@@ -131,7 +145,9 @@ def main():
     check("待审核账号不能找回密码", st == 403 and r.get("code") == "PENDING_APPROVAL", f"HTTP {st} {r.get('code')}")
 
     # ---------- 管理员审核通过 ----------
-    st, r = call("/api/auth/approve", {"username": user, "adminUsername": "admin"})
+    admin_ticket = admin_login()
+    check("管理员登录取得服务端票据", bool(admin_ticket), "用于调用管理员接口")
+    st, r = call("/api/auth/approve", {"username": user}, ticket=admin_ticket)
     check("管理员审核通过", st == 200 and r.get("success"), f"HTTP {st} {r.get('code')} {r.get('message')}")
 
     # ---------- 功能二：忘记密码 ----------
@@ -208,12 +224,18 @@ def main():
 
     # ---------- 审计 ----------
     print("\n== 审计日志 ==")
-    st, r = call(f"/api/auth/logs?adminUsername=admin", method="GET")
-    actions = [x.get("action") for x in (r.get("data") or [])]
+    # 审计查询已改为管理员票据鉴权，并支持分页：返回 data.items / data.total
+    st, r = call("/api/auth/logs?page=1&pageSize=200", method="GET", ticket=admin_ticket)
+    items = (r.get("data") or {}).get("items") or []
+    actions = [x.get("action") for x in items]
     for a in ("SEND_EMAIL_CODE", "RESET_PASSWORD", "REGISTER"):
         check(f"审计含 {a}", a in actions, f"共 {len(actions)} 条")
-    targets = [x.get("target") for x in (r.get("data") or []) if x.get("action") == "RESET_PASSWORD"]
+    targets = [x.get("target") for x in items if x.get("action") == "RESET_PASSWORD"]
     check("重置密码审计记录了操作对象", user in targets, str(targets[:3]))
+
+    # 无票据读取审计必须被拒（实验二「02 看不到」）
+    st, r = call("/api/auth/logs?page=1", method="GET")
+    check("无票据读取审计日志被拒", st == 401, f"HTTP {st} {r.get('code')}")
 
     summary()
 

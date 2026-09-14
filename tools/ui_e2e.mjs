@@ -205,10 +205,25 @@ async function main() {
   check('提示注册成功等待审核', body.includes('注册成功') || body.includes('等待管理员审核'), body.slice(0, 120).replace(/\n/g, ' / '))
 
   /* ---------------- 审核通过，便于测试找回密码 ---------------- */
-  const approve = await fetch(`${API}/api/auth/approve`, {
+  // 管理员接口已改为服务端票据鉴权（实验二）：不再接受 adminUsername 声明，
+  // 必须以管理员身份登录拿到 ticket，再放进 Authorization: Bearer。
+  const ADMIN_USER = process.env.E2E_ADMIN_USER || 'admin'
+  const ADMIN_PASS = process.env.E2E_ADMIN_PASS || 'Admin123'
+  const loginRes = await fetch(`${API}/api/auth/login`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ username: user, adminUsername: 'admin' })
+    body: JSON.stringify({ username: ADMIN_USER, password: ADMIN_PASS })
+  }).then((r) => r.json())
+  const adminTicket = loginRes?.data?.ticket
+  check('管理员登录取得服务端票据', !!adminTicket, loginRes?.code || '')
+
+  const approve = await fetch(`${API}/api/auth/approve`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      ...(adminTicket ? { Authorization: `Bearer ${adminTicket}` } : {})
+    },
+    body: JSON.stringify({ username: user })
   }).then((r) => r.json())
   check('管理员审核通过（准备找回密码场景）', approve.success === true, approve.message)
 

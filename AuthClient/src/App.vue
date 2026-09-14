@@ -4,6 +4,7 @@ import TitleBar from './components/TitleBar.vue'
 import SideBar from './components/SideBar.vue'
 import StatusBar from './components/StatusBar.vue'
 import ToastHost from './components/ToastHost.vue'
+import TamperAlertDialog from './components/TamperAlertDialog.vue'
 import LoginView from './views/LoginView.vue'
 import DashboardView from './views/DashboardView.vue'
 import AccountView from './views/AccountView.vue'
@@ -146,6 +147,7 @@ onBeforeUnmount(() => {
     />
 
     <ToastHost />
+    <TamperAlertDialog />
   </div>
 </template>
 

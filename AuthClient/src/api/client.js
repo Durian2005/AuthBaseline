@@ -68,13 +68,48 @@ export class ApiError extends Error {
   }
 }
 
+/* ---------------- 会话票据 ----------------
+ * 后端签发的不透明随机票据，管理员接口需通过 Authorization: Bearer 携带。
+ *
+ * 为什么放在内存 + localStorage：
+ *   管理员接口必须有它才能通过，刷新页面不该要求重新登录；
+ *   但它终究是凭证，登出时务必调用后端吊销并清空本地副本。
+ */
+const TICKET_KEY = 'auth.ticket'
+let ticket = null
+
+try {
+  ticket = localStorage.getItem(TICKET_KEY) || null
+} catch {
+  /* 隐私模式下 localStorage 可能不可写 */
+}
+
+export function setTicket(value) {
+  ticket = value || null
+  try {
+    if (ticket) localStorage.setItem(TICKET_KEY, ticket)
+    else localStorage.removeItem(TICKET_KEY)
+  } catch {
+    /* 忽略写入失败：内存中仍持有票据，本次会话可用 */
+  }
+}
+
+export function getTicket() {
+  return ticket
+}
+
+function authHeaders(base) {
+  if (!ticket) return base
+  return { ...(base || {}), Authorization: `Bearer ${ticket}` }
+}
+
 async function request(path, { method = 'GET', body, signal } = {}) {
   await apiRootReady
   let res
   try {
     res = await fetch(API_ROOT + path, {
       method,
-      headers: body === undefined ? undefined : { 'Content-Type': 'application/json' },
+      headers: authHeaders(body === undefined ? undefined : { 'Content-Type': 'application/json' }),
       body: body === undefined ? undefined : JSON.stringify(body),
       signal,
       cache: 'no-store'
@@ -98,8 +133,14 @@ async function request(path, { method = 'GET', body, signal } = {}) {
   }
 
   if (!res.ok) {
+    // 票据失效（过期 / 被吊销 / 权限被收回）时立即清掉本地副本，
+    // 否则界面会一直拿着废票据重试，用户看到的只是"无管理员权限"而不知为何。
+    const code = payload?.code || `HTTP_${res.status}`
+    if (res.status === 401 || code === 'SESSION_INVALID' || code === 'SESSION_EXPIRED' || code === 'SESSION_REVOKED') {
+      setTicket(null)
+    }
     throw new ApiError(payload?.message || `服务器返回 HTTP ${res.status}`, {
-      code: payload?.code || `HTTP_${res.status}`,
+      code,
       status: res.status,
       data: payload?.data ?? null,
       kind: 'http'
@@ -161,32 +202,53 @@ export const api = {
   login: (username, password) =>
     request('/auth/login', { method: 'POST', body: { username, password } }),
 
+  /** 登出：吊销服务端票据。前端随后清空本地副本 */
+  logout: () => request('/auth/logout', { method: 'POST' }),
+
   changePassword: (username, oldPassword, newPassword) =>
     request('/auth/change-password', {
       method: 'POST',
       body: { username, oldPassword, newPassword }
     }),
 
-  approve: (username, adminUsername) =>
-    request('/auth/approve', { method: 'POST', body: { username, adminUsername } }),
+  approve: (username) => request('/auth/approve', { method: 'POST', body: { username } }),
 
-  unlock: (username, adminUsername) =>
-    request('/auth/unlock', { method: 'POST', body: { username, adminUsername } }),
+  unlock: (username) => request('/auth/unlock', { method: 'POST', body: { username } }),
 
-  deleteUser: (username, adminUsername) =>
-    request('/auth/delete-user', { method: 'POST', body: { username, adminUsername } }),
+  deleteUser: (username) => request('/auth/delete-user', { method: 'POST', body: { username } }),
 
-  transferAdmin: (targetUsername, adminUsername, password) =>
+  transferAdmin: (targetUsername, password) =>
     request('/auth/transfer-admin', {
       method: 'POST',
-      body: { targetUsername, adminUsername, password }
+      body: { targetUsername, password }
     }),
 
-  getUsers: (adminUsername, signal) =>
-    request(`/auth/users?adminUsername=${encodeURIComponent(adminUsername)}`, { signal }),
+  getUsers: (signal) => request('/auth/users', { signal }),
 
-  getLogs: (adminUsername, signal) =>
-    request(`/auth/logs?adminUsername=${encodeURIComponent(adminUsername)}`, { signal })
+  /**
+   * 审计日志分页查询。
+   * shard 为空表示跨全部分片（含归档）；分片名可从 getShards() 获得。
+   */
+  getLogs: ({ shard = '', keyword = '', action = 'all', result = 'all', page = 1, pageSize = 50 } = {}, signal) => {
+    const qs = new URLSearchParams()
+    if (shard) qs.set('shard', shard)
+    if (keyword) qs.set('keyword', keyword)
+    if (action && action !== 'all') qs.set('action', action)
+    if (result && result !== 'all') qs.set('result', result)
+    qs.set('page', String(page))
+    qs.set('pageSize', String(pageSize))
+    qs.set('includeArchived', shard ? 'false' : 'true')
+    return request(`/audit/logs?${qs.toString()}`, { signal })
+  },
+
+  /** 审计分片清单（轮转结果） */
+  getShards: (signal) => request('/audit/shards', { signal }),
+
+  /** 完整性校验：返回是否完整、断点序号、期望/实际哈希 */
+  verifyAudit: (signal) => request('/audit/verify', { signal }),
+
+  /** 审计概览统计 */
+  getAuditStats: (signal) => request('/audit/stats', { signal })
 }
 
 export { API_ROOT }
