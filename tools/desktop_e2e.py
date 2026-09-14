@@ -157,14 +157,27 @@ def capture(hwnd, out):
 
 
 def real_click(hwnd, rx, ry):
-    """把窗口置前，按窗口相对坐标 (rx, ry) 点击（窗口坐标含标题栏）。"""
+    """把窗口置前，按窗口相对坐标 (rx, ry) 点击（窗口坐标含标题栏）。
+
+    注意：必须先最小化再还原，再补一次 ALT 键，才能真正解除
+    SetForegroundWindow 的前台锁定。否则窗口看似在前，键盘焦点其实还在
+    原前台窗口上，表现为"点进了输入框、但打进去的字一个都没出现"。
+    """
+    if user32.IsIconic(hwnd):
+        user32.ShowWindow(hwnd, 9)
+    user32.ShowWindow(hwnd, 6)          # SW_MINIMIZE
+    time.sleep(0.4)
+    user32.ShowWindow(hwnd, 9)          # SW_RESTORE
+    user32.BringWindowToTop(hwnd)
+    user32.keybd_event(0x12, 0, 0, 0)   # ALT 按下
+    user32.keybd_event(0x12, 0, 2, 0)   # ALT 抬起
+    user32.SetForegroundWindow(hwnd)
+    time.sleep(0.5)
+
+    # 还原后窗口位置可能变化，坐标要重新取一次
     rect = wintypes.RECT()
     user32.GetWindowRect(hwnd, ctypes.byref(rect))
     sx, sy = rect.left + int(rx), rect.top + int(ry)
-    user32.ShowWindow(hwnd, 9)
-    user32.BringWindowToTop(hwnd)
-    user32.SetForegroundWindow(hwnd)
-    time.sleep(0.5)
     user32.SetCursorPos(sx, sy)
     time.sleep(0.25)
     user32.mouse_event(0x0002, 0, 0, 0, 0)

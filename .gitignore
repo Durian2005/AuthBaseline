@@ -38,3 +38,6 @@ _old_dist_old_bak/
 # Diagnostic logs and screenshots
 *.log
 screen.png
+
+# Local database backups（含真实用户数据，仅用于误删回滚，绝不入库）
+tools/backup/
