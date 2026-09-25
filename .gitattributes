@@ -1,0 +1,34 @@
+# 统一以 LF 存储，并且在工作区也保持 LF。
+#
+# 为什么显式写 eol=lf：本机 git 配了 core.autocrlf=true，与本仓库"索引里全是 LF"
+# 的现状不一致，会在 git add 时冒出
+#   "LF will be replaced by CRLF the next time Git touches it"
+# 这类警告。更实际的问题是：若不统一，同一个文件在 Windows 与 Linux 上会被
+# 显示成"整文件被重写"，review 时看到的全是行尾噪声，真正的改动反而被淹没。
+
+* text=auto eol=lf
+
+# Windows 批处理必须用 CRLF 才能可靠执行，单独放行
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# 二进制文件不做任何转换
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.webp binary
+*.woff binary
+*.woff2 binary
+*.ttf binary
+*.eot binary
+*.dll binary
+*.exe binary
+*.pdb binary
+*.lib binary
+*.rlib binary
+*.rmeta binary
+*.zip binary
+*.gz binary
+*.pdf binary

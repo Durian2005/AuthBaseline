@@ -38,6 +38,21 @@ _old_dist_old_bak/
 # Diagnostic logs and screenshots
 *.log
 screen.png
+tools/buildlogs/
 
 # Local database backups（含真实用户数据，仅用于误删回滚，绝不入库）
 tools/backup/
+
+# 数据库导出与哈希链快照 —— 这些是**数据**，不是源码，一律不入库：
+#   full_db_backup.json                含 bcrypt 口令哈希、明文会话 ticket、
+#                                      真实绑定邮箱，以及 800+ 条带 request/response 报文的审计记录
+#   chain_snapshot_*.json              含真实姓名与审计原文
+# 一条 `git add -A` 就会把整库快照推上去，所以规则必须在第一次 push 之前生效。
+# 例外：tools/evidence/chain_backup_before_repair.json 已在历史中，
+#       且已逐项核实不含凭据/邮箱/口令哈希（只有合成测试账号名），
+#       保留它作为"修复前哈希链完好"的证据。gitignore 不影响已跟踪文件。
+tools/evidence/*.json
+
+# 本地验证脚本跑出来的截图（含界面上显示的真实用户名）。
+# 默认入库作为实验证据；若仓库要转为公开，放开下面这行把它们排除。
+# tools/**/*.png
