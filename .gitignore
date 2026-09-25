@@ -48,13 +48,16 @@ tools/backup/
 #                                      真实绑定邮箱，以及 800+ 条带 request/response 报文的审计记录
 #   chain_snapshot_*.json              含真实姓名与审计原文
 # 一条 `git add -A` 就会把整库快照推上去，所以规则必须在第一次 push 之前生效。
-# 例外：tools/evidence/chain_backup_before_repair.json 已在历史中，
-#       且已逐项核实不含凭据/邮箱/口令哈希（只有合成测试账号名），
-#       保留它作为"修复前哈希链完好"的证据。gitignore 不影响已跟踪文件。
-tools/evidence/*.json
+# 整个 tools/evidence/ 一律不入库 —— 它装的是"运行证据"，不是源码：
+#   截图：界面上显示着真实账号名（审计页 / 用户管理页的账号列），
+#         没法像文本那样扫描并脱敏，唯一的办法就是不传；
+#   快照：chain_backup_before_repair.json 是 322 条真实操作日志的导出，
+#         还带着本机浏览器 UA 与账号名 —— 那是"数据"，不是源码。
+# 注意：tools/*.png 只覆盖 tools/ 第一层，管不到 tools/evidence/，
+#       所以这一条必须按目录写死；否则 git rm --cached 之后，
+#       一条 git add -A 又会把它们加回来。
+tools/evidence/
 
-# 本地验证脚本跑出来的截图一律不入库。
-# 理由：截图里显示着真实账号名（审计页/用户管理页的账号列），
-# 这类内容没法像文本那样扫描并脱敏 —— 唯一的办法就是不传。
+# 本地验证脚本跑出来的截图同样不入库（理由同上）。
 # 需要某张截图作为文档时，把它移到 docs/ 下，或用 git add -f 单独放行。
 tools/*.png

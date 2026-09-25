@@ -24,9 +24,11 @@ import fs from 'node:fs'
 const CDP = process.env.E2E_CDP || 'http://127.0.0.1:9333'
 const OUT = process.env.E2E_SHOTDIR || 'tools'
 /**
- * 注：用户名与口令走环境变量传入，不硬编码。
- * 真实库里的审计管理员并不叫 auditor01（那是测试库里的名字），
- * 写死会在换库时静默失败 —— 表现为"字段填了、按钮点了，就是进不去"。
+ * 注：用户名与口令一律走环境变量传入，**不留默认值**。
+ * 两头都试过，都不行：
+ *   写真实库的账号名  → 账号名随仓库一起公开，等于泄漏；
+ *   写测试库的 auditor01 → 换库即静默失败（"字段填了、按钮点了，就是进不去"）。
+ * 所以这里留空，缺变量时在下面直接报错退出，把问题摆到明面上。
  */
 const USER = process.env.E2E_USER || ''
 const PASS = process.env.E2E_PASS || ''
@@ -150,6 +152,12 @@ async function main() {
 
   if (!loggedIn) {
     console.log('  未登录，先在界面里登录…')
+    if (!USER || !PASS) {
+      console.error('  ✗ 缺少 E2E_USER / E2E_PASS 环境变量，无法在界面上登录。')
+      console.error('    脚本不内置默认账号：写真实账号会随仓库泄漏，写测试库名字换库即静默失败。')
+      console.error('    例：E2E_USER=<审计管理员> E2E_PASS=<口令> 由外层 ui_audit_check.py 传入。')
+      process.exit(2)
+    }
     // 关键：必须用**原生 setter + input 事件**驱动，不能用 el.value = x。
     //
     // 直接赋值改的是 DOM 属性，Vue 的 v-model 监听的是 input 事件；

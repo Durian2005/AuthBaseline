@@ -19,6 +19,10 @@ import fs from 'node:fs'
 
 const CDP = process.env.E2E_CDP || 'http://127.0.0.1:9333'
 const OUT = process.env.E2E_SHOTDIR || 'tools'
+/**
+ * 账号与口令一律走环境变量，**不留默认值**（理由同 ui_audit_events.mjs：
+ * 写真实账号名等于随仓库泄漏，写测试库名字换库即静默失败）。
+ */
 const USER = process.env.E2E_USER || ''
 const PASS = process.env.E2E_PASS || ''
 
@@ -100,6 +104,12 @@ async function main() {
 
   if (!(await evalJs(c, `return !!localStorage.getItem('auth.ticket')`))) {
     console.log('  未登录，先在界面里登录…')
+    if (!USER || !PASS) {
+      console.error('  ✗ 缺少 E2E_USER / E2E_PASS 环境变量，无法在界面上登录。')
+      console.error('    脚本不内置默认账号：写真实账号会随仓库泄漏，写测试库名字换库即静默失败。')
+      console.error('    例：E2E_USER=<审计管理员> E2E_PASS=<口令> 由外层 ui_readonly_check.py 传入。')
+      process.exit(2)
+    }
     await evalJs(c, `
       const setVal = (el, v) => {
         const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set
