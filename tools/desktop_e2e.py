@@ -1,4 +1,4 @@
-"""桌面端界面级验证：启动安装版 → 登录 → 截图 → 可选制造篡改并截告警弹窗。
+r"""桌面端界面级验证：启动安装版 → 登录 → 截图 → 可选制造篡改并截告警弹窗。
 
 为什么必须在同一进程里完成：调用方 shell 退出后子进程会被回收，
 分步执行拿不到窗口。
@@ -18,14 +18,17 @@
   click:x坐标x y坐标  在当前窗口相对坐标点击（坐标之间用 x 分隔）
   shot:文件名         再截一张（存到 tools/ 下）
   tamper              直接改数据库制造篡改（需要 python 驱动 pymongo）
+  deny                从应用之外直接用 HTTP 打管理接口，复现"越权访问被拒"
 
 环境变量：
   E2E_APPDIR   覆盖安装目录（默认 %LOCALAPPDATA%\AuthBaseline）
   E2E_SETTLE   首次截图前的等待秒数（默认 16）
   E2E_TAMPER_WAIT  篡改后等待自动巡检弹窗的秒数（默认 8，巡检周期 30s 需调大）
+  E2E_DENY_WAIT    越权后等待巡检弹窗的秒数（默认 14，越权巡检周期 10s）
 """
 import ctypes
 import os
+import re
 import subprocess
 import sys
 import time
@@ -33,7 +36,7 @@ from ctypes import wintypes
 from pathlib import Path
 
 APP_DIR = Path(os.environ.get(
-    "E2E_APPDIR", r"<用户目录>\AppData\Local\AuthBaseline"))
+    "E2E_APPDIR", os.path.join(os.environ.get("LOCALAPPDATA") or os.path.expanduser("~/AppData/Local"), "AuthBaseline")))
 EXE = APP_DIR / "auth-baseline-desktop.exe"
 TITLE_KEY = "基线系统"
 # 与 tauri.conf.json 保持一致，保证未重装的旧包也能正常渲染
@@ -118,7 +121,18 @@ def _bih():
 
 
 def capture(hwnd, out):
-    """用 PrintWindow(PW_RENDERFULLCONTENT) 抓窗口自身内容，不依赖 z-order。"""
+    """用 PrintWindow(PW_RENDERFULLCONTENT) 抓窗口自身内容，不依赖 z-order。
+
+    抓图前必须先确认窗口不是最小化状态：最小化时 GetWindowRect 返回的
+    是标题栏那条窄条（实测形如 237x39），抓出来的图看不出任何界面内容，
+    却会被误读成"界面渲染失败"。real_click 里为解除前台锁定会做一次
+    最小化→还原，若还原没生效就会留下这个状态。
+    """
+    if user32.IsIconic(hwnd):
+        user32.ShowWindow(hwnd, 9)   # SW_RESTORE
+        user32.BringWindowToTop(hwnd)
+        time.sleep(1.0)
+
     rect = wintypes.RECT()
     user32.GetWindowRect(hwnd, ctypes.byref(rect))
     x0, y0 = rect.left, rect.top
@@ -126,6 +140,13 @@ def capture(hwnd, out):
     if w <= 0 or h <= 0:
         print(f"窗口尺寸异常 {w}x{h}")
         return False
+    if h < 200:
+        # 多半是还原失败还没生效，再等一轮
+        time.sleep(1.5)
+        user32.GetWindowRect(hwnd, ctypes.byref(rect))
+        w, h = rect.right - rect.left, rect.bottom - rect.top
+        if h < 200:
+            print(f"!! 窗口高度仅 {h}px，疑似仍处于最小化/异常状态，截图可能无效")
 
     hdc = user32.GetWindowDC(hwnd)
     mem = gdi32.CreateCompatibleDC(hdc)
@@ -144,7 +165,9 @@ def capture(hwnd, out):
     from PIL import Image
     img = Image.frombuffer("RGBA", (w, h), buf, "raw", "BGRA", 0, 1).convert("RGB")
     img.save(out)
-    colors = len(set(img.getdata()))
+    # 用 getcolors 而不是 set(img.getdata())：后者对 1942x1286 要建一个
+    # 250 万元素的集合，慢且在 Pillow 14 起 getdata 被弃用。
+    colors = len(img.getcolors(maxcolors=w * h) or [])
     g = img.convert("L").histogram()
     total = w * h
     dark = sum(g[:12])
@@ -269,6 +292,64 @@ def tamper_db():
         return False
 
 
+def find_backend_port():
+    """反查 sidecar 后端当前监听的端口。
+
+    桌面端端口是动态分配的，越权请求必须现查 —— 写死端口只会打到空气上。
+    从进程名过滤出 PID，再用 netstat 找出归属它的 LISTENING 行。
+    """
+    try:
+        tl = subprocess.run(
+            ["tasklist", "/fi", "imagename eq authserver.exe", "/fo", "csv", "/nh"],
+            capture_output=True).stdout.decode("gbk", "replace")
+        m = re.search(r'"authserver\.exe","(\d+)"', tl, re.I)
+        if not m:
+            return None
+        pid = m.group(1)
+        ns = subprocess.run(["netstat", "-ano"],
+                            capture_output=True).stdout.decode("gbk", "replace")
+        for line in ns.splitlines():
+            parts = line.split()
+            if (len(parts) >= 5 and parts[0] == "TCP"
+                    and parts[3] == "LISTENING" and parts[4] == pid):
+                return int(parts[1].rsplit(":", 1)[1])
+    except Exception as e:
+        print(f"  探测后端端口失败: {e}")
+    return None
+
+
+def deny_audit():
+    """从应用之外直接打管理接口，复现「越权访问被拒」。
+
+    与 tamper 步骤是对称的两种"绕过应用"：
+      tamper = 有人绕过应用直接改库（改不掉）；
+      deny   = 有人绕过界面直接读审计数据（看不到）。
+
+    这里刻意不带任何凭证，就是 curl / PowerShell 的裸请求 ——
+    界面完全看不到这种尝试，唯一能证明它发生过的是服务端写下的
+    AUDIT_ACCESS_DENIED 事件。
+    """
+    import urllib.error
+    import urllib.request
+
+    port = find_backend_port()
+    if not port:
+        print("  未找到后端监听端口，跳过越权尝试")
+        return
+    print(f"  后端端口 {port}")
+    # 两条路径都打：新版审计接口 + 旧版兼容路径（后者曾是"声明即管理员"的漏洞入口）
+    for path in ("/api/audit/logs", "/api/auth/logs?adminUsername=admin"):
+        url = f"http://127.0.0.1:{port}{path}"
+        try:
+            with urllib.request.urlopen(url, timeout=5) as r:
+                print(f"  越权尝试 {path} -> HTTP {r.status}（异常：竟然放行了）")
+        except urllib.error.HTTPError as e:
+            body = e.read().decode("utf-8", "replace")[:90]
+            print(f"  越权尝试 {path} -> HTTP {e.code} {body}")
+        except Exception as e:
+            print(f"  越权尝试 {path} -> 请求失败 {e}")
+
+
 def main():
     if not EXE.exists():
         print(f"未找到 {EXE}")
@@ -318,10 +399,13 @@ def main():
                 print(f"点击 ({rx},{ry})")
             elif step.startswith("key:"):
                 # 发送单个按键：key:esc / key:enter / key:tab / key:space
+                # 方向键（key:down / key:up）用于在原生 select 展开的列表里移动选项，
+                # 这是筛选下拉框最稳的驱动方式 —— 选项列表由系统渲染，坐标不可预知。
                 # Esc 用于关闭模态子窗口（AppWindow 监听 document 的 Escape）
                 name = step.split(":", 1)[1].strip().lower()
                 vk = {"esc": 0x1B, "enter": 0x0D, "tab": 0x09, "space": 0x20,
-                      "pgdn": 0x22, "pgup": 0x21, "end": 0x23, "home": 0x24}.get(name)
+                      "pgdn": 0x22, "pgup": 0x21, "end": 0x23, "home": 0x24,
+                      "down": 0x28, "up": 0x26, "left": 0x25, "right": 0x27}.get(name)
                 if vk is None:
                     print(f"未知按键: {name}")
                 else:
@@ -349,6 +433,10 @@ def main():
             elif step.startswith("shot:"):
                 name = step.split(":", 1)[1]
                 capture(hwnd, Path("tools") / name)
+            elif step == "deny":
+                # 越权巡检周期 10s，等足一轮再截图，确保弹窗有机会出现
+                deny_audit()
+                time.sleep(float(os.environ.get("E2E_DENY_WAIT", "14")))
             elif step == "tamper":
                 tamper_db()
                 time.sleep(float(os.environ.get("E2E_TAMPER_WAIT", "8")))

@@ -11,6 +11,7 @@
 用法：
     python tools/verify_email.py <收件邮箱> [用户名]
 """
+import os
 import json
 import re
 import socket
@@ -20,7 +21,7 @@ import time
 from pathlib import Path
 
 # 默认用安装目录的后端，这才是桌面端实际运行的那一份
-APP_DIR = Path(r"<用户目录>\AppData\Local\AuthBaseline")
+APP_DIR = Path(os.path.join(os.environ.get("LOCALAPPDATA") or os.path.expanduser("~/AppData/Local"), "AuthBaseline"))
 EXE = APP_DIR / "authserver.exe"
 PORT = 5215
 

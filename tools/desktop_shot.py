@@ -26,7 +26,7 @@ from ctypes import wintypes
 from pathlib import Path
 
 APP_DIR = Path(os.environ.get(
-    "E2E_APPDIR", r"<用户目录>\AppData\Local\AuthBaseline"))
+    "E2E_APPDIR", os.path.join(os.environ.get("LOCALAPPDATA") or os.path.expanduser("~/AppData/Local"), "AuthBaseline")))
 EXE = APP_DIR / "auth-baseline-desktop.exe"
 TITLE_KEY = "基线系统"
 
