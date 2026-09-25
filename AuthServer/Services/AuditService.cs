@@ -63,11 +63,15 @@ public sealed class AuditService
     private readonly IConfiguration _config;
 
     /// <summary>
-    /// 写入临界区锁。
+    /// 链临界区锁：写入与完整性校验共用。
     ///
-    /// 为什么必须有：哈希链要求"读链尾 → 算哈希 → 插入 → 推进链尾"四步原子完成。
+    /// 写入侧：哈希链要求"读链尾 → 算哈希 → 插入 → 推进链尾"四步原子完成。
     /// 若并发进入，两个请求会读到同一个链尾，生成两条 prevHash 相同的记录，
     /// 链就此分叉 —— 之后校验接口会把它报成"遭到篡改"，属于自己制造的假警报。
+    ///
+    /// 校验侧（VerifyAsync 同样持锁）：写入内部存在"锚点已占号、记录尚未插入"
+    /// 的瞬时窗口，不持锁的校验若恰好在此窗口比对锚点，会把进行中的写入
+    /// 误报成"链尾缺失"。详见 VerifyAsync 内的说明。
     /// Web 服务天然并发，这把锁不是可选项。
     /// </summary>
     private static readonly SemaphoreSlim WriteLock = new(1, 1);
@@ -312,6 +316,29 @@ public sealed class AuditService
     /// </summary>
     public async Task<ChainVerifyResult> VerifyAsync()
     {
+        // 与 WriteAsync 共用同一把写锁：校验期间阻塞写入，写入期间阻塞校验。
+        //
+        // 为什么必须拿锁：写入分三步（原子占号 → 插入记录 → 更新锚点哈希），
+        // 而本校验是"先读全部记录、最后读锚点"。若校验恰好卡在
+        // "锚点已 +1、记录尚未插入"的几毫秒窗口里读锚点，就会看到
+        // 锚点 seq 比实际最大 seq 大 1 —— 被误报成"链尾缺失、尾部记录被删除"。
+        // 这不是理论风险：前端 20 秒日志轮询与 30 秒完整性巡检每 60 秒对齐一次，
+        // 实测每分钟都会稳定复现一次假告警。
+        // 拿锁后校验看到的一定是"静止的链"：任何写入要么已完成、要么尚未开始。
+        await WriteLock.WaitAsync();
+        try
+        {
+            return await VerifyLockedAsync();
+        }
+        finally
+        {
+            WriteLock.Release();
+        }
+    }
+
+    /// <summary>持锁执行的全链校验（由 VerifyAsync 串行化后调用，不直接对外）。</summary>
+    private async Task<ChainVerifyResult> VerifyLockedAsync()
+    {
         var result = new ChainVerifyResult { Intact = true };
 
         var shards = await ListShardsAsync();
@@ -546,16 +573,28 @@ public sealed class AuditService
         !string.IsNullOrEmpty(hay) && hay.Contains(needle, StringComparison.OrdinalIgnoreCase);
 
     /// <summary>统计各结果数量，供仪表盘展示（覆盖全部分片）。</summary>
-    public async Task<(long Total, long Failed, long Tampered)> StatsAsync()
+    public async Task<(long Total, long Failed, long Tampered, long Denied, long LatestDeniedSeq)> StatsAsync()
     {
-        long total = 0, failed = 0, tampered = 0;
+        long total = 0, failed = 0, tampered = 0, denied = 0, latestDeniedSeq = 0;
         foreach (var s in await ListShardsAsync())
         {
             var col = ShardCollection(s.Shard);
             total += s.Count;
             failed += await col.CountDocumentsAsync(Builders<AuditLog>.Filter.Eq(x => x.Result, AuditResult.Failed));
             tampered += await col.CountDocumentsAsync(Builders<AuditLog>.Filter.Eq(x => x.Action, AuditAction.AuditTampered));
+
+            // 越权访问被拒：既要总数，也要"最新一条的序号"。
+            // 序号供前端判断"本次会话期间有没有新发生的越权尝试" ——
+            // 这个判断刻意不走日志查询接口：查询本身会留下 AUDIT_QUERY 记录，
+            // 若靠轮询查询来实现巡检，巡检自己就会把审计日志灌爆。
+            var deniedFilter = Builders<AuditLog>.Filter.Eq(x => x.Action, AuditAction.AuditAccessDenied);
+            denied += await col.CountDocumentsAsync(deniedFilter);
+            var newest = await col.Find(deniedFilter)
+                .Sort(Builders<AuditLog>.Sort.Descending(x => x.Seq))
+                .Limit(1)
+                .FirstOrDefaultAsync();
+            if (newest != null && newest.Seq > latestDeniedSeq) latestDeniedSeq = newest.Seq;
         }
-        return (total, failed, tampered);
+        return (total, failed, tampered, denied, latestDeniedSeq);
     }
 }

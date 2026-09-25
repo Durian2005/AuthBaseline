@@ -38,11 +38,20 @@ public class Session
     public string UserId { get; set; } = string.Empty;
 
     /// <summary>
-    /// 签发时的管理员快照。**仅用于审计留痕，不用于鉴权判定**。
+    /// 签发时的管理员快照（改造前字段）。**仅用于审计留痕，不用于鉴权判定**。
     /// 鉴权一律实时查库，避免"签发时是管理员、现在已被降级"的授权残留。
+    /// 角色分离改造后由 RoleAtIssue 取代，保留此字段以兼容老会话文档。
     /// </summary>
     [BsonElement("isAdminAtIssue")]
     public bool IsAdminAtIssue { get; set; }
+
+    /// <summary>
+    /// 签发时的角色快照。同样**只做审计留痕，不参与鉴权** ——
+    /// 每次请求都会重新查库取当前角色，所以"角色被撤销后旧票据立刻失去对应能力"。
+    /// </summary>
+    [BsonElement("roleAtIssue")]
+    [BsonRepresentation(BsonType.String)]
+    public UserRole RoleAtIssue { get; set; } = UserRole.User;
 
     [BsonElement("issuedAt")]
     public DateTime IssuedAt { get; set; } = DateTime.UtcNow;

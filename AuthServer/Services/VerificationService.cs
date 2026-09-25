@@ -17,7 +17,7 @@ public static class EmailUtil
         !string.IsNullOrWhiteSpace(email) && EmailPattern.IsMatch(email.Trim());
 
     /// <summary>
-    /// 邮箱脱敏，用于界面提示与审计日志：someone@example.com → s*****@example.com。
+    /// 邮箱脱敏，用于界面提示与审计日志：user@example.com → u*****@example.com。
     /// 固定用 5 个星号，连长度也不暴露。
     /// </summary>
     public static string Mask(string? email)
@@ -40,6 +40,42 @@ public sealed record SendCodeResult(bool Success, string Code, string Message, E
 
 /// <summary>校验结果。</summary>
 public sealed record VerifyCodeResult(bool Success, string Code, string Message, EmailCode? Record = null);
+
+/// <summary>
+/// 验证码失败的业务 code → 审计原因码。
+///
+/// 两套码刻意分开，不要合并：
+///   - Code 会出现在 HTTP 响应里，是**给用户看**的（"验证码已过期，请重新获取"）；
+///   - reasonCode 只进审计库，是**给审计员筛**的（CODE_EXPIRED）。
+/// 现在它们一一对应，但一旦某天为了防枚举把对外话术统一成一句，
+/// 审计就会跟着丢失区分度 —— 那正是最需要留痕的时候。所以映射单独放在这里。
+/// </summary>
+public static class VerifyCodeReason
+{
+    public static string From(string code) => code switch
+    {
+        "CODE_INVALID" => AuditReason.CodeInvalid,
+        "CODE_USED" => AuditReason.CodeUsed,
+        "CODE_EXPIRED" => AuditReason.CodeExpired,
+        "EMAIL_MISMATCH" => AuditReason.EmailMismatch,
+        "CODE_TOO_MANY_ATTEMPTS" => AuditReason.CodeTooManyAttempts,
+        "CODE_MISMATCH" => AuditReason.CodeInvalid,
+        "CODE_REQUIRED" => AuditReason.CodeRequired,
+        _ => AuditReason.CodeInvalid
+    };
+}
+
+/// <summary>发码失败的业务 code → 审计原因码。与 VerifyCodeReason 同理，两套码不合并。</summary>
+public static class SendCodeReason
+{
+    public static string From(string code) => code switch
+    {
+        "RESEND_TOO_SOON" => AuditReason.ResendTooSoon,
+        "EMAIL_DISABLED" => AuditReason.EmailDisabled,
+        "EMAIL_SEND_FAILED" => AuditReason.EmailSendFailed,
+        _ => AuditReason.EmailSendFailed
+    };
+}
 
 /// <summary>
 /// 邮箱验证码服务：生成、发送、校验、限流。

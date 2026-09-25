@@ -136,9 +136,53 @@ public class MongoDbService
                 Username = "admin",
                 PasswordHash = hash,
                 Status = UserStatus.Enabled,
-                IsAdmin = true,
+                Role = UserRole.Admin,
                 CreatedAt = DateTime.UtcNow
             });
+        }
+
+        MigrateLegacyRoles();
+    }
+
+    /// <summary>
+    /// 角色分离改造的一次性数据回填。
+    ///
+    /// 改造前的账号只有 `isAdmin` 布尔位、没有 `role` 字段。驱动反序列化时
+    /// 缺失的枚举字段会取默认值 0（User），因此**无法在代码里区分**
+    /// "角色真的是 User" 和 "字段压根不存在" —— 必须用 BSON 层面的
+    /// `Exists(role, false)` 去判断。
+    ///
+    /// 映射规则：老管理员 → Admin，其余老账号 → User。
+    /// 这是幂等的：回填后所有文档都有了 role 字段，下次启动两个 UpdateMany 命中 0 条。
+    /// </summary>
+    private void MigrateLegacyRoles()
+    {
+        try
+        {
+            var noRoleField = Builders<User>.Filter.Exists("role", false);
+
+            // 先迁移老管理员（isAdmin=true），再兜底其余账号为普通用户。
+            // 顺序不能反：后一条会把所有"无 role 字段"的文档都设成 User。
+            var admins = _users.UpdateMany(
+                noRoleField & Builders<User>.Filter.Eq("isAdmin", true),
+                Builders<User>.Update.Set(u => u.Role, UserRole.Admin));
+
+            var others = _users.UpdateMany(
+                noRoleField,
+                Builders<User>.Update.Set(u => u.Role, UserRole.User));
+
+            if (admins.ModifiedCount > 0 || others.ModifiedCount > 0)
+            {
+                Console.WriteLine(
+                    $"[Mongo] 角色回填完成：老管理员 {admins.ModifiedCount} 个 → Admin，"
+                    + $"普通账号 {others.ModifiedCount} 个 → User");
+            }
+        }
+        catch (Exception ex)
+        {
+            // 回填失败不应阻断启动，但必须显式暴露 —— 否则会出现
+            // "老管理员登录后没了管理权限"这种难以定位的现象。
+            Console.WriteLine($"[Mongo] 角色回填失败（可能导致老管理员权限丢失）: {ex.Message}");
         }
     }
 

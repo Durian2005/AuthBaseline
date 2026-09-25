@@ -16,6 +16,25 @@ public sealed class TicketAuthResult
 }
 
 /// <summary>
+/// 接口所需的访问级别。调用方声明"这个接口需要什么"，而不是自己写 if 判断角色 ——
+/// 权限判定集中在 UserRoles 里，新增角色时不会出现"某个接口漏改"的漏洞。
+/// </summary>
+public enum AccessLevel
+{
+    /// <summary>只要登录即可（登出、改自己的口令）。</summary>
+    Authenticated,
+
+    /// <summary>需要用户管理能力：Admin 或 UserAdmin。</summary>
+    UserAdmin,
+
+    /// <summary>需要角色任免能力：仅 Admin。创建账号、任命审计管理员走这一级。</summary>
+    Admin,
+
+    /// <summary>需要审计读取能力：仅 AuditAdmin。管理员在此被结构性排除。</summary>
+    AuditRead
+}
+
+/// <summary>
 /// 会话票据服务：签发 / 校验 / 吊销。
 ///
 /// 这是实验二「02 看不到」的技术核心 ——
@@ -24,7 +43,7 @@ public sealed class TicketAuthResult
 /// 三个必须做对的点：
 ///   1. 票据取自密码学安全随机源（RandomNumberGenerator），不用 Guid / Random；
 ///   2. 每次校验都**重新查库**确认身份与状态，不信票据里的快照 ——
-///      这样权限被转让、账号被锁定后，旧票据立刻失效，不存在授权残留；
+///      这样角色被变更、账号被锁定后，旧票据立刻失效，不存在授权残留；
 ///   3. 滑动过期：有操作就续期，长期静置则自动失效。
 /// </summary>
 public sealed class SessionService
@@ -47,7 +66,8 @@ public sealed class SessionService
             Ticket = GenerateTicket(),
             Username = user.Username,
             UserId = user.Id,
-            IsAdminAtIssue = user.IsAdmin,
+            IsAdminAtIssue = UserRoles.CanManageUsers(user.Role),
+            RoleAtIssue = user.Role,
             IssuedAt = DateTime.UtcNow,
             LastSeenAt = DateTime.UtcNow,
             ExpiresAt = DateTime.UtcNow.Add(SlidingWindow)
@@ -57,11 +77,16 @@ public sealed class SessionService
     }
 
     /// <summary>
-    /// 校验票据。
-    /// requireAdmin = true 时会额外确认该用户**当前**是管理员
-    /// （不是签发时是管理员），杜绝"权限已转出、旧票据仍能操作"。
+    /// 校验票据，并确认该用户**当前**拥有 level 所要求的权限。
+    ///
+    /// 注意是"当前"：角色实时查库，不是签发时的快照。
+    /// 因此任命 / 撤销审计管理员之后，对方的旧票据会立刻失去（或获得）对应能力，
+    /// 不存在"权限已收回但旧会话还畅通无阻"的授权残留。
+    ///
+    /// 调用方通常还会在角色变更后主动吊销目标账号的全部票据，
+    /// 让当事人被迫重新登录、在界面上看到自己的新身份。
     /// </summary>
-    public async Task<TicketAuthResult> ValidateAsync(string? ticket, bool requireAdmin)
+    public async Task<TicketAuthResult> ValidateAsync(string? ticket, AccessLevel level)
     {
         if (string.IsNullOrWhiteSpace(ticket))
         {
@@ -136,15 +161,15 @@ public sealed class SessionService
             };
         }
 
-        if (requireAdmin && !user.IsAdmin)
+        if (!HasAccess(user.Role, level, out var reason, out var message))
         {
             return new TicketAuthResult
             {
                 Success = false,
                 User = user,
                 Session = session,
-                ReasonCode = AuditReason.NotAdmin,
-                Message = "无管理员权限",
+                ReasonCode = reason,
+                Message = message,
                 HttpStatus = 403
             };
         }
@@ -157,6 +182,63 @@ public sealed class SessionService
                 .Set(s => s.ExpiresAt, DateTime.UtcNow.Add(SlidingWindow)));
 
         return new TicketAuthResult { Success = true, User = user, Session = session };
+    }
+
+    /// <summary>
+    /// 权限判定的唯一实现。角色能力定义在 UserRoles，这里只负责
+    /// 把"能力不足"翻译成带审计语义的拒绝原因码。
+    /// </summary>
+    private static bool HasAccess(UserRole role, AccessLevel level, out string reason, out string message)
+    {
+        reason = string.Empty;
+        message = string.Empty;
+
+        switch (level)
+        {
+            case AccessLevel.Authenticated:
+                return true;
+
+            case AccessLevel.UserAdmin:
+                if (UserRoles.CanManageUsers(role)) return true;
+                reason = AuditReason.NotAdmin;
+                message = "无管理员权限";
+                return false;
+
+            case AccessLevel.Admin:
+                if (UserRoles.CanAssignRoles(role)) return true;
+                // 用户管理员能管用户但无权任免角色 —— 单独给原因码，
+                // 让"低阶管理员试图提权"在审计里可被一眼捞出。
+                reason = UserRoles.CanManageUsers(role)
+                    ? AuditReason.ForbiddenRole
+                    : AuditReason.NotAdmin;
+                message = UserRoles.CanManageUsers(role)
+                    ? "该操作需要「管理员」权限，用户管理员无权创建账号或任命角色"
+                    : "无管理员权限";
+                return false;
+
+            case AccessLevel.AuditRead:
+                if (UserRoles.CanReadAudit(role)) return true;
+                // 区分两种越界：
+                //   - 普通用户来够审计数据 → NOT_ADMIN（就是权限不足）
+                //   - 管理员来够审计数据     → NOT_AUDIT_ADMIN（越过职责边界，
+                //     这正是"管账号的人看不到日志"这条规则被试探的直接证据）
+                if (UserRoles.CanManageUsers(role))
+                {
+                    reason = AuditReason.NotAuditAdmin;
+                    message = "审计数据仅对审计管理员开放，管理员与用户管理员均无权查看";
+                }
+                else
+                {
+                    reason = AuditReason.NotAdmin;
+                    message = "无权限查看审计数据";
+                }
+                return false;
+
+            default:
+                reason = AuditReason.NotAdmin;
+                message = "无权限";
+                return false;
+        }
     }
 
     /// <summary>吊销票据（登出）。</summary>

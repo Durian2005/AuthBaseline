@@ -22,7 +22,7 @@ public class EmailOptions
 
     public bool UseSsl { get; set; } = true;
 
-    /// <summary>发件邮箱完整地址，如 someone@example.com。</summary>
+    /// <summary>发件邮箱完整地址，如 noreply@example.com。</summary>
     public string Account { get; set; } = string.Empty;
 
     /// <summary>16 位 SMTP 授权码（不是邮箱登录密码）。</summary>

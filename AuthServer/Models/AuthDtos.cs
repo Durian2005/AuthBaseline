@@ -68,21 +68,53 @@ public class DeleteUserRequest
 }
 
 /// <summary>
-/// 管理员权限转让请求。
-/// Password 为现任管理员的登录口令：转让属于特权变更，必须二次校验操作者身份，
-/// 仅凭会话中的用户名不足以证明操作者本人。
+/// 管理员创建账号（用户管理员 / 审计管理员）。
+///
+/// 与自助注册的区别：**不绑邮箱、不需要验证码、建号即启用**。
+/// 因此这个接口本身就是一条高权限通道，必须由管理员发起，
+/// 且要求二次校验操作者口令 —— 仅凭会话不足以证明是本人操作。
 /// </summary>
-public class TransferAdminRequest
+public class CreateAccountRequest
 {
-    public string AdminUsername { get; set; } = string.Empty;
-    public string TargetUsername { get; set; } = string.Empty;
+    public string Username { get; set; } = string.Empty;
     public string Password { get; set; } = string.Empty;
+
+    /// <summary>目标角色：UserAdmin（用户管理员）或 AuditAdmin（审计管理员）。</summary>
+    public string Role { get; set; } = string.Empty;
+
+    /// <summary>操作者（管理员）本人的登录口令，用于二次身份确认。</summary>
+    public string OperatorPassword { get; set; } = string.Empty;
+}
+
+/// <summary>
+/// 变更他人角色 —— 这是"指定某位管理员为审计管理员"的落地接口。
+/// 同样需要操作者二次口令：角色任免是系统内权限最高的操作。
+/// </summary>
+public class SetRoleRequest
+{
+    public string Username { get; set; } = string.Empty;
+
+    /// <summary>目标角色：User / UserAdmin / AuditAdmin（不接受 Admin）。</summary>
+    public string Role { get; set; } = string.Empty;
+
+    public string OperatorPassword { get; set; } = string.Empty;
 }
 
 public class LoginResult
 {
     public string Username { get; set; } = string.Empty;
     public string Status { get; set; } = string.Empty;
+
+    /// <summary>角色标识：User / Admin / UserAdmin / AuditAdmin。</summary>
+    public string Role { get; set; } = string.Empty;
+
+    /// <summary>角色中文显示名。</summary>
+    public string RoleLabel { get; set; } = string.Empty;
+
+    /// <summary>
+    /// 是否具备用户管理能力（Admin / UserAdmin）。审计管理员为 false。
+    /// 由 Role 派生，保留是为了兼容既有前端字段。
+    /// </summary>
     public bool IsAdmin { get; set; }
 
     /// <summary>

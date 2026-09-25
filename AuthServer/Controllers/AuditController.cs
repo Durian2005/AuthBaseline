@@ -46,8 +46,12 @@ public class AuditController : ControllerBase
     /**
      * 审计数据的统一入口守卫。
      *
-     * 越权访问（无票据 / 票据无效 / 非管理员）**都会写入一条拒绝事件**，
-     * 这是"普通用户查询审计日志必须被拒绝"这件事能被证明的关键：
+     * 门槛是 AccessLevel.AuditRead —— **仅审计管理员**。管理员（含初始 admin）
+     * 与用户管理员一律被拒：这不是"某处拦了他"，而是他的角色
+     * 压根不满足 AuditRead 的判定条件。管账号的人因此看不到日志。
+     *
+     * 越权访问（无票据 / 票据无效 / 非审计管理员）**都会写入一条拒绝事件**，
+     * 这是"管理员不能查看审计日志"这件事能被证明的关键：
      * 光返回 403 不够，必须同时留下"谁在什么时候试图看过审计数据"的记录。
      *
      * action 一律传 AuditAction.AuditAccessDenied —— 这里记录的是"访问被拒"这件事本身，
@@ -55,9 +59,9 @@ public class AuditController : ControllerBase
      * 拒绝事件就和正常查询混在同一个 action 下，只能靠 result=Failed 间接区分，
      * 验收时没法一条查询列出全部越权尝试。
      */
-    private async Task<(User? Admin, IActionResult? Deny)> RequireAdminAsync(string action, string target)
+    private async Task<(User? Auditor, IActionResult? Deny)> RequireAuditAsync(string action, string target)
     {
-        var auth = await _sessions.ValidateAsync(ReadTicket(), requireAdmin: true);
+        var auth = await _sessions.ValidateAsync(ReadTicket(), AccessLevel.AuditRead);
         if (auth.Success) return (auth.User, null);
 
         var resp = new ApiResponse { Success = false, Code = auth.ReasonCode, Message = auth.Message };
@@ -67,7 +71,17 @@ public class AuditController : ControllerBase
             OperatorName = auth.User?.Username ?? "anonymous",
             Action = action,
             StatusBefore = auth.User?.Status.ToString() ?? "N/A",
-            Request = new { AttemptedTarget = target, Path = Request.Path.Value },
+            // 与 AuthController.RequireAdminAsync 保持一致：留住被尝试访问的接口
+            // 与原始查询串。越权尝试最常见的形态就是"在 URL 里声明自己是管理员"
+            // （如 ?adminUsername=admin），只记 Path 会丢掉这类伪冒手法的原始形态。
+            Request = new
+            {
+                AttemptedTarget = target,
+                Reason = auth.ReasonCode,
+                Role = auth.User is null ? "anonymous" : auth.User.Role.ToString(),
+                Path = Request.Path.Value,
+                Query = Request.QueryString.Value
+            },
             Response = resp,
             StatusAfter = auth.User?.Status.ToString() ?? "N/A",
             Target = target,
@@ -91,7 +105,7 @@ public class AuditController : ControllerBase
     [HttpGet("verify")]
     public async Task<IActionResult> Verify()
     {
-        var (admin, deny) = await RequireAdminAsync(AuditAction.AuditAccessDenied, "audit/verify");
+        var (auditor, deny) = await RequireAuditAsync(AuditAction.AuditAccessDenied, "audit/verify");
         if (deny != null) return deny;
 
         var result = await _audit.VerifyAsync();
@@ -102,8 +116,8 @@ public class AuditController : ControllerBase
         {
             await _audit.WriteAsync(new AuditEntry
             {
-                OperatorId = admin!.Id,
-                OperatorName = admin.Username,
+                OperatorId = auditor!.Id,
+                OperatorName = auditor.Username,
                 Action = AuditAction.AuditTampered,
                 StatusBefore = "INTACT",
                 Request = new { Checked = result.Checked },
@@ -119,8 +133,8 @@ public class AuditController : ControllerBase
 
         await _audit.WriteAsync(new AuditEntry
         {
-            OperatorId = admin!.Id,
-            OperatorName = admin.Username,
+            OperatorId = auditor!.Id,
+            OperatorName = auditor.Username,
             Action = AuditAction.AuditVerify,
             StatusBefore = "N/A",
             Request = new { },
@@ -146,7 +160,7 @@ public class AuditController : ControllerBase
     [HttpGet("shards")]
     public async Task<IActionResult> Shards()
     {
-        var (admin, deny) = await RequireAdminAsync(AuditAction.AuditAccessDenied, "audit/shards");
+        var (auditor, deny) = await RequireAuditAsync(AuditAction.AuditAccessDenied, "audit/shards");
         if (deny != null) return deny;
 
         var shards = await _audit.ListShardsAsync();
@@ -165,15 +179,15 @@ public class AuditController : ControllerBase
         [FromQuery] int page = 1, [FromQuery] int pageSize = 50,
         [FromQuery] bool includeArchived = true)
     {
-        var (admin, deny) = await RequireAdminAsync(AuditAction.AuditAccessDenied, "audit/logs");
+        var (auditor, deny) = await RequireAuditAsync(AuditAction.AuditAccessDenied, "audit/logs");
         if (deny != null) return deny;
 
         var (items, total) = await _audit.QueryAsync(shard, keyword, action, result, page, pageSize, includeArchived);
 
         await _audit.WriteAsync(new AuditEntry
         {
-            OperatorId = admin!.Id,
-            OperatorName = admin.Username,
+            OperatorId = auditor!.Id,
+            OperatorName = auditor.Username,
             Action = AuditAction.AuditQuery,
             StatusBefore = "N/A",
             Request = new { shard, keyword, action, result, page, pageSize },
@@ -197,15 +211,25 @@ public class AuditController : ControllerBase
     [HttpGet("stats")]
     public async Task<IActionResult> Stats()
     {
-        var (admin, deny) = await RequireAdminAsync(AuditAction.AuditAccessDenied, "audit/stats");
+        var (auditor, deny) = await RequireAuditAsync(AuditAction.AuditAccessDenied, "audit/stats");
         if (deny != null) return deny;
 
-        var (total, failed, tampered) = await _audit.StatsAsync();
+        var (total, failed, tampered, denied, latestDeniedSeq) = await _audit.StatsAsync();
         return Ok(new ApiResponse<object>
         {
             Success = true,
             Code = "OK",
-            Data = new { Total = total, Failed = failed, TamperedAlerts = tampered }
+            Data = new
+            {
+                Total = total,
+                Failed = failed,
+                TamperedAlerts = tampered,
+                // 越权访问被拒：总数 + 最新一条的序号。
+                // 前端靠 LatestDeniedSeq 判断是否出现了新的越权尝试，
+                // 从而在不产生额外审计记录的前提下实现实时告警。
+                AccessDenied = denied,
+                LatestDeniedSeq = latestDeniedSeq
+            }
         });
     }
 }
