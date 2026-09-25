@@ -13,6 +13,12 @@
   3. 非文本文件（数据库导出 JSON 等）按容器语义判定 ——
      这类文件哪怕扫不出"关键字"，它本身就是一份数据泄漏。
 
+边界（实测踩过）：1、2 走的都是 `--all` 的**可达**对象。
+若有一段旧历史被"忘了重指的附注标签"之类吊着，这里会报干净而实际没清干净。
+要下"对象库里没有残留"这种结论，得再加一道
+`git cat-file --batch-all-objects --batch` 逐对象扫（那个连不可达对象一起看），
+并且放在 `gc --prune=now` **之后**做。
+
 输出全部脱敏：只给前缀 + 长度 + 行号，不打印完整敏感值，
 免得扫描报告自己变成新的泄漏点。
 
@@ -156,9 +162,19 @@ def main():
             if len(parts) != 2:
                 continue
             sha, path = parts
-            if path in seen:
+            # 去重必须按 **blob sha**，绝不能按路径。
+            #
+            # 按路径去重时，同一个文件只扫到"第一个遇到的"那个版本 ——
+            # 于是"某文件早期写过本机绝对路径、后来改掉了"这种最典型的泄漏
+            # 会被整段漏掉，而报告照样显示"历史很干净"。
+            # 实测漏了 11 个 blob（tools/desktop_e2e.py、desktop_shot.py 等
+            # 早期版本里写死的 C:\Users\<登录名>），直到改用
+            # `cat-file --batch-all-objects` 逐对象扫才暴露出来。
+            #
+            # 按 sha 去重既完整（内容相同才跳过）又不会重复扫。
+            if sha in seen:
                 continue
-            seen.add(path)
+            seen.add(sha)
             if is_text(path):
                 blob_shas.append((sha, path))
         print("  待扫文本 blob: %d" % len(blob_shas))
