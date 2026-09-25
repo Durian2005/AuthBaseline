@@ -7,7 +7,8 @@ defineProps({
   activeKey: { type: String, default: '' },
   username: { type: String, default: '' },
   status: { type: String, default: '' },
-  isAdmin: { type: Boolean, default: false }
+  /** 角色中文显示名（管理员 / 用户管理员 / 审计管理员），空串表示普通用户不显示 */
+  roleLabel: { type: String, default: '' }
 })
 
 const emit = defineEmits(['select', 'logout'])
@@ -42,7 +43,9 @@ const initial = (name) => (name ? name.trim().charAt(0).toUpperCase() : '?')
           <div class="me__name selectable" :title="username">{{ username }}</div>
           <div class="me__meta">
             <StatusBadge :status="status" />
-            <span v-if="isAdmin" class="me__role">管理员</span>
+            <!-- 角色徽章：让用户一眼看清"我现在是谁"，
+                 尤其在角色被变更、重新登录之后 -->
+            <span v-if="roleLabel && roleLabel !== '普通用户'" class="me__role">{{ roleLabel }}</span>
           </div>
         </div>
         <button
@@ -193,8 +196,14 @@ const initial = (name) => (name ? name.trim().charAt(0).toUpperCase() : '?')
 }
 
 .me__role {
+  padding: 0 6px;
+  border-radius: var(--r-sm);
+  background: var(--c-primary-soft);
+  color: var(--c-primary);
   font-size: var(--fs-xs);
-  color: var(--c-text-subtle);
+  font-weight: 600;
+  line-height: 16px;
+  white-space: nowrap;
 }
 
 .me__logout {

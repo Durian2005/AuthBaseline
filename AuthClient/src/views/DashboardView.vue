@@ -16,6 +16,12 @@ const busyUser = ref('')
 
 const recentLogs = computed(() => session.logs.slice(0, 8))
 
+/** 完整性校验的结论文案：审计管理员最关心的一格 */
+const integrityLabel = computed(() => {
+  if (!session.integrity) return '未校验'
+  return session.integrity.intact ? '完整' : '已断裂'
+})
+
 const greeting = computed(() => {
   const h = new Date(now.value).getHours()
   if (h < 6) return '夜深了'
@@ -24,6 +30,28 @@ const greeting = computed(() => {
   if (h < 18) return '下午好'
   return '晚上好'
 })
+
+/**
+ * 按当前角色刷新本页数据。
+ *
+ * 两类角色的数据来自完全不同的接口，**不能混着调**：
+ * 管理员没有审计权限，顺手刷新日志只会撞 403，
+ * 还会在审计链里留下自己制造的 AUDIT_ACCESS_DENIED 记录。
+ */
+async function refreshCurrent() {
+  try {
+    if (session.isAuditAdmin) {
+      await session.refreshAuditData()
+    } else if (session.isAdmin) {
+      await session.refreshAdminData()
+    } else {
+      await session.refreshUsers()
+    }
+    toast.success('数据已刷新')
+  } catch (err) {
+    toast.error(err?.message || '刷新失败')
+  }
+}
 
 async function quickApprove(username) {
   busyUser.value = username
@@ -51,10 +79,15 @@ defineEmits(['navigate'])
         <p class="head__sub">
           当前账号状态
           <StatusBadge :status="session.status" />
-          <span v-if="session.isAdmin" class="head__role">管理员</span>
+          <span v-if="session.role !== 'User'" class="head__role">{{ session.roleLabel }}</span>
         </p>
       </div>
-      <button type="button" class="btn" @click="session.refreshAdminData()">
+      <button
+        v-if="session.isAdmin || session.isAuditAdmin"
+        type="button"
+        class="btn"
+        @click="refreshCurrent"
+      >
         <AppIcon name="refresh" :size="14" />
         <span>刷新数据</span>
       </button>
@@ -69,14 +102,27 @@ defineEmits(['navigate'])
       </div>
     </div>
 
-    <!-- 管理员：统计概览 -->
+    <!-- 管理员：用户视角。
+         这里刻意**不出现任何审计数据** —— 管理员没有审计权限，
+         拿不到日志条数，也不该在这一页看到"最近有哪些操作"。
+         需要看日志的是审计管理员，入口在他们自己的视图里。 -->
     <template v-if="session.isAdmin">
       <section class="stats">
-        <StatCard icon="users" label="用户总数" :value="session.stats.total" tone="primary" hint="含管理员账号" />
+        <StatCard icon="users" label="用户总数" :value="session.stats.total" tone="primary" hint="全部账号" />
         <StatCard icon="clock" label="待审核" :value="session.stats.pending" tone="pending" hint="等待放行" />
         <StatCard icon="lock" label="已锁定" :value="session.stats.locked" tone="locked" hint="口令错误保护" />
-        <StatCard icon="file-text" label="审计日志" :value="session.stats.logs" tone="info" hint="最近 200 条" />
+        <StatCard
+          icon="user-check"
+          label="管理类账号"
+          :value="session.adminUsers.length"
+          tone="info"
+          hint="管理员 + 用户管理员"
+        />
       </section>
+      <p class="hint">
+        <AppIcon name="info" :size="13" />
+        <span>审计日志仅审计管理员可见，管理员与用户管理员均无权查看。</span>
+      </p>
 
       <div class="cols">
         <!-- 待审核队列 -->
@@ -121,41 +167,78 @@ defineEmits(['navigate'])
           </div>
         </section>
 
-        <!-- 最近操作 -->
-        <section class="panel">
-          <div class="panel__head">
-            <h3 class="panel__title">
-              <AppIcon name="activity" :size="15" />
-              <span>最近操作</span>
-            </h3>
-            <button type="button" class="btn btn--sm btn--ghost" @click="$emit('navigate', 'audit')">
-              <span>全部日志</span>
-              <AppIcon name="chevron-right" :size="13" />
-            </button>
-          </div>
-
-          <ul v-if="recentLogs.length" class="feed">
-            <li v-for="log in recentLogs" :key="log.id" class="feed__item">
-              <span class="feed__dot" :class="`feed__dot--${actionMeta(log.action).tone}`" />
-              <div class="feed__body">
-                <div class="feed__line">
-                  <strong class="selectable">{{ log.operatorName || 'anonymous' }}</strong>
-                  <span>{{ actionMeta(log.action).label }}</span>
-                </div>
-                <div class="feed__time">{{ formatRelative(log.timestamp, now) }}</div>
-              </div>
-              <span class="feed__state" :title="`${log.statusBefore} → ${log.statusAfter}`">
-                {{ log.statusAfter }}
-              </span>
-            </li>
-          </ul>
-
-          <div v-else class="empty">
-            <AppIcon name="file-text" :size="22" />
-            <p class="empty__title">暂无审计记录</p>
-          </div>
-        </section>
       </div>
+    </template>
+
+    <!-- 审计管理员：审计视角。
+         与管理员视图严格对称 —— 这里**不出现任何用户管理数据**
+         （没有待审核队列、没有用户总数）。审计管理员管不了账号，
+         也不该从这一页看到"系统里有多少人待放行"。 -->
+    <template v-else-if="session.isAuditAdmin">
+      <section class="stats">
+        <StatCard
+          icon="file-text"
+          label="审计记录"
+          :value="session.auditTotal"
+          tone="primary"
+          hint="全部分片累计"
+        />
+        <StatCard
+          icon="minus-circle"
+          label="失败事件"
+          :value="session.auditFailed"
+          tone="locked"
+          hint="结果为失败"
+        />
+        <StatCard
+          icon="shield-check"
+          label="链完整性"
+          :value="integrityLabel"
+          :tone="session.integrity && !session.integrity.intact ? 'pending' : 'enabled'"
+          hint="最近一次校验"
+        />
+        <StatCard
+          icon="database"
+          label="分片数量"
+          :value="session.shards.length"
+          tone="info"
+          hint="轮转归档"
+        />
+      </section>
+
+      <section class="panel">
+        <div class="panel__head">
+          <h3 class="panel__title">
+            <AppIcon name="activity" :size="15" />
+            <span>最近操作</span>
+          </h3>
+          <button type="button" class="btn btn--sm btn--ghost" @click="$emit('navigate', 'audit')">
+            <span>全部日志</span>
+            <AppIcon name="chevron-right" :size="13" />
+          </button>
+        </div>
+
+        <ul v-if="recentLogs.length" class="feed">
+          <li v-for="log in recentLogs" :key="log.id" class="feed__item">
+            <span class="feed__dot" :class="`feed__dot--${actionMeta(log.action).tone}`" />
+            <div class="feed__body">
+              <div class="feed__line">
+                <strong class="selectable">{{ log.operatorName || 'anonymous' }}</strong>
+                <span>{{ actionMeta(log.action).label }}</span>
+              </div>
+              <div class="feed__time">{{ formatRelative(log.timestamp, now) }}</div>
+            </div>
+            <span class="feed__state" :title="`${log.statusBefore} → ${log.statusAfter}`">
+              {{ log.statusAfter }}
+            </span>
+          </li>
+        </ul>
+
+        <div v-else class="empty">
+          <AppIcon name="file-text" :size="22" />
+          <p class="empty__title">暂无审计记录</p>
+        </div>
+      </section>
     </template>
 
     <!-- 普通用户：安全概览 -->
@@ -181,7 +264,7 @@ defineEmits(['navigate'])
           </div>
           <div class="kv__row">
             <dt>角色</dt>
-            <dd>普通用户</dd>
+            <dd>{{ session.roleLabel }}</dd>
           </div>
           <div class="kv__row">
             <dt>最后同步</dt>
@@ -265,6 +348,20 @@ defineEmits(['navigate'])
   grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
   gap: var(--sp-3);
   align-items: start;
+}
+
+/* 权限提示条：向管理员说明"为什么这一页看不到审计数据"，
+   避免被误当成功能缺失 */
+.hint {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: 0 var(--sp-1);
+  font-size: var(--fs-sm);
+  color: var(--c-text-subtle);
+}
+.hint > svg {
+  flex-shrink: 0;
 }
 
 /* 待审核队列 */

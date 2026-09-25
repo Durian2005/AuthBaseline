@@ -217,10 +217,27 @@ export const api = {
 
   deleteUser: (username) => request('/auth/delete-user', { method: 'POST', body: { username } }),
 
-  transferAdmin: (targetUsername, password) =>
-    request('/auth/transfer-admin', {
+  /**
+   * 管理员创建账号（用户管理员 / 审计管理员）。
+   *
+   * 与 register 的区别：不绑邮箱、不发验证码、建号即启用。
+   * operatorPassword 是操作者本人的登录口令 —— 后端要求二次确认身份，
+   * 仅凭会话票据不足以发起这种高权限操作。
+   */
+  createAccount: (username, password, role, operatorPassword) =>
+    request('/auth/create-account', {
       method: 'POST',
-      body: { targetUsername, password }
+      body: { username, password, role, operatorPassword }
+    }),
+
+  /**
+   * 变更他人角色 —— "指定某位管理员为审计管理员"就是调它。
+   * role 取 'User' | 'UserAdmin' | 'AuditAdmin'（后端拒绝 'Admin'）。
+   */
+  setRole: (username, role, operatorPassword) =>
+    request('/auth/set-role', {
+      method: 'POST',
+      body: { username, role, operatorPassword }
     }),
 
   getUsers: (signal) => request('/auth/users', { signal }),

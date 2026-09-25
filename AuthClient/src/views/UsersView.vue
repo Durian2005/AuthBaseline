@@ -82,6 +82,20 @@ async function run(action, username) {
 const target = ref(null)
 const deleting = ref(false)
 
+/**
+ * 注销确认里的风险提示。
+ * 注销管理员 / 审计管理员现在是被允许的，但后果比删普通用户大得多
+ * （前者带走角色任免能力，后者带走审计独立性），必须在确认框里说清楚。
+ */
+const deleteDetail = computed(() => {
+  const u = target.value
+  if (!u) return ''
+  const base = '该账号将从数据库中永久删除，且无法恢复。此操作会写入审计日志。'
+  if (u.role === 'Admin') return base + '注销后系统将少一个能任命角色的账号。'
+  if (u.role === 'AuditAdmin') return base + '注销后其审计查看能力需由其他审计管理员承担。'
+  return base
+})
+
 async function confirmDelete() {
   if (!target.value) return
   deleting.value = true
@@ -96,36 +110,128 @@ async function confirmDelete() {
   }
 }
 
-/* ---------------- 管理员权限转让 ----------------
- * 转让属于特权变更，后端要求二次校验现任管理员口令，
- * 因此这里不能复用 ConfirmDialog（它没有输入项），单独用一个子窗口承载。
- */
-const transferTarget = ref(null)
-const transferPassword = ref('')
-const transferError = ref('')
-const transferring = ref(false)
+/* ---------------- 角色显示与处置权限 ---------------- */
 
-function openTransfer(user) {
-  transferTarget.value = user
-  transferPassword.value = ''
-  transferError.value = ''
+const ROLE_TAGS = {
+  Admin: '管理员',
+  UserAdmin: '用户管理员',
+  AuditAdmin: '审计管理员',
+  User: '普通用户'
 }
 
-async function confirmTransfer() {
-  if (!transferTarget.value || !transferPassword.value) return
-  transferring.value = true
-  transferError.value = ''
+function roleTag(user) {
+  return ROLE_TAGS[user?.role] ?? '普通用户'
+}
+
+/** 这一行是不是操作者自己 —— 自己永远是"受保护"的那一行。 */
+function isSelf(user) {
+  return !!user && user.username === session.currentUser?.username
+}
+
+/**
+ * 能否变更该账号的角色。
+ *
+ * 只有「管理员」有这个入口（用户管理员无权任免角色）；
+ * 管理员可变更**除自己以外**任意账号的角色，含审计管理员与其它管理员。
+ * 后端同样以 FORBIDDEN_TARGET 兜底，这里只是提前隐藏按钮。
+ */
+function canChangeRole(user) {
+  return session.isRoleAdmin && !isSelf(user)
+}
+
+/**
+ * 能否注销该账号。
+ *
+ * 分两级，与后端 UserRoles.CanBeManagedBy 保持一致：
+ *   · 管理员 —— 除自己以外任意账号都能注销，含审计管理员；
+ *   · 用户管理员 —— 只能注销普通用户与用户管理员，够不到审计管理员与管理员。
+ * 自己永远不能注销：否则可能删掉系统里最后一个能任命角色的账号。
+ */
+function canDelete(user) {
+  if (isSelf(user)) return false
+  if (session.isRoleAdmin) return true
+  return user.role === 'User' || user.role === 'UserAdmin'
+}
+
+/* ---------------- 新建账号（用户管理员 / 审计管理员） ----------------
+ * 与自助注册不同：**不需要邮箱与验证码**，建号即可登录。
+ * 但后端要求二次校验操作者本人的登录口令 —— 这是特权操作，
+ * 仅凭会话票据不足以防冒用，所以这里必须再输一次自己的口令。
+ */
+const showCreate = ref(false)
+const createForm = ref({ username: '', password: '', role: 'UserAdmin', operatorPassword: '' })
+const createError = ref('')
+const creating = ref(false)
+
+function openCreate() {
+  createForm.value = { username: '', password: '', role: 'UserAdmin', operatorPassword: '' }
+  createError.value = ''
+  showCreate.value = true
+}
+
+async function confirmCreate() {
+  const f = createForm.value
+  if (!f.username.trim() || !f.password || !f.operatorPassword) {
+    createError.value = '请填写账号、初始口令与您本人的登录口令'
+    return
+  }
+  creating.value = true
+  createError.value = ''
   try {
-    const res = await session.transferAdmin(transferTarget.value.username, transferPassword.value)
-    toast.success(res?.message || '管理员权限已转让')
-    transferTarget.value = null
-    transferPassword.value = ''
-    // 转让后本人降为普通用户，界面会自动离开管理员页面
-    toast.info('您已变为普通用户，管理员功能已不可用')
+    const res = await session.createAccount(
+      f.username.trim(),
+      f.password,
+      f.role,
+      f.operatorPassword
+    )
+    toast.success(res?.message || '账号已创建')
+    showCreate.value = false
   } catch (err) {
-    transferError.value = err?.message || '转让失败'
+    createError.value = err?.message || '创建失败'
   } finally {
-    transferring.value = false
+    creating.value = false
+  }
+}
+
+/* ---------------- 变更角色 ----------------
+ * "指定某位管理员为审计管理员"就是走这里。
+ * 变更成功后**对方**需要重新登录（后端会吊销其票据），操作者自己的会话不受影响。
+ */
+const roleTarget = ref(null)
+const roleForm = ref({ role: 'UserAdmin', operatorPassword: '' })
+const roleError = ref('')
+const savingRole = ref(false)
+
+function openRole(user) {
+  roleTarget.value = user
+  // 默认给一个"反直觉但最常用"的预设：从非审计岗切到审计岗
+  roleForm.value = {
+    role: user.role === 'AuditAdmin' ? 'UserAdmin' : 'AuditAdmin',
+    operatorPassword: ''
+  }
+  roleError.value = ''
+}
+
+async function confirmRole() {
+  if (!roleTarget.value) return
+  if (!roleForm.value.operatorPassword) {
+    roleError.value = '请输入您本人的登录口令'
+    return
+  }
+  savingRole.value = true
+  roleError.value = ''
+  try {
+    const res = await session.setRole(
+      roleTarget.value.username,
+      roleForm.value.role,
+      roleForm.value.operatorPassword
+    )
+    toast.success(res?.message || '角色已变更')
+    roleTarget.value = null
+  } catch (err) {
+    roleError.value = err?.message || '变更失败'
+  } finally {
+    savingRole.value = false
   }
 }
 
@@ -153,11 +259,18 @@ onMounted(() => {
           {{ countOf('Locked') }}
         </p>
       </div>
-      <button type="button" class="btn" :disabled="session.loadingUsers" @click="refresh">
-        <Spinner v-if="session.loadingUsers" :size="14" />
-        <AppIcon v-else name="refresh" :size="14" />
-        <span>刷新</span>
-      </button>
+      <div class="head__actions">
+        <!-- 新建账号入口只有「管理员」能看到：用户管理员能管用户但不能造账号 -->
+        <button v-if="session.isRoleAdmin" type="button" class="btn btn--primary" @click="openCreate">
+          <AppIcon name="user-plus" :size="14" />
+          <span>新建账号</span>
+        </button>
+        <button type="button" class="btn" :disabled="session.loadingUsers" @click="refresh">
+          <Spinner v-if="session.loadingUsers" :size="14" />
+          <AppIcon v-else name="refresh" :size="14" />
+          <span>刷新</span>
+        </button>
+      </div>
     </header>
 
     <!-- 待审核 -->
@@ -274,11 +387,12 @@ onMounted(() => {
         <table class="table table--dense">
           <thead>
             <tr>
-              <th style="width: 22%">用户名</th>
-              <th style="width: 160px">邮箱</th>
-              <th style="width: 100px">状态</th>
-              <th style="width: 84px">失败次数</th>
-              <th style="width: 160px">锁定截止</th>
+              <th style="width: 20%">用户名</th>
+              <th style="width: 110px">角色</th>
+              <th style="width: 150px">邮箱</th>
+              <th style="width: 90px">状态</th>
+              <th style="width: 76px">失败次数</th>
+              <th style="width: 140px">锁定截止</th>
               <th>注册时间</th>
               <th style="width: 230px">操作</th>
             </tr>
@@ -288,10 +402,16 @@ onMounted(() => {
               <td>
                 <div class="name">
                   <span class="selectable">{{ u.username }}</span>
-                  <span v-if="u.isAdmin" class="tag">管理员</span>
+                  <span v-if="u.username === session.currentUser?.username" class="tag tag--me">本人</span>
                 </div>
               </td>
-              <!-- 后端只返回脱敏邮箱：管理员能看到"绑没绑、验没验"，但拿不到完整地址 -->
+              <td>
+                <span class="tag" :class="{ 'tag--audit': u.role === 'AuditAdmin' }">
+                  {{ roleTag(u) }}
+                </span>
+              </td>
+              <!-- 后端只返回脱敏邮箱：管理员能看到"绑没绑、验没验"，但拿不到完整地址。
+                   由管理员创建的账号一律不绑邮箱，这里会显示"未绑定" -->
               <td class="table__mono">
                 <template v-if="u.email">
                   <span :title="u.emailVerified ? '邮箱已验证' : '邮箱未验证'">{{ u.email }}</span>
@@ -315,8 +435,7 @@ onMounted(() => {
               </td>
               <td class="table__mono">{{ formatDateTime(u.createdAt) }}</td>
               <td>
-                <div v-if="u.isAdmin" class="muted">受保护，不可操作</div>
-                <div v-else class="row-actions">
+                <div class="row-actions">
                   <button
                     v-if="u.status === 'Locked'"
                     type="button"
@@ -328,18 +447,19 @@ onMounted(() => {
                     <AppIcon v-else name="unlock" :size="13" />
                     <span>解锁</span>
                   </button>
-                  <!-- 只有处于启用状态的账号才是"合法用户"，才有资格接管管理员权限 -->
+                  <!-- 变更角色：把某位账号指定为审计管理员（或撤销）走这里 -->
                   <button
-                    v-if="u.status === 'Enabled'"
+                    v-if="canChangeRole(u)"
                     type="button"
                     class="btn btn--sm"
-                    :title="`把管理员权限转让给 ${u.username}`"
-                    @click="openTransfer(u)"
+                    :title="`变更「${u.username}」的角色`"
+                    @click="openRole(u)"
                   >
                     <AppIcon name="swap" :size="13" />
-                    <span>转让权限</span>
+                    <span>变更角色</span>
                   </button>
                   <button
+                    v-if="canDelete(u)"
                     type="button"
                     class="btn btn--sm btn--danger"
                     @click="target = u"
@@ -347,12 +467,15 @@ onMounted(() => {
                     <AppIcon name="trash" :size="13" />
                     <span>注销</span>
                   </button>
+                  <span v-if="!canDelete(u) && !canChangeRole(u)" class="muted">
+                  {{ isSelf(u) ? '受保护' : '无操作权限' }}
+                </span>
                 </div>
               </td>
             </tr>
 
             <tr v-if="!filteredUsers.length">
-              <td colspan="7">
+              <td colspan="8">
                 <div class="empty">
                   <AppIcon name="search" :size="22" />
                   <p class="empty__title">没有匹配的用户</p>
@@ -372,61 +495,141 @@ onMounted(() => {
       icon="trash"
       tone="danger"
       :message="`确定要注销用户「${target?.username}」吗？`"
-      detail="该账号将从数据库中永久删除，且无法恢复。此操作会写入审计日志。"
+      :detail="deleteDetail"
       confirm-text="永久注销"
       :loading="deleting"
       @cancel="target = null"
       @confirm="confirmDelete"
     />
 
-    <!-- 管理员权限转让：需二次校验现任管理员口令 -->
+    <!-- 新建账号：用户管理员 / 审计管理员。
+         这两类账号不需要邮箱，建号即可登录；但需二次校验操作者本人口令。 -->
     <AppWindow
-      :open="!!transferTarget"
-      title="转让管理员权限"
-      icon="swap"
-      tone="warn"
-      :width="430"
-      :close-on-overlay="!transferring"
-      @close="!transferring && (transferTarget = null)"
+      :open="showCreate"
+      title="新建账号"
+      icon="user-plus"
+      tone="primary"
+      :width="460"
+      :close-on-overlay="!creating"
+      @close="!creating && (showCreate = false)"
     >
-      <div v-if="transferTarget" class="transfer">
-        <div class="transfer__notice">
-          <AppIcon name="alert-triangle" :size="15" :stroke-width="2" />
+      <div class="form">
+        <div class="form__notice">
+          <AppIcon name="info" :size="15" :stroke-width="2" />
           <span>
-            转让后「{{ transferTarget.username }}」成为管理员，你将变为普通用户且无法撤销，
-            需由新管理员再次转让。操作会写入审计日志。
+            新建账号<strong>无需绑定邮箱</strong>，创建后即可用初始口令登录。
+            这两类账号与管理员账号权限不同，请按职责选择角色。
           </span>
         </div>
 
-        <div v-if="transferError" class="alert" role="alert">
+        <div v-if="createError" class="alert" role="alert">
           <AppIcon name="alert-triangle" :size="15" :stroke-width="2" />
-          <span class="selectable">{{ transferError }}</span>
+          <span class="selectable">{{ createError }}</span>
         </div>
 
+        <label class="field">
+          <span class="field__label">账号</span>
+          <input
+            v-model="createForm.username"
+            class="input"
+            type="text"
+            placeholder="例如 auditor01"
+            autocomplete="off"
+            spellcheck="false"
+          />
+        </label>
+
+        <label class="field">
+          <span class="field__label">角色</span>
+          <select v-model="createForm.role" class="input select">
+            <option value="UserAdmin">用户管理员 —— 可管理用户，不能查看审计日志</option>
+            <option value="AuditAdmin">审计管理员 —— 只能查看审计日志，不能管理用户</option>
+          </select>
+        </label>
+
         <PasswordField
-          v-model="transferPassword"
-          label="当前管理员口令"
-          placeholder="输入你的登录密码以确认身份"
+          v-model="createForm.password"
+          label="初始口令"
+          placeholder="至少 8 位，含大小写字母与数字"
+          autocomplete="new-password"
+        />
+
+        <PasswordField
+          v-model="createForm.operatorPassword"
+          label="您的登录口令（二次确认）"
+          placeholder="输入你自己的密码以确认身份"
           autocomplete="off"
-          :invalid="!!transferError"
-          :error="transferError"
-          autofocus
-          @enter="confirmTransfer"
+          :invalid="!!createError"
+          :error="createError"
+          @enter="confirmCreate"
         />
       </div>
 
       <template #footer>
-        <button type="button" class="btn" :disabled="transferring" @click="transferTarget = null">
+        <button type="button" class="btn" :disabled="creating" @click="showCreate = false">
           取消
         </button>
-        <button
-          type="button"
-          class="btn btn--primary"
-          :disabled="transferring || !transferPassword"
-          @click="confirmTransfer"
-        >
-          <Spinner v-if="transferring" :size="13" />
-          <span>确认转让</span>
+        <button type="button" class="btn btn--primary" :disabled="creating" @click="confirmCreate">
+          <Spinner v-if="creating" :size="13" />
+          <span>创建账号</span>
+        </button>
+      </template>
+    </AppWindow>
+
+    <!-- 变更角色：把某位账号指定为审计管理员（或撤销审计权限）。
+         角色任免是系统内权限最高的操作，需二次校验操作者本人口令。 -->
+    <AppWindow
+      :open="!!roleTarget"
+      title="变更账号角色"
+      icon="swap"
+      tone="warn"
+      :width="460"
+      :close-on-overlay="!savingRole"
+      @close="!savingRole && (roleTarget = null)"
+    >
+      <div v-if="roleTarget" class="form">
+        <div class="form__notice">
+          <AppIcon name="alert-triangle" :size="15" :stroke-width="2" />
+          <span>
+            正在变更「<strong>{{ roleTarget.username }}</strong>」的角色
+            （当前：{{ roleTag(roleTarget) }}）。变更后该账号的登录状态会被作废，
+            需要重新登录才能生效。
+          </span>
+        </div>
+
+        <div v-if="roleError" class="alert" role="alert">
+          <AppIcon name="alert-triangle" :size="15" :stroke-width="2" />
+          <span class="selectable">{{ roleError }}</span>
+        </div>
+
+        <label class="field">
+          <span class="field__label">变更为</span>
+          <select v-model="roleForm.role" class="input select">
+            <option value="AuditAdmin">审计管理员 —— 只能查看审计日志，不能管理用户</option>
+            <option value="UserAdmin">用户管理员 —— 可管理用户，不能查看审计日志</option>
+            <option value="User">普通用户 —— 撤销全部管理能力</option>
+          </select>
+        </label>
+
+        <PasswordField
+          v-model="roleForm.operatorPassword"
+          label="您的登录口令（二次确认）"
+          placeholder="输入你自己的密码以确认身份"
+          autocomplete="off"
+          :invalid="!!roleError"
+          :error="roleError"
+          autofocus
+          @enter="confirmRole"
+        />
+      </div>
+
+      <template #footer>
+        <button type="button" class="btn" :disabled="savingRole" @click="roleTarget = null">
+          取消
+        </button>
+        <button type="button" class="btn btn--primary" :disabled="savingRole" @click="confirmRole">
+          <Spinner v-if="savingRole" :size="13" />
+          <span>确认变更</span>
         </button>
       </template>
     </AppWindow>
@@ -525,6 +728,18 @@ onMounted(() => {
   white-space: nowrap;
 }
 
+/* 审计管理员：用不同色调区分，一眼能看出"看日志的人"和"管账号的人" */
+.tag--audit {
+  background: var(--st-locked-bg);
+  color: var(--st-locked-fg);
+}
+
+/* "本人"标记：提醒操作者这一行是自己，避免误操作 */
+.tag--me {
+  background: var(--c-surface-2);
+  color: var(--c-text-subtle);
+}
+
 .num {
   font-variant-numeric: tabular-nums;
   font-weight: 600;
@@ -566,14 +781,14 @@ onMounted(() => {
   cursor: pointer;
 }
 
-/* ---------- 权限转让 ---------- */
-.transfer {
+/* ---------- 新建账号 / 变更角色弹窗 ---------- */
+.form {
   display: flex;
   flex-direction: column;
   gap: var(--sp-3);
 }
 
-.transfer__notice {
+.form__notice {
   display: flex;
   align-items: flex-start;
   gap: var(--sp-2);
@@ -585,10 +800,30 @@ onMounted(() => {
   font-size: var(--fs-sm);
   line-height: 1.55;
 }
-.transfer__notice > svg {
+.form__notice > svg {
   flex-shrink: 0;
   margin-top: 2px;
   color: var(--st-pending-fg);
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+}
+
+.field__label {
+  font-size: var(--fs-sm);
+  font-weight: 600;
+  color: var(--c-text-muted);
+}
+
+/* ---------- 页头操作区 ---------- */
+.head__actions {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  flex-shrink: 0;
 }
 
 .alert {

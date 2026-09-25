@@ -5,6 +5,7 @@ import SideBar from './components/SideBar.vue'
 import StatusBar from './components/StatusBar.vue'
 import ToastHost from './components/ToastHost.vue'
 import TamperAlertDialog from './components/TamperAlertDialog.vue'
+import IntrusionAlertDialog from './components/IntrusionAlertDialog.vue'
 import LoginView from './views/LoginView.vue'
 import DashboardView from './views/DashboardView.vue'
 import AccountView from './views/AccountView.vue'
@@ -37,7 +38,14 @@ function toggleTheme() {
   theme.value = theme.value === 'dark' ? 'light' : 'dark'
 }
 
-/* ---------------- 导航 ---------------- */
+/* ---------------- 导航 ----------------
+ * 菜单按角色拆分，这是职责分离在界面上的直接体现：
+ *   · 「用户管理」= 管账号的人（Admin / UserAdmin）
+ *   · 「审计日志」= 看日志的人（仅 AuditAdmin）
+ * 两组条件互不重叠，所以任何一个角色都不可能同时看到两个入口。
+ * 隐藏入口只是体验层，真正的边界在后端：即使手敲地址调接口，
+ * 也会被以 NOT_AUDIT_ADMIN / NOT_ADMIN 拒绝并写入审计链。
+ */
 const view = ref('dashboard')
 
 const navItems = computed(() => {
@@ -46,19 +54,25 @@ const navItems = computed(() => {
     { key: 'account', label: '账号与口令', icon: 'key' }
   ]
   if (session.isAdmin) {
-    items.push(
-      { key: 'users', label: '用户管理', icon: 'users', badge: session.pendingUsers.length || 0 },
-      { key: 'audit', label: '审计日志', icon: 'file-text' }
-    )
+    items.push({
+      key: 'users',
+      label: '用户管理',
+      icon: 'users',
+      badge: session.pendingUsers.length || 0
+    })
+  }
+  if (session.isAuditAdmin) {
+    items.push({ key: 'audit', label: '审计日志', icon: 'file-text' })
   }
   return items
 })
 
-// 从管理员切换/退出后，避免停在无权限的页面
+// 角色变化（被降级 / 变更角色后重新登录）时，避免停在已无权限的页面
 watch(
-  () => session.isAdmin,
-  (admin) => {
-    if (!admin && (view.value === 'users' || view.value === 'audit')) view.value = 'dashboard'
+  () => [session.isAdmin, session.isAuditAdmin],
+  ([canManageUsers, canReadAudit]) => {
+    if (!canManageUsers && view.value === 'users') view.value = 'dashboard'
+    if (!canReadAudit && view.value === 'audit') view.value = 'dashboard'
   }
 )
 
@@ -97,13 +111,20 @@ async function waitForBackendReady(timeoutMs = 30000) {
 onMounted(async () => {
   await waitForBackendReady()
   probeTimer = setInterval(() => {
-    if (document.visibilityState === 'visible' && !session.isAdmin) probeBackend()
+    // 有后台轮询的角色（管理员 / 审计管理员）不需要额外探活：
+    // 他们的轮询本身就会刷新 lastSyncAt，再探一次属于重复请求。
+    if (document.visibilityState === 'visible' && !session.isAdmin && !session.isAuditAdmin) {
+      probeBackend()
+    }
   }, 15000)
 })
 
 onBeforeUnmount(() => {
   clearInterval(probeTimer)
   session.stopAdminPolling()
+  session.stopAuditPolling()
+  session.stopIntegrityPolling()
+  session.stopIntrusionPolling()
 })
 </script>
 
@@ -125,7 +146,7 @@ onBeforeUnmount(() => {
         :active-key="view"
         :username="session.currentUser?.username"
         :status="session.status"
-        :is-admin="session.isAdmin"
+        :role-label="session.roleLabel"
         @select="view = $event"
         @logout="onLogout"
       />
@@ -148,6 +169,7 @@ onBeforeUnmount(() => {
 
     <ToastHost />
     <TamperAlertDialog />
+    <IntrusionAlertDialog />
   </div>
 </template>
 

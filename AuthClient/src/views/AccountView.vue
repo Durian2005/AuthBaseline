@@ -33,17 +33,34 @@ const errors = computed(() => {
   }
 })
 
-const canSubmit = computed(() =>
-  form.value.old &&
-  isPasswordStrong(form.value.next) &&
-  form.value.next !== form.value.old &&
-  form.value.confirm === form.value.next
+/**
+ * 是否允许提交到后端。
+ *
+ * 刻意**不**把 isPasswordStrong 放进这个门禁 —— 复杂度由服务端裁决。
+ *
+ * 原先这里是本地拦截：口令不合规时按钮直接禁用、请求根本不发。
+ * 后果是"改密失败"这件事在审计日志里彻底看不到 —— 本地拦下的尝试
+ * 后端毫不知情，而"某人反复尝试把口令设成弱口令"恰恰是需要留痕的
+ * 安全事件（口令策略被试探、或被诱导着设弱口令）。
+ *
+ * 现在的分工：
+ *   · 本地只做**提示**（PasswordRules 实时显示哪条未满足、错误文案照样红字标出），
+ *     用户不需要来回试错就能改对；
+ *   · 判定权交给服务端，失败会被记入 CHANGE_PASSWORD_FAILED，
+ *     并带 WEAK_PASSWORD / PASSWORD_REUSED 等原因码，可被单独检索。
+ */
+const canSubmit = computed(
+  () => !!form.value.old && !!form.value.next && !!form.value.confirm
 )
 
 async function submit() {
   touched.value = true
   formError.value = ''
   if (!canSubmit.value) return
+
+  // 本地已能确定的问题（两次不一致）先拦下：这类是界面输入错误，
+  // 与口令策略无关，发到后端只会产生无意义的审计噪声。
+  if (form.value.confirm !== form.value.next) return
 
   try {
     const res = await session.changePassword(form.value.old, form.value.next)

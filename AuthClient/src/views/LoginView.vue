@@ -152,7 +152,10 @@ async function submitRegister() {
   formError.value = ''
   const f = regForm.value
   const needEmail = !emailUnavailable.value
-  if (!f.username.trim() || !isPasswordStrong(f.password) || f.confirm !== f.password) return
+  // 复杂度不在这里判：交给服务端裁决并留痕（本地只管"两次是否一致"这类输入错误）。
+  // 本地拦下弱口令会让后端完全看不到这次尝试，
+  // 而"反复提交弱口令"本身就是要记进审计的安全事件。
+  if (!f.username.trim() || f.confirm !== f.password) return
   if (needEmail && (!isEmail(f.email) || !f.code.trim())) return
 
   try {
@@ -219,13 +222,9 @@ async function submitReset() {
   resetTouched.value = true
   formError.value = ''
   const f = resetForm.value
-  if (
-    !f.username.trim() ||
-    !isEmail(f.email) ||
-    !f.code.trim() ||
-    !isPasswordStrong(f.password) ||
-    f.confirm !== f.password
-  ) {
+  // 同 submitRegister：复杂度交给服务端裁决（失败会记 RESET_PASSWORD_FAILED），
+  // 本地只拦"两次不一致"这种纯输入错误。
+  if (!f.username.trim() || !isEmail(f.email) || !f.code.trim() || f.confirm !== f.password) {
     return
   }
 
