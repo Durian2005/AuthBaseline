@@ -83,10 +83,30 @@ public class MongoDbService
 
         try
         {
-            // 会话票据：ticket 唯一，且必须能按票据快速查（每次请求都要校验）
-            var ticketKeys = Builders<Session>.IndexKeys.Ascending(s => s.Ticket);
+            // 顺序不能反：先升级老文档，再建唯一索引。
+            UpgradeLegacySessionTickets();
+
+            // 老索引 uniq_ticket 建在**已被移除的明文 ticket 字段**上，必须删掉：
+            // 字段缺失时 MongoDB 一律按 null 参与唯一约束，留着它会让第二条会话就插不进去
+            // （症状是"第一次登录正常、第二次登录起 500"，且报错指向 dup key null，很难联想到这里）。
+            var hasLegacyIndex = false;
+            using (var cursor = _sessions.Indexes.List())
+            {
+                foreach (var idx in cursor.ToList())
+                {
+                    if (idx.GetValue("name", "").AsString == "uniq_ticket") { hasLegacyIndex = true; break; }
+                }
+            }
+            if (hasLegacyIndex)
+            {
+                _sessions.Indexes.DropOne("uniq_ticket");
+                Console.WriteLine("[Mongo] 已删除建在明文 ticket 上的老索引 uniq_ticket");
+            }
+
+            // 票据哈希唯一，且保证按哈希等值查询走索引（每个请求都要校验一次）
+            var ticketKeys = Builders<Session>.IndexKeys.Ascending(s => s.TicketHash);
             _sessions.Indexes.CreateOne(new CreateIndexModel<Session>(
-                ticketKeys, new CreateIndexOptions { Unique = true, Name = "uniq_ticket" }));
+                ticketKeys, new CreateIndexOptions { Unique = true, Name = "uniq_ticket_hash" }));
 
             // 过期票据自动清理：与 EmailCodes 同样的 TTL 手法，无需定时任务
             var ttlKeys = Builders<Session>.IndexKeys.Ascending(s => s.ExpiresAt);
@@ -97,6 +117,31 @@ public class MongoDbService
         {
             Console.WriteLine($"[Mongo] 会话索引创建失败（不影响主流程）: {ex.Message}");
         }
+    }
+
+    /// <summary>
+    /// 一次性升级：早期版本把票据**明文**存在 <c>ticket</c> 字段里（哈希化改造前的形态）。
+    ///
+    /// 老文档里既然能读到明文，就可以就地折算成哈希后再删掉明文字段 ——
+    /// **已登录的会话不会因此失效**，不需要把所有人踢下线重登。
+    /// 升级后集合中不再存在 <c>ticket</c> 字段，明文只在客户端手里。
+    /// </summary>
+    private void UpgradeLegacySessionTickets()
+    {
+        var raw = _database.GetCollection<BsonDocument>("Sessions");
+        var legacy = raw.Find(new BsonDocument("ticket", new BsonDocument("$exists", true))).ToList();
+        if (legacy.Count == 0) return;
+
+        foreach (var doc in legacy)
+        {
+            var plain = doc.TryGetValue("ticket", out var v) && v.IsString ? v.AsString : null;
+            var update = Builders<BsonDocument>.Update.Unset("ticket");
+            if (!string.IsNullOrEmpty(plain))
+                update = update.Set("ticketHash", TicketHasher.Hash(plain));
+            raw.UpdateOne(new BsonDocument("_id", doc["_id"]), update);
+        }
+
+        Console.WriteLine($"[Mongo] 会话票据「明文 → 哈希」升级完成：{legacy.Count} 条");
     }
 
     /// <summary>

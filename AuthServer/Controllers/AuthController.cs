@@ -826,7 +826,8 @@ public class AuthController : ControllerBase
 
         // 登录成功 → 签发服务端会话票据。
         // 票据是后续所有管理员接口的凭证，也是"普通用户无权查看审计日志"能成立的前提。
-        var session = await _sessions.IssueAsync(user);
+        // 注意明文只存在于 issued.Ticket（随响应发回客户端），**库里落的是它的哈希**。
+        var issued = await _sessions.IssueAsync(user);
 
         var successResp = new ApiResponse<LoginResult>
         {
@@ -840,8 +841,8 @@ public class AuthController : ControllerBase
                 Role = user.Role.ToString(),
                 RoleLabel = UserRoles.Label(user.Role),
                 IsAdmin = UserRoles.CanManageUsers(user.Role),
-                Ticket = session.Ticket,
-                ExpiresAt = session.ExpiresAt
+                Ticket = issued.Ticket,
+                ExpiresAt = issued.Session.ExpiresAt
             }
         };
         // 审计里绝不记录票据本体，只记"已签发"这一事实

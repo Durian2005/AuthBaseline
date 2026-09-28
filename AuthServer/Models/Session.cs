@@ -11,10 +11,11 @@ namespace AuthServer.Models;
 ///   而 adminUsername 是**客户端可控的声明**，不是凭证。
 ///   任何人带上 ?adminUsername=admin 就能读走全部审计日志。
 ///
-/// 票据的三个关键性质：
+/// 票据的四个关键性质：
 ///   1. 不透明：32 字节密码学随机数，攻击者无法从用户名推导；
 ///   2. 服务端持有：可随时吊销（登出、被禁用、权限变更）；
-///   3. 滑动过期：有操作就续期，长时间无操作自动失效。
+///   3. 滑动过期：有操作就续期，长时间无操作自动失效；
+///   4. **库里只存哈希**：即便数据库被读走，里面的值也不能直接当凭证用。
 ///
 /// 刻意不自包含任何权限断言（不像 JWT 把 isAdmin 签进去）：
 /// 每次校验都重新查库确认当前身份，因此"权限被转让后旧票据立刻失去管理员能力"。
@@ -25,9 +26,24 @@ public class Session
     [BsonRepresentation(BsonType.ObjectId)]
     public string Id { get; set; } = string.Empty;
 
-    /// <summary>票据本体：32 字节随机数的 Base64Url 编码。</summary>
-    [BsonElement("ticket")]
-    public string Ticket { get; set; } = string.Empty;
+    /// <summary>
+    /// 票据的**哈希**（无盐 SHA-256，Base64Url）—— 库里不存票据本体。
+    ///
+    /// 改造前这里叫 <c>ticket</c>，存的是票据明文：任何能读到库的人都可以
+    /// 把库里的值直接塞进 <c>Authorization: Bearer</c> 冒用登录态，**不需要破解**。
+    /// 改成哈希之后，"能读库"与"能冒用会话"被拆开了 ——
+    /// 服务端收到明文票据后自己折算一次哈希即可 O(1) 命中，读库者却无法反推回明文。
+    ///
+    /// ⚠️ 这里**刻意不加盐**，与口令的处理正好相反：票据是 32 字节密码学随机数（256 位熵），
+    /// 盐要防的"预计算表""相同输入跨记录比对"都不成立，加盐却会让索引等值查询退化成
+    /// 全表慢哈希。完整理由见 <see cref="Services.TicketHasher"/>。
+    ///
+    /// ⚠️ 该字段上有唯一索引（<c>uniq_ticket_hash</c>）—— 老索引 <c>uniq_ticket</c> 建在
+    /// 已被移除的明文字段上，必须删除：字段缺失时 MongoDB 一律视作 null，
+    /// 唯一约束会让第二个会话就插不进去。
+    /// </summary>
+    [BsonElement("ticketHash")]
+    public string TicketHash { get; set; } = string.Empty;
 
     /// <summary>票据归属的账号（用户名统一小写）。</summary>
     [BsonElement("username")]

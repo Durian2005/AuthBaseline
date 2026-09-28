@@ -35,16 +35,24 @@ public enum AccessLevel
 }
 
 /// <summary>
+/// 签发结果。**明文票据只在 <see cref="SessionService.IssueAsync"/> 的返回值里出现这一次** ——
+/// 库里存的是它的哈希，服务端自己也不留明文，因此没有任何"事后从库里捞回票据"的可能。
+/// </summary>
+public sealed record IssuedSession(Session Session, string Ticket);
+
+/// <summary>
 /// 会话票据服务：签发 / 校验 / 吊销。
 ///
 /// 这是实验二「02 看不到」的技术核心 ——
 /// 把"客户端自己说我是管理员"换成"服务端签发的不可伪造票据"。
 ///
-/// 三个必须做对的点：
+/// 四个必须做对的点：
 ///   1. 票据取自密码学安全随机源（RandomNumberGenerator），不用 Guid / Random；
 ///   2. 每次校验都**重新查库**确认身份与状态，不信票据里的快照 ——
 ///      这样角色被变更、账号被锁定后，旧票据立刻失效，不存在授权残留；
-///   3. 滑动过期：有操作就续期，长期静置则自动失效。
+///   3. 滑动过期：有操作就续期，长期静置则自动失效；
+///   4. 库里只存票据的**哈希**（无盐 SHA-256）——
+///      读到数据库的人拿到的东西不能反过来当凭证用，见 <see cref="TicketHasher"/>。
 /// </summary>
 public sealed class SessionService
 {
@@ -59,11 +67,14 @@ public sealed class SessionService
     }
 
     /// <summary>签发一张新票据。登录成功后调用。</summary>
-    public async Task<Session> IssueAsync(User user)
+    public async Task<IssuedSession> IssueAsync(User user)
     {
+        // 明文票据只在这里出现一次：算完哈希就交给调用方，库里只落哈希。
+        var ticket = GenerateTicket();
+
         var session = new Session
         {
-            Ticket = GenerateTicket(),
+            TicketHash = TicketHasher.Hash(ticket),
             Username = user.Username,
             UserId = user.Id,
             IsAdminAtIssue = UserRoles.CanManageUsers(user.Role),
@@ -73,7 +84,7 @@ public sealed class SessionService
             ExpiresAt = DateTime.UtcNow.Add(SlidingWindow)
         };
         await _db.Sessions.InsertOneAsync(session);
-        return session;
+        return new IssuedSession(session, ticket);
     }
 
     /// <summary>
@@ -99,7 +110,10 @@ public sealed class SessionService
             };
         }
 
-        var session = await _db.Sessions.Find(s => s.Ticket == ticket).FirstOrDefaultAsync();
+        // 库里存的是哈希，所以先把收到的明文折算成哈希再查 ——
+        // 仍是走唯一索引的等值查询（O(1)），不是全表扫描，也不是逐条慢哈希。
+        var ticketHash = TicketHasher.Hash(ticket);
+        var session = await _db.Sessions.Find(s => s.TicketHash == ticketHash).FirstOrDefaultAsync();
         if (session is null)
         {
             return new TicketAuthResult
@@ -244,8 +258,9 @@ public sealed class SessionService
     /// <summary>吊销票据（登出）。</summary>
     public async Task RevokeAsync(string ticket, string reason)
     {
+        var ticketHash = TicketHasher.Hash(ticket);
         await _db.Sessions.UpdateOneAsync(
-            s => s.Ticket == ticket && s.RevokedAt == null,
+            s => s.TicketHash == ticketHash && s.RevokedAt == null,
             Builders<Session>.Update
                 .Set(s => s.RevokedAt, DateTime.UtcNow)
                 .Set(s => s.RevokedReason, reason));
