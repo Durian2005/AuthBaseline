@@ -177,6 +177,17 @@ public static class AuditAction
     /// （写在 request 报文里），那才是判断拨了多少的依据。
     /// </summary>
     public const string ClockAnomaly = "CLOCK_ANOMALY";
+
+    /// <summary>
+    /// 口令哈希的存储格式已升级：旧格式（无 pepper）→ 新格式（含 pepper）。
+    ///
+    /// 为什么要单独留痕，而不是"悄悄改掉就算了"：
+    /// 这条记录回答的是"这个账号的口令从什么时候开始受 pepper 保护"。
+    /// 迁移期结束后，凡是**没有**这条记录的账号，其口令仍是旧格式 ——
+    /// 也就是说，一条查询就能拉出"还没升级的存量清单"。
+    /// 没有它的话，"还有多少账号没升级"只能靠直连数据库统计，审计员无从下手。
+    /// </summary>
+    public const string PasswordHashUpgraded = "PASSWORD_HASH_UPGRADED";
 }
 
 /// <summary>

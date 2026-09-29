@@ -16,17 +16,19 @@ public class AuthController : ControllerBase
     private readonly EmailOptions _emailOptions;
     private readonly AuditService _audit;
     private readonly SessionService _sessions;
+    private readonly PepperProvider _pepper;
     private const int MaxFailedAttempts = 3;
     private static readonly TimeSpan LockoutDuration = TimeSpan.FromMinutes(3);
 
     public AuthController(MongoDbService db, VerificationService codes, EmailOptions emailOptions,
-        AuditService audit, SessionService sessions)
+        AuditService audit, SessionService sessions, PepperProvider pepper)
     {
         _db = db;
         _codes = codes;
         _emailOptions = emailOptions;
         _audit = audit;
         _sessions = sessions;
+        _pepper = pepper;
     }
 
     // 密码复杂度校验：至少8位，包含大小写字母和数字
@@ -109,6 +111,50 @@ public class AuthController : ControllerBase
         if (!string.IsNullOrWhiteSpace(forwarded))
             return forwarded.Split(',')[0].Trim();
         return HttpContext.Connection.RemoteIpAddress?.ToString() ?? "unknown";
+    }
+
+    /* ==================== 口令存储格式升级（pepper） ==================== */
+
+    /**
+     * 把一条**旧格式**（无 pepper）的口令哈希原地重写为新格式。
+     * 仅由登录入口调用，且只在「口令已验证通过 + 库里是旧格式」时调用。
+     *
+     * 三条刻意的取舍：
+     *
+     * 1. **绝不影响本次登录。** 整段被 try/catch 包住，任何失败都只意味着
+     *    "这个账号下次登录再升级"，用户照常登录成功。
+     *    升级只是收紧存储形态，不该让用户因为"格式没换成功"而进不来 ——
+     *    这与 AuditService 的旁路原则是同一条思路。
+     *
+     * 2. **用 UpdateOne 只改一个字段，不用 ReplaceOne 整篇覆盖。**
+     *    user 对象是本次请求开头读出来的，中途可能已被并发修改
+     *    （例如另一个请求刚更新了 failedLoginAttempts）。整篇替换会把这些改动抹掉。
+     *
+     * 3. **审计里绝不出现口令。** request 只记"从哪种格式变成哪种格式"这一事实 ——
+     *    这条记录要留在哈希链里被反复翻看，不能因为"顺手升级"就把口令写进去。
+     */
+    private async Task TryUpgradePasswordHashAsync(User user, string password)
+    {
+        try
+        {
+            var newHash = PasswordHasher.Hash(password, _pepper.Pepper);
+
+            await _db.Users.UpdateOneAsync(u => u.Id == user.Id,
+                Builders<User>.Update.Set(u => u.PasswordHash, newHash));
+            user.PasswordHash = newHash;
+
+            // 此刻口令已验证通过，身份可信，所以操作者记该账号自己。
+            await WriteAuditLogAsync(user.Id, user.Username, AuditAction.PasswordHashUpgraded,
+                user.Status.ToString(),
+                new { From = PasswordHasher.LegacyFormatName, To = PasswordHasher.PepperFormatName },
+                new { Upgraded = true },
+                user.Status.ToString(), user.Username, AuditResult.Success);
+        }
+        catch (Exception ex)
+        {
+            // 旁路失败不阻断：库里仍是旧格式，下次登录会再试一次。
+            Console.WriteLine($"[Pepper] 口令哈希升级失败（不影响本次登录，下次登录会重试）: {ex.Message}");
+        }
     }
 
     /* ==================== 时钟护栏的调用侧 ==================== */
@@ -393,7 +439,7 @@ public class AuthController : ControllerBase
         var user = new User
         {
             Username = sanitizedUsername,
-            PasswordHash = BCrypt.Net.BCrypt.HashPassword(req.Password),
+            PasswordHash = PasswordHasher.Hash(req.Password, _pepper.Pepper),
             Status = UserStatus.Pending,
             // 邮件功能关闭时回退为"无邮箱的老流程"，避免外部依赖不可用就完全无法注册
             Email = emailRequired ? email : null,
@@ -686,7 +732,7 @@ public class AuthController : ControllerBase
         }
 
         // 重置成功：换口令，并一并清掉锁定与失败计数（否则改完密码仍被锁在门外）
-        user.PasswordHash = BCrypt.Net.BCrypt.HashPassword(req.NewPassword);
+        user.PasswordHash = PasswordHasher.Hash(req.NewPassword, _pepper.Pepper);
         user.FailedLoginAttempts = 0;
         user.LockoutEnd = null;
         ClearLockoutAnchor(user);
@@ -763,8 +809,10 @@ public class AuthController : ControllerBase
             return Unauthorized(resp);
         }
 
-        var passwordValid = BCrypt.Net.BCrypt.Verify(req.Password, user.PasswordHash);
-        if (!passwordValid)
+        // 验证本身会顺带告诉我们要不要升级格式（旧格式无 pepper，通过后应当重写）。
+        // 注意这里**只判 Valid**：是否升级由下面的登录成功分支决定，失败分支一概不改库。
+        var passwordCheck = PasswordHasher.Verify(req.Password, user.PasswordHash, _pepper.Pepper);
+        if (!passwordCheck.Valid)
         {
             user.FailedLoginAttempts++;
             string? message;
@@ -823,6 +871,15 @@ public class AuthController : ControllerBase
             ClearLockoutAnchor(user);
             await _db.Users.ReplaceOneAsync(u => u.Id == user.Id, user);
         }
+
+        // ── 旧格式口令哈希的顺手升级 ──
+        // 为什么只做在这一处：登录是全系统唯一的入口 —— 任何操作都要先拿到票据，
+        // 而票据只能由登录签发。于是"只在登录升级"就等于"全部账号迟早都会升级"，
+        // 不必把"顺手写库"这件事复制到四个验证点里去（那样回滚面也更大）。
+        // 为什么放在这里：此时口令刚刚验证通过，用它算新哈希是安全的；
+        // 而验证失败的分支已经在上面 return 掉了，不会走到这里。
+        if (passwordCheck.NeedsUpgrade)
+            await TryUpgradePasswordHashAsync(user, req.Password);
 
         // 登录成功 → 签发服务端会话票据。
         // 票据是后续所有管理员接口的凭证，也是"普通用户无权查看审计日志"能成立的前提。
@@ -1076,7 +1133,7 @@ public class AuthController : ControllerBase
         }
 
         // 二次口令：创建管理员是特权变更，仅凭会话不足以证明是本人操作
-        if (!BCrypt.Net.BCrypt.Verify(req.OperatorPassword, admin.PasswordHash))
+        if (!PasswordHasher.Verify(req.OperatorPassword, admin.PasswordHash, _pepper.Pepper).Valid)
         {
             var resp = new ApiResponse { Success = false, Code = "INVALID_CREDENTIALS", Message = "管理员口令校验失败，已拒绝创建" };
             await WriteAuditLogAsync(admin.Id, admin.Username, action, operatorLabel, requestLog, resp, operatorLabel,
@@ -1096,7 +1153,7 @@ public class AuthController : ControllerBase
         var user = new User
         {
             Username = targetName,
-            PasswordHash = BCrypt.Net.BCrypt.HashPassword(req.Password),
+            PasswordHash = PasswordHasher.Hash(req.Password, _pepper.Pepper),
             Status = UserStatus.Enabled,
             Role = newRole,
             // 管理员创建的账号一律不绑邮箱，只凭口令登录（需求明确要求）
@@ -1197,7 +1254,7 @@ public class AuthController : ControllerBase
         }
 
         // 二次口令：角色任免是系统内权限最高的操作
-        if (!BCrypt.Net.BCrypt.Verify(req.OperatorPassword, admin.PasswordHash))
+        if (!PasswordHasher.Verify(req.OperatorPassword, admin.PasswordHash, _pepper.Pepper).Valid)
         {
             var resp = new ApiResponse { Success = false, Code = "INVALID_CREDENTIALS", Message = "管理员口令校验失败，已拒绝变更" };
             await WriteAuditLogAsync(admin.Id, admin.Username, action, operatorLabel, requestLog, resp, operatorLabel,
@@ -1330,7 +1387,7 @@ public class AuthController : ControllerBase
 
         var statusBefore = user.Status.ToString();
 
-        if (!BCrypt.Net.BCrypt.Verify(req.OldPassword, user.PasswordHash))
+        if (!PasswordHasher.Verify(req.OldPassword, user.PasswordHash, _pepper.Pepper).Valid)
         {
             var resp = new ApiResponse { Success = false, Code = "INVALID_CREDENTIALS", Message = "旧密码错误" };
             await WriteAuditLogAsync(user.Id, user.Username, failAction, statusBefore, requestLog, resp, statusBefore,
@@ -1348,7 +1405,7 @@ public class AuthController : ControllerBase
             return BadRequest(resp);
         }
 
-        user.PasswordHash = BCrypt.Net.BCrypt.HashPassword(req.NewPassword);
+        user.PasswordHash = PasswordHasher.Hash(req.NewPassword, _pepper.Pepper);
         await _db.Users.ReplaceOneAsync(u => u.Id == user.Id, user);
 
         // 口令已换，旧票据不应再能用。

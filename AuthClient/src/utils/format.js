@@ -95,7 +95,12 @@ export const ACTION_META = {
   // 时钟异常：墙钟与本机运行时长两条时间线背离。
   // 用与"检出篡改"同一档色：它同样是"系统保障被动过"的信号，
   // 而不是某个人操作失败 —— 不宜混进普通业务失败里。
-  CLOCK_ANOMALY: { label: '时钟异常', tone: 'locked' }
+  CLOCK_ANOMALY: { label: '时钟异常', tone: 'locked' },
+  // 口令存储格式升级（旧格式无 pepper → 新格式含 pepper）。
+  // 它描述的**不是用户做了什么**，而是系统在登录时顺手完成的一次存储加固，
+  // 因此用中性色 info，不与成功/失败类事件混色 —— 否则审计员会把它
+  // 误读成"某人发起了一次升级操作"。
+  PASSWORD_HASH_UPGRADED: { label: '口令存储升级', tone: 'info' }
 }
 
 export function actionMeta(action) {

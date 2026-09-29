@@ -12,6 +12,9 @@
     <PackageReference Include="Microsoft.AspNetCore.OpenApi" Version="8.0.11" />
     <PackageReference Include="MongoDB.Driver" Version="2.25.0" />
     <PackageReference Include="Swashbuckle.AspNetCore" Version="6.6.2" />
+    <!-- DPAPI（ProtectedData）：.NET Core 起被移出 BCL，须显式引用。
+         仅 Windows 可用 —— 本项目发布目标即 win-x64，无跨平台顾虑。 -->
+    <PackageReference Include="System.Security.Cryptography.ProtectedData" Version="8.0.0" />
   </ItemGroup>
 
 </Project>

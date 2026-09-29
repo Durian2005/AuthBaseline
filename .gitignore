@@ -26,6 +26,17 @@ Thumbs.db
 **/appsettings.Development.json
 **/appsettings.Local.json
 
+# 服务端密钥（pepper）与证书私钥 —— 一律不入库
+#   pepper.dat       DPAPI 密文。理论上换机解不开，但不入库是成本更低的保险，
+#                    而且它旁边往往还会落下 .tmp / .bak-* 之类的中间文件；
+#   *.pepper         --pepper-export 的产物。它是**可用口令打开**的封装，
+#                    泄露就等于泄露 pepper 本身 —— 与数据库同等敏感；
+#   certs/           阶段三要生成的私有 CA 与叶子证书私钥。
+pepper.dat
+pepper.dat.*
+*.pepper
+certs/
+
 # Generated installers and local test packages
 *.exe
 *.msi

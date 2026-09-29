@@ -12,9 +12,12 @@ public class MongoDbService
     private readonly IMongoCollection<EmailCode> _emailCodes;
     private readonly IMongoCollection<Session> _sessions;
     private readonly IMongoCollection<AuditChainHead> _auditChainHeads;
+    private readonly PepperProvider _pepper;
 
-    public MongoDbService(IConfiguration configuration)
+    public MongoDbService(IConfiguration configuration, PepperProvider pepper)
     {
+        _pepper = pepper;
+
         var connectionString = configuration.GetValue<string>("MongoDbSettings:ConnectionString")
             ?? "mongodb://localhost:27017";
         var databaseName = configuration.GetValue<string>("MongoDbSettings:DatabaseName")
@@ -175,7 +178,10 @@ public class MongoDbService
         var admin = _users.Find(u => u.Username == "admin").FirstOrDefault();
         if (admin == null)
         {
-            var hash = BCrypt.Net.BCrypt.HashPassword("Admin123");
+            // 种子口令同样必须走 PasswordHasher —— 直接调 BCrypt 会写出一条
+            // "无 pepper" 的哈希，那条记录在 pepper 上线后依然能验过（走旧格式分支），
+            // 于是这台机器上永远有一条不受 pepper 保护的账号，是纯粹的漏洞。
+            var hash = PasswordHasher.Hash("Admin123", _pepper.Pepper);
             _users.InsertOne(new User
             {
                 Username = "admin",
