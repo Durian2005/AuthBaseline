@@ -36,7 +36,12 @@ public sealed class PepperUnavailableException : Exception
 ///   打进安装包，所以它是**明令禁止**的存放位置（详见 TRANSPORT-STORAGE-SECURITY-DESIGN.md §4.2）。
 ///
 /// ── 存放与保护 ────────────────────────────────────────────
-/// 默认落 `%LOCALAPPDATA%\AuthBaseline\pepper.dat`，内容为 DPAPI(CurrentUser) 密文。
+/// 默认落 `%LOCALAPPDATA%\AuthBaselineData\pepper.dat`，内容为 DPAPI(CurrentUser) 密文。
+/// ⚠️ 目录名带 `Data` 后缀是刻意的：**安装目录是 `%LOCALAPPDATA%\AuthBaseline`**
+/// （NSIS 的安装路径由 `productName` 决定），所以 pepper 绝不能放进 `AuthBaseline\` ——
+/// 卸载器的清理、以及"清理安装残留"这类例行操作会把整个目录当作垃圾处理掉，
+/// 而 pepper 一删就是全库口令不可验证。放在**同级但不同名**的目录里，安装/卸载都碰不到它。
+///
 /// 选 DPAPI 而不是"自己拿一个密钥去 AES"：DPAPI 的主密钥由 Windows 绑定「本机 + 当前用户
 /// 配置文件」，别的账户/别的机器拿到这份密文也解不开，且不需要我们再去管一个"加密 pepper 的密钥"
 /// （那会陷入"密钥的密钥"无限递归）。
@@ -50,7 +55,7 @@ public sealed class PepperUnavailableException : Exception
 ///   ① 环境变量 AUTHBASELINE_PEPPER（Base64，或 `hex:` 前缀的十六进制）
 ///      —— 供自动化测试与 CI 用，完全绕过 DPAPI 与落盘，各测试进程互不干扰；
 ///   ② 环境变量 AUTHBASELINE_PEPPER_FILE 指定的路径；
-///   ③ 默认路径 %LOCALAPPDATA%\AuthBaseline\pepper.dat；
+///   ③ 默认路径 %LOCALAPPDATA%\AuthBaselineData\pepper.dat（见 DefaultPath 上的说明）；
 ///   ④ 都不存在 ⇒ 首次初始化（**必须先查库，见 InitialiseFirstRun**）。
 /// </summary>
 public sealed class PepperProvider
@@ -68,11 +73,35 @@ public sealed class PepperProvider
     public const string EnvVarFile = "AUTHBASELINE_PEPPER_FILE";
 
     /// <summary>
+    /// 仅用于测试：显式指定"老位置"的 pepper 文件。
+    /// 有了它，迁移逻辑才能在临时目录里被完整演练，而不必去动本机真实的老文件。
+    /// </summary>
+    public const string EnvVarLegacyFile = "AUTHBASELINE_PEPPER_LEGACY_FILE";
+
+    /// <summary>放数据的目录名。刻意与 tauri.conf.json 的 productName（AuthBaseline）不同名 —— 见 DefaultPath。</summary>
+    private const string DataDirName = "AuthBaselineData";
+
+    /// <summary>
     /// 本机默认落盘位置。
-    /// 放 LocalApplicationData 而不是程序目录：程序目录在 Program Files 下，
-    /// 非管理员进程写不进去；而且覆盖安装会把它冲掉。
+    ///
+    /// 放 LocalApplicationData 而不是程序目录，理由有两条：
+    ///   ① 程序目录若在 Program Files 下，非管理员进程写不进去；
+    ///   ② 覆盖安装会把它冲掉。
+    /// 而本项目更特殊的一点是：安装目录落在 `%LOCALAPPDATA%\AuthBaseline`（NSIS 按 productName 决定），
+    /// 也就是说"程序目录"**本身就在 LocalApplicationData 里面**。所以这里不能顺着直觉写成
+    /// `LocalApplicationData\AuthBaseline\pepper.dat` —— 那正好落在安装目录里，
+    /// 卸载器的清理与"清安装残留"的例行操作都会顺手删掉它。用同级不同名的 `...Data\` 规避。
     /// </summary>
     public static string DefaultPath => Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+        DataDirName, "pepper.dat");
+
+    /// <summary>
+    /// 早期版本（S2 首次落地时）的 pepper 位置 —— **它在安装目录里**，属于设计缺陷。
+    /// 保留这个常量只为一件事：把已经落在老位置的 pepper 迁移过来（见 MigrateFromLegacyIfNeeded）。
+    /// 待确认所有部署点都已迁移后，这段与常量可一并删除。
+    /// </summary>
+    private static string LegacyPath => Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
         "AuthBaseline", "pepper.dat");
 
@@ -86,7 +115,7 @@ public sealed class PepperProvider
     /// </summary>
     public static string ErrorLogPath => Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-        "AuthBaseline", "pepper-error.log");
+        DataDirName, "pepper-error.log");
 
     /// <summary>
     /// DPAPI 的附加熵。它本身不是秘密（跟着代码走），作用是让别的程序
@@ -123,6 +152,9 @@ public sealed class PepperProvider
         // ② / ③ 本机 pepper 的位置（显式指定优先于默认）
         var path = ResolvePath();
 
+        // ③.5 老位置搬迁（见 MigrateFromLegacyIfNeeded）
+        MigrateFromLegacyIfNeeded(path);
+
         if (File.Exists(path))
         {
             Pepper = ReadFrom(path);
@@ -135,6 +167,39 @@ public sealed class PepperProvider
         Pepper = InitialiseFirstRun(configuration, path);
         Source = $"{path}（本次首次生成）";
         Fingerprint = FingerprintOf(Pepper);
+    }
+
+    /// <summary>
+    /// 把老位置（`%LOCALAPPDATA%\AuthBaseline\`，即安装目录内）的 pepper 搬到新位置。
+    ///
+    /// 为什么必须搬而不是"两边都读"：留着老副本就等于 pepper 有两份，
+    /// 而老那份躺在会被卸载器/清理工具扫荡的目录里 —— 一旦它被删、新那份又恰好没生成，
+    /// 判定就会退化成"本机没有 pepper"，又回到"可能静默锁死"的岔路口上。
+    /// 单一权威副本比"读哪儿都行"更安全。
+    ///
+    /// 失败处理：老文件解不开就**直接抛**，绝不退化成"当作首次部署、生成一个新的"——
+    /// 那正是本类要防的静默锁死。
+    /// </summary>
+    private static void MigrateFromLegacyIfNeeded(string targetPath)
+    {
+        var legacyOverride = Environment.GetEnvironmentVariable(EnvVarLegacyFile);
+        var hasOverride = !string.IsNullOrWhiteSpace(legacyOverride);
+
+        // 守卫：目标既不是默认位置、用户也没显式指定老位置 ⇒ 什么都不做。
+        //
+        // 这个守卫不是形式主义。测试与 CI 用 AUTHBASELINE_PEPPER_FILE 指向一个空临时目录来演练
+        // "首次初始化"。若在那里也去顺带读本机真实的老文件，就会把**真实 pepper** 复制进测试环境，
+        // 于是"首次生成"这条断言静默失效（永远看不到生成分支），而且测试反而更"绿"。
+        if (targetPath != DefaultPath && !hasOverride) return;
+
+        var legacy = hasOverride ? legacyOverride! : LegacyPath;
+        if (File.Exists(targetPath) || !File.Exists(legacy)) return;
+
+        var pepper = ReadFrom(legacy);   // 解不开会抛 PepperUnavailableException
+        WriteTo(targetPath, pepper);     // 原子写 + 回读校验通过才会走到下一行
+        TryDelete(legacy);               // 删不掉也无妨（同一份 pepper，留着不是灾难）
+
+        Console.WriteLine($"[Pepper] 已把 pepper 从旧位置迁移到 {targetPath}");
     }
 
     /// <summary>

@@ -21,6 +21,10 @@
  10. 干净的库 + 无 pepper ⇒ 首次初始化成功，落盘文件是 DPAPI 密文（不是 32 字节明文）。
  11. `--pepper-export` / `--pepper-import`：错误口令打不开封装文件；正确口令可导入，
      且导入端的指纹与导出端一致；用导入的 pepper 能正常起后端并登录。
+ 12. 早期版本把 pepper 落在**安装目录内**（`%LOCALAPPDATA%\AuthBaseline\`，正是 NSIS 的安装路径），
+     清理安装残留时会连它一起删掉 ⇒ 现在落在同级的 `AuthBaselineData\`，并带一次性搬迁：
+     老位置有、新位置没有时自动搬过去（内容不变、老文件删除），
+     但**显式指定了 pepper 路径时绝不触发搬迁**（否则测试环境会被本机真实 pepper 污染）。
 
 用法：
   python pepper_probe.py [exe路径] [端口] [测试库名] [--keep]
@@ -54,6 +58,7 @@ EXE = sys.argv[1] if len(sys.argv) > 1 and not sys.argv[1].startswith("--") \
 PORT = int(sys.argv[2]) if len(sys.argv) > 2 and not sys.argv[2].startswith("--") else 5232
 DB = next((a for a in sys.argv[3:] if not a.startswith("--")), "PepperProbe")
 FRESH_DB = DB + "Fresh"
+MIG_DB = DB + "Mig"
 BASE = "http://127.0.0.1:%d" % PORT
 KEEP = "--keep" in sys.argv
 
@@ -133,7 +138,7 @@ def legacy_hash(password: str) -> str:
 
 # ---------- 库 ----------
 _cli = MongoClient("mongodb://localhost:27017", serverSelectionTimeoutMS=8000)
-for _d in (DB, FRESH_DB):
+for _d in (DB, FRESH_DB, MIG_DB):
     if _d in _cli.list_database_names():
         _cli.drop_database(_d)
         print("已清理旧测试库", _d)
@@ -169,7 +174,8 @@ def base_env(dbname, extra):
     env = {**os.environ,
            "ASPNETCORE_URLS": "http://127.0.0.1:%d" % PORT,
            "MongoDbSettings__DatabaseName": dbname}
-    for k in ("AUTHBASELINE_PEPPER", "AUTHBASELINE_PEPPER_FILE", "AUTHBASELINE_PEPPER_PASSPHRASE"):
+    for k in ("AUTHBASELINE_PEPPER", "AUTHBASELINE_PEPPER_FILE", "AUTHBASELINE_PEPPER_PASSPHRASE",
+              "AUTHBASELINE_PEPPER_LEGACY_FILE"):
         env.pop(k, None)
     env.update(extra)
     return env
@@ -413,6 +419,51 @@ try:
     stop(proc, logf)
     proc = None
 
+    # ============================================================
+    print("\n[8] 老位置（旧版落在安装目录里）的 pepper 自动搬迁到新位置")
+
+    mig_dir = tempfile.mkdtemp(prefix="pepper_probe_mig_")
+    tmp_dirs.append(mig_dir)
+    mig_legacy = os.path.join(mig_dir, "legacy", "pepper.dat")
+    mig_target = os.path.join(mig_dir, "target", "pepper.dat")
+
+    # 8a. 先在"老位置"造一份 pepper（该库尚无 v2 哈希，允许首次初始化）。
+    #     这一步同时是**守卫断言**：AUTHBASELINE_PEPPER_FILE 指向临时目录时，
+    #     绝不能顺带把本机真实的老文件搬过来 —— 否则测试环境会被真实 pepper 污染，
+    #     而且"首次生成"这条路径再也测不到（永远看不到生成分支）。
+    p8, logf, logpath8 = start({"AUTHBASELINE_PEPPER_FILE": mig_legacy}, "s8", dbname=MIG_DB)
+    text8 = read_log(logpath8)
+    m8 = re.search(r"指纹 ([0-9a-f]{16})", text8)
+    fp_a = m8.group(1) if m8 else ""
+    check("[8a] 老位置按首次初始化生成了 pepper", os.path.exists(mig_legacy), mig_legacy)
+    check("[8a] 指纹已打印", bool(fp_a), fp_a or "未解析到")
+    check("[8a] 守卫：指向临时目录时不会去搬本机真实的老 pepper",
+          "已把 pepper 从旧位置迁移" not in text8)
+    stop(p8, logf)
+
+    # 8b. 现在"老位置有、新位置没有" ⇒ 应自动搬迁，且内容不变。
+    p8b, logf, logpath8b = start(
+        {"AUTHBASELINE_PEPPER_FILE": mig_target, "AUTHBASELINE_PEPPER_LEGACY_FILE": mig_legacy},
+        "s8b", dbname=MIG_DB)
+    proc = p8b
+    text8b = read_log(logpath8b)
+    m8b = re.search(r"指纹 ([0-9a-f]{16})", text8b)
+    fp_b = m8b.group(1) if m8b else ""
+
+    check("[8b] 日志里有搬迁记录", "已把 pepper 从旧位置迁移" in text8b)
+    check("[8b] 新位置已出现 pepper", os.path.exists(mig_target), mig_target)
+    check("[8b] 老文件已删除（只保留唯一权威副本）", not os.path.exists(mig_legacy))
+    check("[8b] 搬迁前后是同一份 pepper（指纹一致）",
+          bool(fp_a) and fp_b == fp_a, "搬迁前 %s / 搬迁后 %s" % (fp_a or "-", fp_b or "-"))
+
+    # 该库的管理员哈希是用"搬迁前"那台 pepper 播种的；能登录 ⇒ 搬迁确实保住了秘密本体，
+    # 而不是"换了个能启动的新 pepper"（后者也会指纹一致地起不来，但登不进）。
+    st, b, tk8 = login(ADMIN_USER, ADMIN_PW)
+    check("[8b] 用搬迁后的 pepper 仍能用原口令登录（秘密本体未变）",
+          st == 200 and bool(tk8), "HTTP %s / %s" % (st, b.get("code")))
+    stop(proc, logf)
+    proc = None
+
 finally:
     if proc is not None:
         try:
@@ -426,15 +477,15 @@ finally:
         except Exception:
             pass
     if FAILED or KEEP:
-        print("\n  测试库保留：%s / %s" % (DB, FRESH_DB))
+        print("\n  测试库保留：%s / %s / %s" % (DB, FRESH_DB, MIG_DB))
         print("  临时目录保留：%s" % tmp_dirs)
     else:
-        for d in (DB, FRESH_DB):
+        for d in (DB, FRESH_DB, MIG_DB):
             try:
                 _cli.drop_database(d)
             except Exception:
                 pass
-        print("\n  测试库已清理：%s / %s" % (DB, FRESH_DB))
+        print("\n  测试库已清理：%s / %s / %s" % (DB, FRESH_DB, MIG_DB))
 
 print("\n" + "=" * 68)
 print("  结论：%s" % ("PASS ✅ 共 %d 项" % len(PASSED) if not FAILED

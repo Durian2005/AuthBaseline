@@ -280,13 +280,20 @@ pepper 收益≈0，反而会把验证码链路无谓地绑上 pepper。验证�
 |---|---|---|
 | ① | 环境变量 `AUTHBASELINE_PEPPER`（Base64，或 `hex:` 前缀） | 自动化测试 / CI，不落盘，各进程互不干扰 |
 | ② | 环境变量 `AUTHBASELINE_PEPPER_FILE` 指定路径 | 语义是"pepper **应该放在**这里"；位置为空则视为未初始化 |
-| ③ | `%LOCALAPPDATA%\AuthBaseline\pepper.dat`（DPAPI CurrentUser 密文） | 默认部署形态 |
+| ③ | `%LOCALAPPDATA%\AuthBaselineData\pepper.dat`（DPAPI CurrentUser 密文） | 默认部署形态 |
 
 ⚠️ **不能放 `appsettings.Local.json`** —— 实测 `tauri.conf.json` 的 `bundle.resources` 把它**打进了安装包**：
 ```json
 "../AuthServer/appsettings.Local.json": "appsettings.Local.json"
 ```
 装进安装包的东西等于公开，pepper 放这儿就白做了。
+
+⚠️ **也不能放 `%LOCALAPPDATA%\AuthBaseline\`** —— 那个目录**就是**安装目录（NSIS 按 `productName` 决定安装路径）。
+它既会被卸载器处理，也常被"清理安装残留"这类例行操作整目录扫掉；pepper 一旦被误删就是全库口令锁死。
+所以数据目录刻意取了不同名的 `AuthBaselineData\`（同级、不同目录），安装与卸载都碰不到它。
+早期 S2 版本曾落在安装目录内，代码里保留了**一次性迁移**（`MigrateFromLegacyIfNeeded`），
+把老位置的 pepper 搬到新位置后再删掉老文件 —— 因此**必须在任何账号升级到 `v2$` 之前完成迁移**，
+否则迁移就成了"两份 pepper 谁是真的"的判断题。
 
 **fail-closed 判据（宁可起不来，也不静默锁死全库）**
 
@@ -320,7 +327,7 @@ authserver.exe --pepper-import <封装文件>    # 导入并写回本机（覆�
   把 `iterations` 写进文件而不是写死在代码里 —— 日后提高迭代次数时，旧备份仍能按它自己的参数打开。
 - 口令只从环境变量 `AUTHBASELINE_PEPPER_PASSPHRASE` 或交互式隐藏输入读，
   **不接受命令行参数**（那会留在 shell 历史与进程列表里）。
-- 启动失败的原因另写一份 `%LOCALAPPDATA%\AuthBaseline\pepper-error.log`：
+- 启动失败的原因另写一份 `%LOCALAPPDATA%\AuthBaselineData\pepper-error.log`：
   桌面端 Console 输出留不下来（stdout/stderr 被转发给无控制台的 GUI），
   不写文件的话"起不来"就没有任何可查线索。
 
