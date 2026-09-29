@@ -4,7 +4,7 @@
 
 - 后端：ASP.NET Core Web API（.NET 8），Visual Studio 2022
 - 数据库：MongoDB（建议使用 MongoDB Compass 可视化观察）
-- 前端：Vue 3（Composition API + Pinia + Vite），桌面软件风格 UI
+- 前端：Vue 3（Composition API + Pinia + Vite），Tauri封装的桌面软件风格 UI
 - 密码哈希：BCrypt
 
 > 前端由最初的「原生 HTML + CSS + JavaScript」重构为 Vue 3 单文件组件应用，
