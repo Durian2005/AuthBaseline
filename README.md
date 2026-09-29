@@ -1,5 +1,17 @@
 # 实验一：建立可运行的口令认证基线
 
+> **本仓库不止实验一。** 这份 README 记录的是**实验一**的验收范围与实测结论；
+> 在一份可运行的口令认证基线之上，后续还迭代出了下列能力，各有独立文档：
+>
+> | 文档 | 内容 |
+> |------|------|
+> | [`DESKTOP-README.md`](DESKTOP-README.md) | 桌面端使用教程（Tauri v2 + Vue 3 + .NET sidecar，打包为 Windows 桌面软件） |
+> | [`EMAIL-VERIFY-README.md`](EMAIL-VERIFY-README.md) | 邮箱验证码：注册绑定邮箱、忘记密码重置 |
+> | [`ROLE-SEPARATION-DESIGN.md`](ROLE-SEPARATION-DESIGN.md) | 角色分离（职责分离）改造：Admin 管用户但不可读审计，AuditAdmin 读审计但不管用户 |
+> | [`AUDIT-UPGRADE-DESIGN.md`](AUDIT-UPGRADE-DESIGN.md) | 实验二改造方案｜让所有安全事件可追责 |
+> | [`AUDIT-VERIFY-REPORT.md`](AUDIT-VERIFY-REPORT.md) | 实验二验收报告（含哈希链的独立复算） |
+> | [`TRANSPORT-STORAGE-SECURITY-DESIGN.md`](TRANSPORT-STORAGE-SECURITY-DESIGN.md) | 传输安全与存储安全改造方案（TLS / 票据哈希化 / 口令 pepper） |
+
 ## 一、技术栈
 
 - 后端：ASP.NET Core Web API（.NET 8），Visual Studio 2022
@@ -200,16 +212,42 @@ npm run build     # 构建产物输出到 ../AuthServer/wwwroot
 
 ## 九、接口清单
 
-| 方法 | 路径 | 说明 |
-|------|------|------|
-| POST | `/api/auth/register` | 用户注册 |
-| POST | `/api/auth/login` | 用户登录 |
-| POST | `/api/auth/approve` | 管理员审核用户 |
-| POST | `/api/auth/unlock` | 管理员解锁用户 |
-| POST | `/api/auth/delete-user` | 管理员注销用户 |
-| POST | `/api/auth/change-password` | 修改密码 |
-| GET | `/api/auth/users?adminUsername=admin` | 获取用户列表 |
-| GET | `/api/auth/logs?adminUsername=admin` | 获取审计日志 |
+> 下表为后端当前实际暴露的全部接口（共 **17** 个）。
+> 鉴权自「角色分离」改造起改为**服务端签发的 Bearer 票据**（`Authorization: Bearer <ticket>`），
+> 不再使用早期的 `?adminUsername=xxx` 由客户端自证身份的方式。
+> 鉴权失败会写入一条 `AUDIT_ACCESS_DENIED` 事件，使越权尝试可追溯。
+
+### 1. 认证与账号（`api/auth`）
+
+| 方法 | 路径 | 鉴权 | 说明 |
+|------|------|------|------|
+| POST | `/api/auth/register` | 匿名 | 用户注册（校验邮箱验证码，创建后状态为待审核） |
+| POST | `/api/auth/login` | 匿名 | 用户登录，成功返回会话票据 |
+| POST | `/api/auth/logout` | 需票据 | 注销当前会话（吊销票据） |
+| POST | `/api/auth/send-email-code` | 匿名 | 发送邮箱验证码（注册与重置口令共用）；对不存在的邮箱返回与真实发信**逐字一致**的响应，防账号枚举 |
+| POST | `/api/auth/reset-password` | 匿名（凭验证码） | 忘记密码：校验邮箱验证码后直接设置新口令 |
+| POST | `/api/auth/change-password` | 需票据 | 修改自己的口令；新旧口令不得相同 |
+
+### 2. 用户管理（`api/auth`）
+
+| 方法 | 路径 | 鉴权 | 说明 |
+|------|------|------|------|
+| GET | `/api/auth/users` | 用户管理员 | 获取用户列表 |
+| POST | `/api/auth/approve` | 用户管理员 | 审核通过待审核用户 |
+| POST | `/api/auth/unlock` | 用户管理员 | 手动解锁被锁定的账号 |
+| POST | `/api/auth/delete-user` | 用户管理员 | 注销普通用户（管理员账号不可被注销） |
+| POST | `/api/auth/create-account` | 管理员 | 管理员直接创建账号，需二次校验操作者口令 |
+| POST | `/api/auth/set-role` | 管理员 | 任免用户角色（含 AuditAdmin），需二次校验操作者口令 |
+
+### 3. 审计日志
+
+| 方法 | 路径 | 鉴权 | 说明 |
+|------|------|------|------|
+| GET | `/api/audit/logs` | 审计读 | 分页查询审计日志，支持按分片 / 关键词 / 动作 / 结果筛选 |
+| GET | `/api/auth/logs` | 审计读 | 兼容旧路径，内部转调同一套分页逻辑 |
+| GET | `/api/audit/verify` | 审计读 | 哈希链完整性校验，返回断点序号与所在分片 |
+| GET | `/api/audit/shards` | 审计读 | 分片清单与各片规模 |
+| GET | `/api/audit/stats` | 审计读 | 概览统计：总数、失败数、篡改告警数 |
 
 ## 十、鲁棒性设计
 
