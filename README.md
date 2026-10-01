@@ -84,10 +84,23 @@
 cd AuthClient
 npm install       # 首次
 npm run dev       # 开发服务器 http://localhost:5173，/api 自动代理到 5007
-npm run build     # 构建产物输出到 ../AuthServer/wwwroot
+npm run build     # 只出浏览器产物 → ../AuthServer/wwwroot
 ```
 
-修改完务必执行 `npm run build`，否则后端托管的仍是旧产物。
+> **改完界面建议用 `python tools/build_all.py frontend` 统一构建。**
+>
+> 本项目有两条分发链路，靠 vite 的 mode 区分输出目录：
+>
+> | 链路 | 产物目录 | 构建命令 |
+> |---|---|---|
+> | 浏览器访问（后端静态托管，同源 `/api`） | `AuthServer/wwwroot` | `npm run build` |
+> | 桌面端（Tauri 打包 / 热替换安装目录） | `AuthClient/dist` | `npm run build:desktop` |
+>
+> 只跑其中一条命令，另一条链路的产物就会停在旧版本 —— 本项目出过一次
+> `wwwroot` 落后 `dist` 15 天、浏览器打开后端看到旧界面的事故。
+> 上面的脚本会**两套都构建**，并逐字节比对两者是否一致，不一致直接报非零退出码。
+>
+> 单独做一致性检查（不构建）：`python tools/build_all.py check`
 
 ## 五、默认管理员账号
 

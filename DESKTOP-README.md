@@ -65,11 +65,18 @@ npm run dev          # = tauri dev
 npm run build        # = tauri build
 ```
 
+> ⚠️ **`tauri build` 只更新 `AuthClient/dist`**（打进桌面端），**不会**更新后端静态托管的
+> `AuthServer/wwwroot`。改过界面后若要两条链路都刷新，用 `python tools/build_all.py frontend`
+> —— 它两套都构建，并逐字节校验两者是否一致。
+
 产物在：
 
 ```
-src-tauri/target/release/bundle/nsis/AuthBaseline-Setup-1.0.0.exe
+src-tauri/target/release/bundle/nsis/AuthBaseline_1.0.0_x64-setup.exe
 ```
+
+文件名由 `tauri.conf.json` 的 `productName`（`AuthBaseline`）+ 版本号 + 架构拼出，
+改这三者中任何一个，文件名都会跟着变。
 
 这是一个标准 Windows 安装向导（NSIS）。安装后从开始菜单 / 桌面快捷方式启动即可。
 
