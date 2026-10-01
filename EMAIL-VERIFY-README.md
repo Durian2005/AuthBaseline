@@ -42,7 +42,7 @@
 
 | 场景 | 方式 | 操作 | 覆盖安装后 |
 |---|---|---|---|
-| **桌面安装版（推荐）** | 安装目录的 `appsettings.Local.json` | 用记事本打开 `%LOCALAPPDATA%\Programs\AuthBaseline\appsettings.Local.json`，填 `Account` 与 `Password`，完全退出程序再打开 | **保留**（安装器检测到文件已存在就不覆盖） |
+| **桌面安装版（推荐）** | 安装目录的 `appsettings.Local.json` | 用记事本打开 `%LOCALAPPDATA%\AuthBaseline\appsettings.Local.json`，填 `Account` 与 `Password`，完全退出程序再打开 | **保留**（安装器检测到文件已存在就不覆盖） |
 | 开发联调 | `AuthServer/appsettings.Local.json` | 同上（该文件已被 .gitignore 忽略，不会进版本库） | — |
 | 任意场景 | 环境变量 | `setx AUTHBASELINE_EMAIL_ACCOUNT "你的邮箱@qq.com"`、`setx AUTHBASELINE_EMAIL_PASSWORD "16位授权码"` | 保留 |
 | 临时演示 | 安装目录的 `appsettings.json` | 直接改 | **会被重置**，不推荐 |
@@ -86,7 +86,7 @@ git check-ignore -v AuthServer/appsettings.Local.json
 
 1. 确认进程真的退了：任务管理器里结束所有 `authserver.exe` / `dotnet.exe`，再重新启动；
 2. 确认改的是**当前运行实例所在目录**的那份配置（开发跑 `dotnet run` 看 `AuthServer\appsettings.Local.json`；
-   装好的桌面版看 `%LOCALAPPDATA%\Programs\AuthBaseline\appsettings.Local.json`）；
+   装好的桌面版看 `%LOCALAPPDATA%\AuthBaseline\appsettings.Local.json`）；
 3. 看启动日志：`Content root path` 打在哪个目录，读的就是哪个目录的配置。
 
 > 另有一个容易误判的现象：开发调试用的 `dotnet run` 会锁住 `bin\Debug\net8.0\AuthServer.dll`。
@@ -102,7 +102,7 @@ git check-ignore -v AuthServer/appsettings.Local.json
 
 ```bash
 # 桌面安装版查看方式
-notepad "%LOCALAPPDATA%\Programs\AuthBaseline\email-codes.log"
+notepad "%LOCALAPPDATA%\AuthBaseline\email-codes.log"
 ```
 
 ---
@@ -174,14 +174,14 @@ node tools/ui_e2e.mjs ui_shot.png        # 需先启动 Edge：--remote-debuggin
 # 桌面安装版模式（应用首页地址会自动识别，端口是动态的）
 # 先带调试端口启动：set WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--remote-debugging-port=9333
 set E2E_CDP=http://127.0.0.1:9333
-set E2E_LOG=%LOCALAPPDATA%\Programs\AuthBaseline\email-codes.log
+set E2E_LOG=%LOCALAPPDATA%\AuthBaseline\email-codes.log
 node tools/ui_e2e.mjs desktop_shot.png
 ```
 
 ## 八、桌面安装包
 
-- 安装包：`AuthBaseline-Setup-1.0.0.exe`（静默安装参数 `/S`）
-- 安装目录：`%LOCALAPPDATA%\Programs\AuthBaseline\`
+- 安装包：`AuthBaseline_1.0.0_x64-setup.exe`（静默安装参数 `/S`）
+- 安装目录：`%LOCALAPPDATA%\AuthBaseline\`
 - 安装内容：`auth-baseline-desktop.exe`（Tauri 壳）、`authserver.exe`（.NET 后端）、
   `wwwroot/`（前端静态资源）、`appsettings.json`、`appsettings.Local.json`
 
