@@ -75,6 +75,11 @@
 >
 > 前端产物已构建并提交在 `AuthServer/wwwroot/`，**直接运行后端即可看到界面**，
 > 无需启动前端开发服务器。
+>
+> ⚠️ VS 默认使用的 `http` 启动配置走**明文对照模式**（自动设 `AUTHBASELINE_REQUIRE_HTTPS=false`），
+> 目的是让调试与既有脚本不受影响；要看加密形态请选 `https` 启动配置，或直接运行桌面端。
+> **桌面端首次启动会弹一次 Windows 证书信任确认框，选「是」**（写 `CurrentUser\Root`，
+> 不用管理员权限；产品路径是安装期写 `LocalMachine\Root`）。
 
 ### 前端开发（可选）
 
@@ -225,7 +230,7 @@ npm run build     # 只出浏览器产物 → ../AuthServer/wwwroot
 
 ## 九、接口清单
 
-> 下表为后端当前实际暴露的全部接口（共 **17** 个）。
+> 下表为后端当前实际暴露的全部接口（共 **18** 个）。
 > 鉴权自「角色分离」改造起改为**服务端签发的 Bearer 票据**（`Authorization: Bearer <ticket>`），
 > 不再使用早期的 `?adminUsername=xxx` 由客户端自证身份的方式。
 > 鉴权失败会写入一条 `AUDIT_ACCESS_DENIED` 事件，使越权尝试可追溯。
@@ -240,6 +245,13 @@ npm run build     # 只出浏览器产物 → ../AuthServer/wwwroot
 | POST | `/api/auth/send-email-code` | 匿名 | 发送邮箱验证码（注册与重置口令共用）；对不存在的邮箱返回与真实发信**逐字一致**的响应，防账号枚举 |
 | POST | `/api/auth/reset-password` | 匿名（凭验证码） | 忘记密码：校验邮箱验证码后直接设置新口令 |
 | POST | `/api/auth/change-password` | 需票据 | 修改自己的口令；新旧口令不得相同 |
+| GET | `/api/auth/transport` | 匿名 | 传输层状态：当前链路是否加密（TLS）、证书主题与到期日。**刻意不做鉴权** —— 状态栏在登录页就要显示，且内容属于公钥信息 |
+
+> ⚠️ **传输层**：桌面端（Tauri 壳 + sidecar）走 **HTTPS（TLS 1.3）**，
+> 证书为本机私有 CA（`CN=AuthBaseline Local CA`）签发的 leaf，存于
+> `%LOCALAPPDATA%\AuthBaselineData\certs\`，CA 公钥写入 `CurrentUser\Root`；
+> 开发态 `dotnet run` 默认显式走明文对照模式。
+> 详见 [TRANSPORT-STORAGE-SECURITY-DESIGN.md](TRANSPORT-STORAGE-SECURITY-DESIGN.md) 的 §6.2 / §6.3 实施记录。
 
 ### 2. 用户管理（`api/auth`）
 

@@ -86,9 +86,10 @@ src-tauri/target/release/bundle/nsis/AuthBaseline_1.0.0_x64-setup.exe
 > `appsettings.json`（后端配置）、`wwwroot/`（后端静态资源），以及卸载程序与开始菜单/桌面快捷方式。
 > 安装目录即程序启动目录，因此后端能正确读到 `appsettings.json` 与 `wwwroot`，不会出现 "WebRootPath not found" 警告。
 >
-> ⚠️ **关于打包环境的说明**：在正常机器上，直接 `npm run build`（即 `tauri build`）即可自动下载 NSIS 并生成安装包。
-> 但本次所处环境无法访问 GitHub Releases（Tauri 的 NSIS 及插件从 GitHub 下载），因此安装包是**手动用本地 NSIS 3.11 编译**的，
-> 效果一致（同样包含主程序 + 后端 sidecar + 卸载程序 + 开始菜单/桌面快捷方式）。回到你自己的电脑后用 `npm run build` 可正常复现。
+> ⚠️ **打包环境提示**：`tauri build` 会自动下载/复用 NSIS 工具链并生成安装包，本机工具链已缓存，
+> 可直接跑通（2026-10-02 实测）。
+> 若报 `failed to run 'cargo metadata' command: program not found`，说明 Rust 工具链不在 PATH 里 ——
+> 本机 cargo 在 `%USERPROFILE%\.cargo\bin`（独立工具链，未装 rustup），构建前先把它加进 PATH。
 
 > 首次 `tauri build` 会编译大量 Rust 依赖（tauri、tauri-plugin-shell 等），耗时较长（数分钟到十几分钟），属正常。
 
@@ -109,6 +110,10 @@ npm run build             # 重新打包（含新后端）
 复制为
 `src-tauri/binaries/authserver-x86_64-pc-windows-msvc.exe`。
 
+> ⚠️ 复制完**务必确认两者 md5 一致**（`md5sum` 对比即可）—— sidecar 落后于源码是最常见的一类"改了没生效"。
+> 装完包后再用 `python tools/reinstall_desktop.py` 核验安装目录里的 sidecar 与 `publish` 产物 md5 相同，
+> 才能证明"新后端真的进到安装包里了"。
+
 ---
 
 ## 六、工作原理（FAQ）
@@ -116,8 +121,20 @@ npm run build             # 重新打包（含新后端）
 **Q：后端地址是怎么来的？为什么 Vue 里写的是 `/api`？**
 A：浏览器模式下页面与后端同源，`/api` 即可。桌面端页面源是 `tauri://localhost`，相对路径失效，
 因此 `AuthClient/src/main.js` 启动时调用 `initApiRoot()`，通过 Tauri IPC 向 Rust 询问
-`get_backend_url`（例如 `http://127.0.0.1:52341`），再把 API 基址切到该地址。
+`get_backend_url`（例如 `https://127.0.0.1:52341`），再把 API 基址切到该地址。
+scheme 取自 `appsettings.json` 的 `Transport:RequireHttps`，**与后端读同一份配置** ——
+否则会出现"后端降级成 http、壳仍导航 https"的白窗口。
 浏览器模式完全不受影响。
+
+**Q：桌面端前后端之间是加密的吗？**
+A：是，走 **HTTPS（TLS 1.3）**。Rust 侧把监听地址定为 `https://127.0.0.1:<随机端口>`，
+后端用本机私有 CA（`CN=AuthBaseline Local CA`）签发的 leaf 做服务端认证。
+证书在首次启动时自动签发，存于 `%LOCALAPPDATA%\AuthBaselineData\certs\`，
+CA 公钥写入 `CurrentUser\Root`（**刻意不放在安装目录**，否则会被卸载器/清理工具整目录扫掉）。
+界面左下角状态栏会显示「加密」徽记，悬停可见证书主题、到期日与信任存储 ——
+这枚徽记的判据是后端返回的**实际链路**是否加密（`Request.IsHttps`），不是"地址是不是 https 开头"。
+开发态 `dotnet run` 默认走明文对照模式（状态栏显示红色「明文」），两者互不污染。
+详见 [TRANSPORT-STORAGE-SECURITY-DESIGN.md](TRANSPORT-STORAGE-SECURITY-DESIGN.md) §6.2 / §6.3。
 
 **Q：sidecar 为什么用动态端口？**
 A：`src-tauri/src/lib.rs` 在启动时 `bind("127.0.0.1:0")` 申请一个空闲端口，
@@ -148,6 +165,10 @@ A：后端进程会启动，但接口调用会失败（连接数据库超时）�
 | 应用开始但白屏 | 前端未构建或 `frontendDist` 路径错 | 确认 `npm run build:frontend` 能生成 `AuthClient/dist` |
 | 换机器运行提示缺 .NET | sidecar 是框架依赖发布 | 目标机装 .NET 8 运行时，或改用自包含发布（见下） |
 | 端口被占用导致启动慢 | 动态端口也会偶发等待 | 一般会自动跳过；如卡死，结束残留 `AuthServer.exe` 重试 |
+| 应用启动但**白屏**，进程还活着 | 证书没被 WebView2 接受 —— 白窗口是唯一症状，且没有任何可读错误 | 看 `%LOCALAPPDATA%\AuthBaselineData\cert-error.log`；`certutil -user -store Root` 确认 CA 在列；跑 `python tools/ui_tls_check.py` 定位到具体哪一项断言失败 |
+| 状态栏显示红色「明文」 | 后端以明文模式运行 | 只应出现在 `AUTHBASELINE_REQUIRE_HTTPS=false`（开发态对照模式）；查 `appsettings.json` 的 `Transport` 节与 `cert-error.log` |
+| 装完新包但行为没变 | NSIS 静默安装遇"同版本已安装"会**跳过替换** | 用 `python tools/reinstall_desktop.py`（先卸载再装 + md5 核验），不要直接覆盖安装 |
+| `tauri build` 报 `cargo metadata: program not found` | Rust 工具链不在 PATH | 把 `%USERPROFILE%\.cargo\bin` 加进 PATH 后重试 |
 
 ---
 
@@ -201,3 +222,19 @@ A：后端进程会启动，但接口调用会失败（连接数据库超时）�
 后端校验顺序与返回码：空字段 `EMPTY_FIELDS` → 非管理员 `UNAUTHORIZED` → 口令错误 `INVALID_CREDENTIALS`
 → 转让给自己 `CANNOT_TRANSFER_SELF` → 目标不存在 `NOT_FOUND`
 → 目标非启用状态 `TARGET_NOT_ELIGIBLE` → 目标已是管理员 `TARGET_ALREADY_ADMIN`。
+
+### 9.5 前后端传输加密（TLS 1.3）
+
+桌面端不再走明文 HTTP：Rust 侧把 sidecar 的监听地址改为 `https://127.0.0.1:<随机端口>`，
+后端启动时用本机私有 CA 签发 leaf 并挂到 Kestrel，CA 公钥写入 `CurrentUser\Root`。
+界面左下角新增「加密 / 明文」指示灯（**登录页就有** —— 传输状态是匿名接口，没道理等到登录后才告诉用户）。
+
+- 证书：`%LOCALAPPDATA%\AuthBaselineData\certs\`，leaf 1 年、提前 30 天自动轮换，CA 5 年；
+- 失败即拒绝启动（fail-closed），原因写 `cert-error.log`，不静默降级；
+- `Transport:RequireHttps=false` 可一键退回明文做对照实验，状态栏会如实标红；
+- CSP 的 `connect-src` 已放行 `https://127.0.0.1:*`（漏了这条界面能开但什么都点不动）；
+- 开发态 `dotnet run` 默认仍是明文，23 个既有脚本零改动。
+
+验证：`python tools/ui_tls_check.py`（起真实桌面端 → CDP 断言 10 项 → 同实例跑接口回归）。
+详见 [TRANSPORT-STORAGE-SECURITY-DESIGN.md](TRANSPORT-STORAGE-SECURITY-DESIGN.md) §6.3。
+

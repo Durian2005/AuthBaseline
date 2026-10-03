@@ -6,8 +6,8 @@
 > 决策基线（**2026-09-28 已确认**）：
 > | 项 | 选定方案 | 状态 |
 > |---|---|---|
-> | 传输加密 | **TLS 全套**（HTTPS + 本机自签证书，首次启动自动签发） | ✅ 已确认 |
-> | 降级策略 | **fail-closed**：证书不可用则拒绝启动，另留显式开关做对照实验 | ✅ 已确认 |
+> | 传输加密 | **TLS 全套**（HTTPS + 本机自签证书，首次启动自动签发） | ✅ **已实施 2026-10-02** |
+> | 降级策略 | **fail-closed**：证书不可用则拒绝启动，另留显式开关做对照实验 | ✅ **已实施 2026-10-02** |
 > | 票据存储 | **无盐 SHA-256**（**刻意不加盐**，理由见 §4.1） | ✅ 已确认 |
 > | 口令存储 | BCrypt（已有随机盐）**+ 追加服务端 pepper** | ✅ 已确认 |
 > | pepper 存放 | 首次启动自动生成 + **DPAPI 保护**，**不入安装包** | ✅ 已确认 |
@@ -127,7 +127,7 @@
 | CA | `CN=AuthBaseline Local CA`，RSA 2048，有效期 5 年 | 只信任一次 |
 | leaf | `CN=127.0.0.1`，RSA 2048，有效期 1 年，到期自动轮换 | 轮换不必重新弹框 |
 | **SAN** | **必须包含 `IP:127.0.0.1`** 与 `DNS:localhost` | ⚠️ Chromium 对 IP 直连**只认 SAN 里的 IP**，不看 CN。漏了这条 WebView2 一定拒绝 |
-| CA 私钥 | DPAPI(CurrentUser) 保护的 PFX，存 `%LOCALAPPDATA%\AuthBaseline\certs\` | 别的用户/进程读不到 |
+| CA 私钥 | DPAPI(CurrentUser) 保护的 PFX，存 `%LOCALAPPDATA%\AuthBaselineData\certs\` | 别的用户/进程读不到。⚠️ **不是 `AuthBaseline\`** —— 那是安装目录，见 §6.2 修正 2 |
 | leaf 私钥 | **导入 `CurrentUser\My` 并按指纹取用**（理由见 §3.2） | 私钥天然由 DPAPI 保护，且导入个人存储**不弹框** |
 | 公钥证书 | 导出 `certs\server.crt`（**可公开**，给测试脚本当信任锚） | 见 §3.4 |
 
@@ -380,9 +380,9 @@ authserver.exe --pepper-import <封装文件>    # 导入并写回本机（覆�
 | **0 · 可行性闸门** ✅ | 用一次性临时证书实测 `CurrentUser\Root` 写入 / 弹框 / 系统信任是否生效 | **已完成，结论见 §6.1**（A/B 通过；C 的首次失败经查是探测程序自身 bug，已归因并修正） |
 | **1 · 存储 S1** | 票据哈希化 + 索引改名 + 一次性升级逻辑 | 断言：登录后直读库里 `Sessions`，**不存在可用明文票据**；把文档里的 `ticketHash` 原样当 Bearer 发送 ⇒ **必须 401** |
 | **2 · 存储 S2** | pepper 生成/保护/加载 + 渐进迁移 + 审计动作 | 断言：旧格式账号仍能登录，登录后库里自动变为新格式；无 pepper 时用字典验证必须失败；pepper 缺失时启动必须失败 |
-| **3 · 传输 T1–T3** | 证书签发 + Kestrel HTTPS + Rust scheme + CSP | `curl --cacert certs/server.crt https://…` 成功；**去掉 `--cacert` 必须失败**；`http://` 请求必须失败 |
-| **4 · 传输 T4** | 状态栏加密指示 + 21 个脚本改用信任锚 | 全套回归：79（角色）+ 25（时钟）+ 14（审计页）+ 7（只读页）断言全绿 |
-| **5 · 收尾** | 重打包 NSIS + 覆盖安装 + 端到端 | 安装后启动界面正常、状态栏显示「加密」、`server.crt` 随包就位 |
+| **3 · 传输 T1–T3** ✅ | 证书签发 + Kestrel HTTPS + Rust scheme + CSP | **已完成 2026-10-02，见 §6.2** —— TLS 1.3 握手成功；去掉信任锚必须失败；`http://` 被拒；证书不可用 ⇒ 退出码 1 |
+| **4 · 传输 T4** ✅ | 状态栏加密指示 + 脚本信任锚 | **已完成 2026-10-02，见 §6.2** —— 状态栏「加密 / 明文」指示灯；脚本改为**按 scheme 自适应**（未统一改走 HTTPS，理由见 §6.2 修正 3） |
+| **5 · 收尾** ✅ | 重打包 NSIS + 覆盖安装 + 端到端 | **已完成 2026-10-02，见 §6.3** —— 真实证书就位并进 `CurrentUser\Root`；覆盖安装后 CDP 界面 10 项断言全通、状态栏显示「加密」 |
 
 **回滚**：每阶段一个独立提交；证书侧可 `Transport:RequireHttps=false` 一键退回 HTTP；S2 可从 `Users` 备份恢复。
 
@@ -416,6 +416,159 @@ authserver.exe --pepper-import <封装文件>    # 导入并写回本机（覆�
 - `LocalMachine\Root` 在提权下的写入是否真的不弹框（阶段 5 用真实 NSIS 安装验证）；
 - **WebView2 的受限令牌能否看到用户/机器根存储** —— 探测程序不在沙箱里，回答不了这个问题。
   唯一硬证据仍是阶段 4/5 里"CDP 启动真实应用、界面完整渲染 + 状态栏显示加密"。
+
+---
+
+### 6.2 阶段 3/4 实施记录（2026-10-02）
+
+**改动清单**
+
+| 文件 | 改动 |
+|---|---|
+| `AuthServer/Services/CertificateManager.cs` | **新增**。CA + leaf 的签发/复用/轮换、SKI+AKI、SAN、`CurrentUser\My` 持久化私钥、Root 信任写入 + 回读自检、公钥导出、元数据记账 |
+| `AuthServer/Program.cs` | `Transport` 配置绑定；`ConfigureKestrel` 挂 leaf；fail-closed 与显式降级两条分支；证书异常统一收敛 |
+| `AuthServer/Controllers/AuthController.cs` | 新增 `GET /api/auth/transport`（**刻意不鉴权** —— 登录页就要显示） |
+| `AuthServer/appsettings.json` | 新增 `Transport: { RequireHttps: true, TrustStore: "CurrentUser" }` |
+| `AuthServer/Properties/launchSettings.json` | `http` profile 显式 `AUTHBASELINE_REQUIRE_HTTPS=false`；新增 `https` profile（5443） |
+| `src-tauri/src/lib.rs` | 新增 `resolve_scheme()`：**与后端读同一份 appsettings.json**，避免"后端降级 http、壳仍导航 https"的白窗口 |
+| `src-tauri/tauri.conf.json` | CSP `connect-src` 增 `https://127.0.0.1:*`、`https://localhost:*`（**保留 http** 以支持降级模式） |
+| `AuthClient/src/api/client.js` · `stores/session.js` · `components/StatusBar.vue` | 传输状态获取与「加密 / 明文」指示灯（接口不可用时**不显示**，绝不报错） |
+| `tools/transport_tls_probe.py` | **新增**。四项断言，可反复复算 |
+| `tools/launch_desktop.py` · `desktop_e2e.py` · `port_watch.py` | 改为**按实际 scheme 自适应**（含固定信任锚），不再硬编码 http |
+
+**实测结果**（`python tools/transport_tls_probe.py <base> <ca>`）
+
+| 断言 | 结果 |
+|---|---|
+| A · https + 固定信任锚 | ✅ 200，`tls=true`，**TLSv1.3 / TLS_AES_256_GCM_SHA384** |
+| B · https 不带信任锚 | ✅ 被拒（`unable to get local issuer certificate`）—— 证明**真在验链**，不是装饰 |
+| C · 明文 http 打到 https 端口 | ✅ 被拒（连接被重置）—— 不存在静默降级通道 |
+| D · 证书内容 | SAN = `IP:127.0.0.1` + `DNS:localhost`；issuer = `CN=AuthBaseline Local CA` |
+| fail-closed | ✅ 证书目录不可用 ⇒ **退出码 1** + `cert-error.log` 写明可读原因 |
+| 显式降级 | ✅ `AUTHBASELINE_REQUIRE_HTTPS=false` 且传入 `https://…` ⇒ 自动改听 `http://…`，端点如实返回 `tls=false` |
+
+**三处对原设计稿的修正（均在实施中发现，不是事后追认）**
+
+1. **leaf 必须显式加 AKI（Authority Key Identifier）**。原稿没提。
+   .NET 的 `CertificateRequest.Create` **不会**自动生成 AKI，而 OpenSSL 校验链时要求
+   "子证书的 AKI == 签发者证书的 SKI"。缺了它报 `Missing Authority Key Identifier` ——
+   **证书签得出来，却没人能验过**。（Schannel 侧只给一句笼统的 "failed to verify"，更难定位。）
+2. **CA 存放位置改为 `%LOCALAPPDATA%\AuthBaselineData\certs\`**。原稿 §3.1 写的
+   `%LOCALAPPDATA%\AuthBaseline\certs\` 与 §4.2 自相矛盾：后者已经论证过
+   `AuthBaseline\` **就是 NSIS 安装目录**（按 productName 决定），会被卸载器与
+   "清理安装残留"整目录扫掉 —— 把 CA 私钥放那儿，等于把"重新签发的能力"交给清理工具。
+3. **不做"21 个脚本统一改走 HTTPS"**。这些脚本测的是**开发态后端**（`http://localhost:5007`），
+   而开发态本轮刻意保持明文（见下），所以它们**本来就不需要改**。
+   强行改动 23 个文件 / 32 处地址，收益只是"重复验证已被 `transport_tls_probe.py` 覆盖的东西"，
+   回归风险远大于收益。实际改的是**三个真正需要跟随 scheme 的脚本**（见改动清单末行）。
+   顺带修掉两个既有 bug：`cs_connect_check.py` / `cs_process_check.py` 的进程名正则是
+   **大小写敏感**的，而实际进程名是 `AuthServer.exe` ⇒ 它们一直匹配不到后端端口。
+
+**开发态为什么保持明文（别误解成"没做完"）**
+
+`dotnet run` 的 `http` profile 显式设 `AUTHBASELINE_REQUIRE_HTTPS=false`，于是：
+
+- 不会去 Provision 证书 ⇒ **不会弹 Windows 证书信任框**；
+- 23 个既有脚本**零改动**即可继续工作（已实测 `cs_connect_check.py` 五层断言全通）；
+- 需要加密的形态是**桌面端**（Tauri 壳 + sidecar），那才是"client 与 server 之间"真正过网络的形态。
+
+两条路各自成立且互不污染：**开发/调试 = 明文对照模式；产品形态 = TLS**。
+这也让"状态栏能如实显示明文"这件事有了真实可演示的场景，而不是一个纸面开关。
+
+**仍未验证（明确留给阶段 5，别当成已验证）**
+
+- `LocalMachine\Root` 在提权下写入是否真的不弹框；
+- **WebView2 的受限令牌能否看到用户/机器根存储** —— 唯一的硬证据仍是
+  "CDP 启动真实应用、界面完整渲染 + 状态栏显示「加密」"；
+- ⚠️ 首次以真实配置启动桌面端会**弹一次 Windows「安全警告」**（写 `CurrentUser\Root`），
+  未确认时无限期阻塞；产品路径是 NSIS 安装期写 `LocalMachine\Root`。
+
+---
+
+### 6.3 阶段 5 实施记录（2026-10-02）—— 打包、真实证书与端到端验证
+
+本节把 §6.2 末尾遗留的三项**全部落定**：真实证书就位、WebView2 是否看得到信任、
+以及"安装后的桌面端到底加不加密"。
+
+**① 真实证书就位**（不再是临时目录里的机制验证）
+
+| 项 | 值 |
+|---|---|
+| CA | `CN=AuthBaseline Local CA`，指纹 `d96339bc…`，2031-10-02 到期 |
+| leaf | `CN=127.0.0.1`，指纹 `CAE1356A…`，2027-10-02 到期（提前 30 天自动轮换） |
+| 私钥 | leaf 在 `CurrentUser\My`（持久化密钥）；CA 备份 `ca.pfx.dpapi`（DPAPI 保护） |
+| 信任 | CA 公钥已写入 **`CurrentUser\Root`**，回读自检通过 |
+| 对外公钥 | `%LOCALAPPDATA%\AuthBaselineData\certs\server.crt` |
+
+> ⚠️ **与阶段 0 的观察不一致，值得记一笔**：阶段 0 测到写 `CurrentUser\Root` 会**阻塞 12.2 秒**
+> （"安全警告"对话框被确认）。本轮以真实配置启动时，**写入是静默成功的，没有弹框**（已用窗口枚举确认无任何对话框）。
+> 所以那条"首次启动必弹框"的说法应当修正为：**弹不弹取决于环境/安全策略，不保证**。
+> 这也解释了为什么 `WriteTrust` 的失败提示里要专门写一句"如果刚才弹出了安全警告，请选『是』后重试" ——
+> 两种情形都要能给出可读原因。
+
+**② 覆盖安装与产物核验**（`tools/reinstall_desktop.py`，新增）
+
+安装验证不能只看"装完了没有"，必须证明**装进去的是新构建**：
+
+```
+卸载旧版（退出码 0，主程序已移除）
+静默安装 /S（退出码 0，主程序时间戳 2026-10-02 17:49:58，已替换）
+安装目录 sidecar md5  34fecee9c66f0df6ae3baf3c19320667
+发布产物   sidecar md5  34fecee9c66f0df6ae3baf3c19320667   ⇒ 一致
+```
+
+脚本封装了两个必须踩过才知道的坑：**NSIS 静默安装遇到"同版本已安装"会直接跳过替换**
+（退出码 0、时间戳不变，看起来成功实际是旧版），以及**卸载器会把自身复制到 `%TEMP%` 再重启**，
+父进程 `wait()` 返回不代表卸载完成，必须轮询目标文件是否真的消失。
+
+**③ 端到端界面验证**（`tools/ui_tls_check.py` + `tools/ui_tls_events.mjs`，新增）
+
+这是 §6.2 里那句"唯一硬证据"的落地，也是唯一能回答"WebView2 看不看得到用户根存储"的测法：
+
+| 断言 | 实测 |
+|---|---|
+| 界面已渲染（非白窗口） | ✅ —— 白窗口是证书不被接受时的唯一症状，且没有任何可读错误 |
+| 页面本身由 https 加载 | ✅ `https://127.0.0.1:55022`（随机端口） |
+| 状态栏出现「加密」徽记 | ✅ 悬停可见 `链路已加密（TLS）/ 证书：CN=127.0.0.1 / 到期：2027-10-02 / 信任存储：CurrentUser` |
+| 状态栏**不存在**「明文」徽记（反向断言） | ✅ 0 个 |
+| 页面内可请求 `/api/auth/transport` | ✅ HTTP 200 —— 顺带证明 **CSP** 放行了 `https://127.0.0.1:*`（CSP 漏一条，接口层探针是看不出来的） |
+| 后端自述 `tls=true` / `scheme=https` | ✅ |
+| 在加密链路上登录成功并拿到票据 | ✅ |
+| 登录后用户管理页读到 6 行用户数据 | ✅ 后端 ↔ MongoDB 链路正常 |
+| 登录后状态栏仍显示加密 | ✅ |
+
+连跑两次均为 **10/10 通过**，且接口层回归（`transport_func_check.py`，9 项）同实例全绿。
+
+**④ 由此修掉的第 4 处问题：登录页看不到加密指示灯**
+
+界面验证第一次跑就暴露了一个真缺陷 —— **登录前状态栏只有「后端已连接」，没有「加密」徽记**。
+原因：`refreshTransport()` 只挂在 `markOnline()` 上，而 `markOnline` 只在业务请求成功后才调用，
+于是要**等登录成功**才看得到加密状态。可是登录本身就发生在链路上 ——
+最需要提示的时刻恰恰被跳过去了。修法：`App.vue` 的 `onMounted` 在探活成功后补一次
+`session.refreshTransport()`（`transportInfo()` 永不抛错，拿不到就不显示，不会影响启动流程）。
+
+**⑤ 新增/升级的验证工具**
+
+| 工具 | 用途 |
+|---|---|
+| `tools/reinstall_desktop.py` | 卸载 → 静默安装 → md5 比对，证明产物真被替换 |
+| `tools/transport_func_check.py` | **生产态**（https + 随机端口）功能回归：协议判定、静态页、登录、职责分离 403、未授权 401 |
+| `tools/ui_tls_check.py` + `ui_tls_events.mjs` | 起真实桌面端 → CDP 断言 → 接口回归 → 收尾，同一进程内完成 |
+| `tools/transport_tls_probe.py` | **B 段改为"空信任锚"**：CA 一旦进了系统根存储，"不带 `--cacert` 必须失败"就不再成立（默认上下文会把它读进来），继续用会得到**假阳性**；同时新增 **E 段"系统信任存储判定"**（等价于 Schannel/WebView2 的判定路径） |
+
+**⑥ 打包链路上的一个环境坑**
+
+`tauri build` 在沙箱里报 `failed to run 'cargo metadata': program not found` ——
+本机 cargo 在 `~/.cargo/bin`（独立工具链，无 rustup），而沙箱 PATH 里没有它，
+且混用反斜杠的路径写法（`C:\Users\...`）在 Git Bash 下解析不了。
+正确做法是 `export PATH="/c/Users/<user>/.cargo/bin:$PATH"` 后再构建。
+
+**仍未做（明确记录，别当成已做）**
+
+- **NSIS 安装期写 `LocalMachine\Root`**：本机用 `CurrentUser\Root` 已足够（WebView2 与 sidecar 同一用户），
+  且证书已预置，所以**本机重装不会再弹框**。但换一台机器 / 换一个 Windows 用户首次启动时，
+  仍会走 `CurrentUser\Root` 写入路径 —— 可能弹框，也可能静默成功（见 ① 的说明）。
+- 证书轮换（leaf 到期自动重签）**有实现但未实测触发**，只验证过"复用"分支。
 
 ---
 
