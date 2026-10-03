@@ -11,6 +11,7 @@
 """
 import json
 import os
+import ssl
 import subprocess
 import sys
 import time
@@ -23,6 +24,33 @@ APP_DIR = Path(os.environ.get(
 ))
 EXE = APP_DIR / "auth-baseline-desktop.exe"
 CDP_PORT = os.environ.get("E2E_CDP_PORT", "9333")
+
+
+def ssl_context_for(url):
+    """https 时返回带**本机 CA 信任锚**的上下文；http 返回 None。
+
+    为什么要固定信任锚而不是 verify=False：桌面端的 leaf 由本机私有 CA 签发，
+    把 CA 公钥当信任锚才是"真在验链"；verify=False 等于把 TLS 变成装饰，
+    测出来的"成功"没有任何意义，也过不了验收时的追问。
+    """
+    if not url.lower().startswith("https://"):
+        return None
+    cert_dir = Path(
+        os.environ.get("AUTHBASELINE_CERT_DIR")
+        or (Path(os.environ.get("LOCALAPPDATA") or ".") / "AuthBaselineData" / "certs")
+    )
+    ca = cert_dir / "server.crt"
+    if ca.exists():
+        return ssl.create_default_context(cafile=str(ca))
+    # 找不到公钥时不静默放行：退回默认校验，让失败以"证书错误"的形式暴露出来
+    return ssl.create_default_context()
+
+
+def http_get(url, timeout=3):
+    ctx = ssl_context_for(url)
+    if ctx is None:
+        return urllib.request.urlopen(url, timeout=timeout)
+    return urllib.request.urlopen(url, timeout=timeout, context=ctx)
 
 
 def main():
@@ -54,7 +82,7 @@ def main():
     deadline = time.time() + 40
     while time.time() < deadline:
         try:
-            with urllib.request.urlopen(
+            with http_get(
                 f"http://127.0.0.1:{CDP_PORT}/json/list", timeout=3
             ) as r:
                 targets = json.loads(r.read().decode())
@@ -63,14 +91,18 @@ def main():
                 url = pages[0].get("url", "")
                 print(f"页面 URL={url}")
                 if "://" in url and "127.0.0.1:" in url:
+                    # scheme 必须**沿用页面 URL 的**：桌面端已启用 TLS，
+                    # 用 http 去打 https 端口只会得到"连接被重置"，
+                    # 极易被误判成"后端没起来"而白查半天。
+                    scheme = url.split("//", 1)[0]
                     port = url.split("//", 1)[1].split("/", 1)[0].split(":")[-1]
                     # 等 sidecar 真正开始响应
                     for _ in range(30):
                         try:
-                            with urllib.request.urlopen(
-                                f"http://127.0.0.1:{port}/favicon.svg", timeout=3
+                            with http_get(
+                                f"{scheme}://127.0.0.1:{port}/favicon.svg", timeout=3
                             ) as rr:
-                                print(f"sidecar 就绪 HTTP={rr.status}")
+                                print(f"sidecar 就绪 scheme={scheme} HTTP={rr.status}")
                                 print(f"PORT={port}")
                                 return 0
                         except Exception:

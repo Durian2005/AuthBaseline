@@ -28,7 +28,7 @@ print(ps.strip() if ps.strip() else "   （未取到，可能进程已退出）"
 
 ns = run(["netstat", "-ano"])
 tl = run(["tasklist", "/FI", "IMAGENAME eq authserver.exe", "/FO", "CSV", "/NH"])
-m = re.search(r'"authserver\.exe","(\d+)"', tl)
+m = re.search(r'"authserver\.exe","(\d+)"', tl, re.I)
 pid = m.group(1) if m else None
 
 # 2. 监听地址

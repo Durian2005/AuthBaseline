@@ -11,7 +11,10 @@ def find_port():
     """从 authserver.exe 的 PID 反查它在 127.0.0.1 上监听的端口。"""
     out = subprocess.run(["tasklist", "/FI", "IMAGENAME eq authserver.exe", "/FO", "CSV", "/NH"],
                          capture_output=True, text=True, encoding="gbk", errors="replace").stdout
-    m = re.search(r'"authserver\.exe","(\d+)"', out)
+    # re.I 是必需的：进程名实际是 `AuthServer.exe`（大写 A/S），
+    # tasklist 的 CSV 输出保留原始大小写 —— 大小写敏感的正则会永远匹配不到，
+    # 表现成"程序可能没在运行"，把人往错误方向带。
+    m = re.search(r'"authserver\.exe","(\d+)"', out, re.I)
     if not m:
         return None, None
     pid = m.group(1)

@@ -72,3 +72,8 @@ tools/evidence/
 # 本地验证脚本跑出来的截图同样不入库（理由同上）。
 # 需要某张截图作为文档时，把它移到 docs/ 下，或用 git add -f 单独放行。
 tools/*.png
+
+# Python 字节码缓存：tools/ 下的脚本被 import 或 py_compile 时会生成，
+# 没有任何入库价值，且会让 git status 一直有噪声。
+__pycache__/
+*.pyc

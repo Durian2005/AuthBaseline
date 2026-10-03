@@ -318,6 +318,35 @@ def find_backend_port():
     return None
 
 
+def backend_transport(port):
+    """判断本机后端在用 https 还是 http，并给出对应的 SSL 上下文。
+
+    桌面端启用 TLS 之后，用 http 去打 https 端口得到的是"连接被重置"。
+    那看起来也像"被拒绝了"，但原因完全不同 —— 服务端不会留下
+    AUDIT_ACCESS_DENIED，这条验证就成了**假阳性**：结论对了，证据是假的。
+    所以必须先探明 scheme 再发请求。
+    """
+    import ssl
+    import urllib.error
+    import urllib.request
+
+    cert_dir = Path(os.environ.get("AUTHBASELINE_CERT_DIR")
+                    or (Path(os.environ.get("LOCALAPPDATA") or ".")
+                        / "AuthBaselineData" / "certs"))
+    ca = cert_dir / "server.crt"
+    ctx = (ssl.create_default_context(cafile=str(ca)) if ca.exists()
+           else ssl.create_default_context())
+
+    try:
+        urllib.request.urlopen(f"https://127.0.0.1:{port}/favicon.svg",
+                               context=ctx, timeout=3)
+        return "https", ctx
+    except urllib.error.HTTPError:
+        return "https", ctx      # 拿到了 HTTP 响应，说明 https 这条路是通的
+    except Exception:
+        return "http", None
+
+
 def deny_audit():
     """从应用之外直接打管理接口，复现「越权访问被拒」。
 
@@ -336,12 +365,14 @@ def deny_audit():
     if not port:
         print("  未找到后端监听端口，跳过越权尝试")
         return
-    print(f"  后端端口 {port}")
+    scheme, ctx = backend_transport(port)
+    print(f"  后端 {scheme}://127.0.0.1:{port}")
     # 两条路径都打：新版审计接口 + 旧版兼容路径（后者曾是"声明即管理员"的漏洞入口）
     for path in ("/api/audit/logs", "/api/auth/logs?adminUsername=admin"):
-        url = f"http://127.0.0.1:{port}{path}"
+        url = f"{scheme}://127.0.0.1:{port}{path}"
         try:
-            with urllib.request.urlopen(url, timeout=5) as r:
+            with (urllib.request.urlopen(url, context=ctx, timeout=5) if ctx
+                  else urllib.request.urlopen(url, timeout=5)) as r:
                 print(f"  越权尝试 {path} -> HTTP {r.status}（异常：竟然放行了）")
         except urllib.error.HTTPError as e:
             body = e.read().decode("utf-8", "replace")[:90]

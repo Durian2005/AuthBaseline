@@ -15,6 +15,8 @@ import time
 import socket
 import re
 import json
+import ssl
+import urllib.error
 import urllib.request
 
 EXE = os.path.join(
@@ -71,9 +73,35 @@ def tcp_probe(port):
         s.close()
 
 
-def http_probe(port, path="/"):
+def _scheme_and_ctx(port):
+    """探测 sidecar 用的是 https 还是 http，并给出对应的 SSL 上下文。
+
+    桌面端已启用 TLS：仍用 http 去打 https 端口只会得到"连接被重置"，
+    看起来像"服务没起来"，实际是协议打错了 —— 这类误判最费时间。
+    """
+    cert_dir = os.environ.get("AUTHBASELINE_CERT_DIR") or os.path.join(
+        os.environ.get("LOCALAPPDATA") or ".", "AuthBaselineData", "certs")
+    ca = os.path.join(cert_dir, "server.crt")
+    ctx = (ssl.create_default_context(cafile=ca) if os.path.exists(ca)
+           else ssl.create_default_context())
     try:
-        with urllib.request.urlopen("http://127.0.0.1:%d%s" % (port, path), timeout=5) as r:
+        urllib.request.urlopen("https://127.0.0.1:%d/favicon.svg" % port,
+                               context=ctx, timeout=3)
+        return "https", ctx
+    except urllib.error.HTTPError:
+        return "https", ctx      # 拿到了 HTTP 响应，说明 https 这条路是通的
+    except Exception:
+        return "http", None
+
+
+def http_probe(port, path="/"):
+    scheme, ctx = _scheme_and_ctx(port)
+    url = "%s://127.0.0.1:%d%s" % (scheme, port, path)
+    try:
+        if ctx is None:
+            with urllib.request.urlopen(url, timeout=5) as r:
+                return r.status, len(r.read())
+        with urllib.request.urlopen(url, context=ctx, timeout=5) as r:
             return r.status, len(r.read())
     except Exception as e:
         return 0, str(e)
