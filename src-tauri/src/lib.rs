@@ -25,10 +25,49 @@ struct BackendState {
     url: Mutex<String>,
 }
 
-/// 供前端调用：返回 sidecar 后端的监听地址，例如 `http://127.0.0.1:52341`
+/// 供前端调用：返回 sidecar 后端的监听地址，例如 `https://127.0.0.1:52341`
 #[tauri::command]
 fn get_backend_url(state: State<'_, BackendState>) -> String {
     state.url.lock().unwrap().clone()
+}
+
+/// 后端该用哪个 scheme（https / http）。
+///
+/// 为什么需要这个函数而不是直接写死 `https`：后端有一个显式的对照实验开关
+/// `Transport:RequireHttps=false`，打开它后端就会**退回明文 HTTP**。
+/// 此时若壳仍然导航到 `https://...`，TLS 握不上手，用户看到的是一个**白窗口** ——
+/// 没有任何错误信息可看。所以两边必须得出同一个结论。
+///
+/// 取值优先级（与后端的取值优先级刻意保持一致）：
+///   ① 环境变量 `AUTHBASELINE_REQUIRE_HTTPS`（会被 sidecar 继承，两边自动一致）
+///   ② 程序目录下的 `appsettings.json` 的 `Transport.RequireHttps`
+///   ③ 默认 `https` —— **默认必须是加密的**，不能是"配错了就悄悄明文"
+fn resolve_scheme() -> &'static str {
+    if let Ok(v) = std::env::var("AUTHBASELINE_REQUIRE_HTTPS") {
+        let v = v.trim().to_ascii_lowercase();
+        if v == "0" || v == "false" {
+            return "http";
+        }
+        if v == "1" || v == "true" {
+            return "https";
+        }
+    }
+
+    // 桌面端启动时已把 cwd 切到程序目录，而 appsettings.json 由 bundle.resources 随包就位，
+    // 所以这里读到的就是后端将要读的那一份。
+    if let Ok(text) = std::fs::read_to_string("appsettings.json") {
+        if let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) {
+            if let Some(on) = json
+                .get("Transport")
+                .and_then(|t| t.get("RequireHttps"))
+                .and_then(|v| v.as_bool())
+            {
+                return if on { "https" } else { "http" };
+            }
+        }
+    }
+
+    "https"
 }
 
 /// 向操作系统申请一个空闲端口：绑定 :0 后立刻读取并释放。
@@ -85,8 +124,10 @@ pub fn run() {
                     "无法为后端分配空闲端口",
                 )
             })?;
-            let url = format!("http://127.0.0.1:{port}");
-            let bind = format!("http://127.0.0.1:{port}");
+            let scheme = resolve_scheme();
+            let url = format!("{scheme}://127.0.0.1:{port}");
+            let bind = format!("{scheme}://127.0.0.1:{port}");
+            println!("[backend] scheme={scheme}（Transport:RequireHttps 决定）");
 
             // 启动 .NET 后端 sidecar，并通过 --urls 指定它监听的地址
             let (mut rx, child) = app
@@ -121,7 +162,12 @@ pub fn run() {
 
             // Windows 上部分 WebView2/Tauri 组合会把内置资源协议解析成无端口的
             // localhost，从而出现 ERR_CONNECTION_REFUSED。后端就绪后直接导航到
-            // sidecar 的本机 HTTP 地址，可同时提供前端静态资源与 API，避免该兼容性问题。
+            // sidecar 的本机地址，可同时提供前端静态资源与 API，避免该兼容性问题。
+            //
+            // ⚠️ scheme 为 https 时 WebView2 会**校验证书链**：CA 必须在本机根存储里，
+            // 否则整个界面连壳都渲染不出来（白窗口、无任何错误信息）。
+            // 证书的签发与信任写入见后端的 CertificateManager ——
+            // 产品路径是 NSIS 安装期写 LocalMachine\Root，开发态退化写 CurrentUser\Root。
             if !wait_for_backend(port, STARTUP_TIMEOUT) {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::TimedOut,

@@ -1,6 +1,6 @@
 import { defineStore } from 'pinia'
 import { computed, ref, watch } from 'vue'
-import { ApiError, api, getTicket, setTicket } from '../api/client'
+import { ApiError, api, getTicket, setTicket, transportInfo } from '../api/client'
 import { now } from '../composables/clock'
 import { useToastStore } from './toast'
 
@@ -88,6 +88,20 @@ export const useSessionStore = defineStore('session', () => {
   /** 'unknown' | 'online' | 'offline' */
   const connection = ref('unknown')
   const lastSyncAt = ref(null)
+
+  /**
+   * 传输层状态：`{ tls, scheme, subject, notAfter, downgraded, ... }`，取自后端
+   * `GET /api/auth/transport`。仅供状态栏显示"加密 / 明文"。
+   *
+   * 保持 null 表示"还不知道"（老后端没有这个接口 / 尚未连上）——
+   * 此时状态栏不显示指示灯。宁可什么都不显示，也不要显示一个可能是错的结论：
+   * 验收时要讲的是"现在这条链路到底加没加密"，讲错比不讲更糟。
+   */
+  const transport = ref(null)
+
+  async function refreshTransport() {
+    transport.value = await transportInfo()
+  }
 
   /* ---- 审计完整性（实验二：篡改检测弹窗） ---- */
   const shards = ref([])
@@ -215,6 +229,9 @@ export const useSessionStore = defineStore('session', () => {
   function markOnline() {
     connection.value = 'online'
     lastSyncAt.value = new Date().toISOString()
+    // 传输状态只在首次连上时取一次：同一个后端进程内 scheme 不会变，
+    // 每次业务请求都去问一遍纯属浪费（markOnline 的调用频率不低）。
+    if (transport.value === null) refreshTransport()
   }
 
   function markOffline() {
@@ -799,6 +816,10 @@ export const useSessionStore = defineStore('session', () => {
     loadingLogs,
     connection,
     lastSyncAt,
+    transport,
+    // 传输状态是**匿名**接口，登录页就要能显示；所以 App 启动探测到后端后就调它，
+    // 不能只依赖 markOnline（那样要等登录成功才看得到"加密 / 明文"）。
+    refreshTransport,
     // 审计增强
     shards,
     auditTotal,

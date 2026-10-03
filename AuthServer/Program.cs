@@ -1,3 +1,4 @@
+using System.Text.RegularExpressions;
 using AuthServer.Services;
 
 // 本程序集只跑 Windows：它是 Tauri 壳的桌面端 sidecar，发布目标固定为 win-x64，
@@ -46,6 +47,64 @@ public class Program
             return 1;
         }
 
+        // ── 传输层证书：必须在 builder.Build() 之前挂到 Kestrel 上 ──
+        // 与 pepper 同为"启动闸门"：证书不可用时按 RequireHttps 决定是拒绝启动还是显式退回 HTTP。
+        //
+        // ⚠️ Provision 可能是**阻塞**的：首次把 CA 写进 CurrentUser\Root 时 Windows 会弹一次
+        //    「安全警告」，未确认就无限期等待（阶段 0 实测阻塞 12.2 秒，最长观察到 23 分钟）。
+        //    这是设计已知代价，产品路径改由 NSIS 安装期写 LocalMachine\Root 规避。
+        var transport = new TransportOptions();
+        builder.Configuration.GetSection("Transport").Bind(transport);
+        transport.ApplyEnvironmentOverrides();
+
+        CertificateManager? certManager = null;
+
+        if (transport.RequireHttps)
+        {
+            try
+            {
+                certManager = CertificateManager.Provision(transport.TrustStore);
+                foreach (var note in certManager.Notes) Console.WriteLine($"[Cert] {note}");
+
+                var leaf = certManager.LeafCertificate;
+                builder.WebHost.ConfigureKestrel(o =>
+                    o.ConfigureHttpsDefaults(h => h.ServerCertificate = leaf));
+
+                Console.WriteLine(
+                    $"[Transport] HTTPS 已启用 · {leaf.Subject} · 到期 {leaf.NotAfter:yyyy-MM-dd} " +
+                    $"· 信任存储 {transport.TrustStore}");
+                CertificateManager.ClearErrorLog();
+            }
+            catch (CertificateUnavailableException ex)
+            {
+                // 桌面端 Console 输出留不下来，所以必须额外写一份可读文件（同 pepper 的做法）
+                Console.Error.WriteLine($"[Transport] 启动被拒绝：{ex.Message}");
+                CertificateManager.WriteErrorLog(ex.ToString());
+                return 1;
+            }
+        }
+        else
+        {
+            // 对照实验模式：显式退回明文 HTTP。
+            //
+            // 这里**不去加载证书**：RequireHttps=false 的语义就是"本次跑明文"，
+            // 若此时仍然挂上证书、实际走 HTTPS，这个开关就名不副实了
+            // （状态栏会说"明文"而链路其实是加密的，比不加密更糟 —— 它会让验收结论失真）。
+            //
+            // 把 lib.rs 传进来的 `--urls https://127.0.0.1:PORT` 就地换成 http（端口不变），
+            // 这样"一键退回 HTTP"真的只需要改一个配置，不必连 Rust 侧一起改。
+            var urls = builder.Configuration["urls"];
+            if (!string.IsNullOrWhiteSpace(urls))
+            {
+                var downgraded = urls.Split(';', StringSplitOptions.RemoveEmptyEntries)
+                    .Select(u => Regex.Replace(u, "^https://", "http://", RegexOptions.IgnoreCase))
+                    .ToArray();
+                builder.WebHost.UseUrls(downgraded);
+                Console.WriteLine($"[Transport] 监听地址已降级为 {string.Join(" ", downgraded)}");
+            }
+            Console.WriteLine("[Transport] ⚠️ RequireHttps=false ⇒ 本次链路**无加密**，状态栏会红色常驻提示");
+        }
+
         // Add services to the container.
         builder.Services.AddControllers();
         builder.Services.AddEndpointsApiExplorer();
@@ -53,6 +112,18 @@ public class Program
 
         // 注册 pepper（单例）：MongoDbService 与 AuthController 都依赖它。
         builder.Services.AddSingleton(pepper);
+
+        // 传输层状态：**降级运行时也必须注册** —— 否则 /api/auth/transport 在明文模式下会 500，
+        // 那样"状态栏能显示明文"这件事本身就坏了，比不显示更麻烦。
+        builder.Services.AddSingleton(transport);
+        if (certManager is not null) builder.Services.AddSingleton(certManager);
+        builder.Services.AddSingleton(new TransportInfo(
+            HttpsEnabled: certManager is not null,
+            RequireHttps: transport.RequireHttps,
+            Subject: certManager?.LeafCertificate.Subject,
+            NotAfter: certManager is null ? null : certManager.LeafCertificate.NotAfter,
+            Thumbprint: certManager?.LeafCertificate.Thumbprint,
+            TrustStore: certManager?.TrustStoreName));
 
         // 注册 MongoDB 服务
         builder.Services.AddSingleton<MongoDbService>();

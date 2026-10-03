@@ -17,11 +17,12 @@ public class AuthController : ControllerBase
     private readonly AuditService _audit;
     private readonly SessionService _sessions;
     private readonly PepperProvider _pepper;
+    private readonly TransportInfo _transport;
     private const int MaxFailedAttempts = 3;
     private static readonly TimeSpan LockoutDuration = TimeSpan.FromMinutes(3);
 
     public AuthController(MongoDbService db, VerificationService codes, EmailOptions emailOptions,
-        AuditService audit, SessionService sessions, PepperProvider pepper)
+        AuditService audit, SessionService sessions, PepperProvider pepper, TransportInfo transport)
     {
         _db = db;
         _codes = codes;
@@ -29,6 +30,42 @@ public class AuthController : ControllerBase
         _audit = audit;
         _sessions = sessions;
         _pepper = pepper;
+        _transport = transport;
+    }
+
+    /// <summary>
+    /// 传输层状态：供界面状态栏显示「加密 / 明文」。
+    ///
+    /// **刻意不做鉴权**：状态栏在登录页就要显示，而"这条链路到底有没有加密"
+    /// 恰恰是用户最该在**输入口令之前**就知道的事。
+    /// 该接口不含任何敏感信息 —— 证书主题与指纹属于公钥信息，本就是公开的。
+    /// </summary>
+    [HttpGet("transport")]
+    public IActionResult Transport()
+    {
+        // 以**实际请求**的 scheme 为准，而不是配置项：
+        // 配置说的是"打算怎么跑"，Request.IsHttps 说的是"这一跳到底有没有加密"，
+        // 而验收要证明的是后者。两者不一致本身就是最该被暴露的信号。
+        var https = Request.IsHttps;
+
+        return Ok(new ApiResponse
+        {
+            Success = true,
+            Code = "OK",
+            Message = https ? "链路已加密（TLS）" : "链路为明文 HTTP",
+            Data = new
+            {
+                scheme = https ? "https" : "http",
+                tls = https,
+                requireHttps = _transport.RequireHttps,
+                subject = _transport.Subject,
+                notAfter = _transport.NotAfter?.ToUniversalTime().ToString("o"),
+                thumbprint = _transport.Thumbprint,
+                trustStore = _transport.TrustStore,
+                // 配置要求加密、实际却是明文 ⇒ 界面必须显眼地报出来，而不是静静显示"明文"
+                downgraded = _transport.RequireHttps && !https
+            }
+        });
     }
 
     // 密码复杂度校验：至少8位，包含大小写字母和数字

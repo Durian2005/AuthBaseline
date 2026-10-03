@@ -110,6 +110,12 @@ async function waitForBackendReady(timeoutMs = 30000) {
 
 onMounted(async () => {
   await waitForBackendReady()
+  // 传输层状态用的是**匿名**接口，登录前就该显示：
+  // 否则"链路上到底加密了没有"这个问题要等登录成功才能看到答案 ——
+  // 而登录本身就发生在链路上，等于把最需要提示的时刻跳过去了。
+  // 放在这里而不是只依赖 markOnline()，就是为了让**登录页**也有加密指示灯。
+  // transportInfo() 永不抛错（拿不到就返回 null，指示灯不显示），不会影响启动流程。
+  session.refreshTransport()
   probeTimer = setInterval(() => {
     // 有后台轮询的角色（管理员 / 审计管理员）不需要额外探活：
     // 他们的轮询本身就会刷新 lastSyncAt，再探一次属于重复请求。
@@ -162,6 +168,7 @@ onBeforeUnmount(() => {
 
     <StatusBar
       :connection="session.connection"
+      :transport="session.transport"
       :last-sync-at="session.lastSyncAt"
       :lock-remaining="session.lockRemaining"
       :username="session.currentUser?.username || ''"

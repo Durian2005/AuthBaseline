@@ -6,6 +6,8 @@ import { formatClock, formatDate, formatDuration, formatRelative } from '../util
 
 const props = defineProps({
   connection: { type: String, default: 'unknown' },
+  /** 后端 `GET /api/auth/transport` 的 data；null 表示未知（老后端 / 尚未连上） */
+  transport: { type: Object, default: null },
   lastSyncAt: { type: String, default: null },
   lockRemaining: { type: Number, default: 0 },
   username: { type: String, default: '' }
@@ -18,6 +20,37 @@ const CONN = {
 }
 
 const conn = computed(() => CONN[props.connection] || CONN.unknown)
+
+/**
+ * 传输层指示灯 —— 验收时"讲得出加密了"靠的就是这一处。
+ *
+ * 判据取后端返回的 `tls`（其后端依据是 Request.IsHttps，是**实际链路**的事实），
+ * 而不是"地址开头是不是 https"：后者只说明我们**打算**加密。
+ * `tls` 不是布尔值时一律返回 null —— 不显示，胜过显示一个可能错的结论。
+ */
+const tls = computed(() => {
+  const t = props.transport
+  if (!t || typeof t.tls !== 'boolean') return null
+
+  const notAfter = typeof t.notAfter === 'string' ? t.notAfter.slice(0, 10) : '-'
+  return {
+    on: t.tls,
+    label: t.tls ? '加密' : '明文',
+    icon: t.tls ? 'shield-check' : 'alert-triangle',
+    tone: t.tls ? 'ok' : 'bad',
+    title: t.tls
+      ? `链路已加密（TLS）\n证书：${t.subject || '-'}\n到期：${notAfter}\n信任存储：${t.trustStore || '系统'}`
+      : `⚠️ 当前为明文 HTTP：口令与票据在链路上可被本机其他进程读取`
+        + (t.downgraded ? '\n（后端配置要求加密，但实际未生效）' : '')
+  }
+})
+
+/** 后端地址提示。原来是硬编码的 `http://localhost:5007`，加密之后那句话会误导人。 */
+const backendTitle = computed(() => {
+  const scheme = props.transport?.scheme
+  return scheme ? `API 基址 ${scheme}://127.0.0.1` : 'API 基址'
+})
+
 const clock = computed(() => formatClock(now.value))
 const today = computed(() => formatDate(now.value))
 const syncText = computed(() =>
@@ -28,9 +61,14 @@ const syncText = computed(() =>
 <template>
   <footer class="status">
     <div class="status__left">
-      <span class="conn" :class="`conn--${conn.tone}`" :title="`API 基址 http://localhost:5007`">
+      <span class="conn" :class="`conn--${conn.tone}`" :title="backendTitle">
         <AppIcon :name="conn.icon" :size="12" :stroke-width="2" />
         <span>{{ conn.label }}</span>
+      </span>
+
+      <span v-if="tls" class="conn" :class="`conn--${tls.tone}`" :title="tls.title">
+        <AppIcon :name="tls.icon" :size="12" :stroke-width="2" />
+        <span>{{ tls.label }}</span>
       </span>
 
       <span class="status__item status__item--mono">{{ syncText }}</span>

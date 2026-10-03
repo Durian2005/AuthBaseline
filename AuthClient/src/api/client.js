@@ -183,6 +183,28 @@ export async function probe() {
   }
 }
 
+/**
+ * 传输层状态：当前链路是否加密（TLS）。
+ *
+ * 为什么不放进 `api.*`：那里每一个方法的语义都是"业务调用，失败要抛错"。
+ * 而这是状态栏的装饰性信息，必须**永不抛错** —— 后端若是本次改造之前的版本，
+ * 该接口根本不存在，此时正确行为是"指示灯不显示"，而不是让界面报错。
+ *
+ * 判断依据取后端返回的 `tls`（它有 Request.IsHttps 作依据，是实际链路的事实），
+ * 而不是"地址是 https:// 开头"—— 后者只说明我们**打算**加密。
+ */
+export async function transportInfo() {
+  await apiRootReady
+  try {
+    const res = await fetch(`${API_ROOT}/auth/transport`, { cache: 'no-store' })
+    if (!res.ok) return null
+    const body = await res.json()
+    return body?.data ?? null
+  } catch {
+    return null
+  }
+}
+
 export const api = {
   /** 注册：邮箱验证通过后才真正建号（email/code 在老流程下可为空串） */
   register: (username, password, email, code) =>
