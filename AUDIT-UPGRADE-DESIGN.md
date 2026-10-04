@@ -1,4 +1,4 @@
-# 实验二改造方案｜让所有安全事件可追责
+# 审计追责设计｜让所有安全事件可追溯
 
 > 审计从「调试输出」升级为**独立安全控制**。
 > 本文是动手前的设计确认稿，经确认后再逐项落地。
@@ -11,13 +11,13 @@
 > | 防篡改 | **链式哈希 + 完整性校验接口**（不带定时巡检） |
 > | 轮转归档 | **分片集合**（`AuditLogs_yyyyMM`） |
 > | 事件字段 | **新增字段，不改旧字段**（追加 `reasonCode`） |
-> | 验收脚本 | **四组合一的** `tools/audit_e2e_test.py` |
+> | 测试脚本 | **四组合一的** `tools/audit_e2e_test.py` |
 
 ---
 
 ## 一、现状差距（改造前）
 
-| 图片要求 | 现状 | 差距 |
+| 需求 | 现状 | 差距 |
 |---|---|---|
 | **01 记得全**<br>关键成功、失败、拒绝均生成事件 | `WriteAuditLogAsync` 已覆盖所有分支，`result` 独立成列，`target` 已记 | 缺 `reason_code`（拒绝/失败的具体原因码只落在响应体，没进事件本身） |
 | **02 看不到**<br>普通用户查询日志必须被拒绝 | `GET /logs?adminUsername=xxx`、`GET /users?adminUsername=xxx` **只凭 URL 字符串声明身份** | **致命**：任何人带上 `adminUsername=admin` 即可读走全部日志。无任何拒绝事件产生 |
@@ -93,14 +93,14 @@ public long Seq { get; set; }
 public string Shard { get; set; } = string.Empty;
 ```
 
-字段映射到图片给出的「事件最小骨架」：
+字段映射到「事件最小骨架」：
 
-| 图片骨架 | 现有字段 | 说明 |
+| 骨架字段 | 现有字段 | 说明 |
 |---|---|---|
 | `time` | `timestamp` | 已有（UTC） |
 | `actor_type` | —— | **隐含**：`operatorId == "anonymous"` 即访客，否则为已认证主体。可选新增显式字段 |
 | `actor_id` | `operatorId` + `operatorName` | 已有 |
-| `source` | —— | **新增建议**：`{ ip, userAgent }`，图片明确要求 |
+| `source` | —— | **新增建议**：`{ ip, userAgent }`，需求明确要求 |
 | `action` | `action` | 已有 |
 | `object` | `target` | 已有 |
 | `result` | `result` | 已有（成功/失败） |
@@ -265,7 +265,7 @@ GET /api/audit/logs?shard=&keyword=&action=&result=&page=&pageSize=
 
 ---
 
-## 六、验收证据清单（对照图片四组）
+## 六、测试证据清单（四组目标）
 
 统一脚本 `tools/audit_e2e_test.py`，四组用例各自输出 PASS/FAIL 与原始证据。
 
@@ -333,16 +333,16 @@ Step 3  会话票据：签发 / 校验 / 吊销 + TicketAuth 过滤器
 Step 4  接口改造：6 个管理员接口切 Bearer；新增 /verify /logout /shards /audit/logs(分页)
 Step 5  把 WriteAuditLogAsync 的既有调用点全部迁到 AuditService，并补 reasonCode
 Step 6  前端适配（client.js / session.js / AuditView.vue）
-Step 7  验收脚本 audit_e2e_test.py 四组用例
+Step 7  测试脚本 audit_e2e_test.py 四组用例
 Step 8  回归：跑通 email_e2e_test.py 与 ui_e2e.mjs（含桌面版）
-Step 9  文档：README 增补实验二章节 + 证据截图
+Step 9  文档：README 增补审计追责章节 + 证据截图
 ```
 
 ---
 
 ## 九、需要你确认的最后两点
 
-1. **`source` 字段（IP + UserAgent）要不要加？** 图片骨架里明确列了 `source`。加了追责证据更完整，代价是 `WriteAuditLogAsync` 要多传两个参数（约 20 行改动）。
-2. **`actor_type` 要不要显式落字段？** 现在是靠 `operatorId == "anonymous"` 隐含表达。显式落一个 `actorType`（`user` / `anonymous` / `system`）更贴合图片骨架，也方便后续加「系统自动解锁」这类无操作者事件。
+1. **`source` 字段（IP + UserAgent）要不要加？** 设计骨架里明确列了 `source`。加了追责证据更完整，代价是 `WriteAuditLogAsync` 要多传两个参数（约 20 行改动）。
+2. **`actor_type` 要不要显式落字段？** 现在是靠 `operatorId == "anonymous"` 隐含表达。显式落一个 `actorType`（`user` / `anonymous` / `system`）更贴合设计骨架，也方便后续加「系统自动解锁」这类无操作者事件。
 
 这两点你定了，我就开始动手。

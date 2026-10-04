@@ -12,7 +12,7 @@
 ## 一、目录结构（与本仓库相关部分）
 
 ```
-实验一 建立可运行的口令认证基线/
+AuthBaseline/
 ├── AuthClient/                 # Vue 3 前端（desktop 模式产物输出到 AuthClient/dist）
 ├── AuthServer/                 # ASP.NET Core 后端（未改动）
 │   └── publish/                # dotnet publish 的发布产物（单文件 exe）

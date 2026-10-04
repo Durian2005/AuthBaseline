@@ -1,6 +1,6 @@
-# 实验二验收报告｜让所有安全事件可追责
+# 审计追责验证报告｜让所有安全事件可追溯
 
-对应验收图片四组要求：**01 记得全 · 02 看不到 · 03 改不掉 · 04 撑得住**。
+对应四组验证目标：**01 记得全 · 02 看不到 · 03 改不掉 · 04 撑得住**。
 改造方案见 `AUDIT-UPGRADE-DESIGN.md`，本文件只记录**实测结果与证据**。
 
 交付形态：**Tauri 桌面端软件**（`AuthBaseline_1.0.0_x64-setup.exe`），
@@ -15,7 +15,7 @@
 
 ## 一、结论速览
 
-| 验收项 | 要求 | 实测结果 | 状态 |
+| 验证项 | 要求 | 实测结果 | 状态 |
 |--------|------|----------|------|
 | 01 记得全 | 成功/失败/拒绝行为全部留痕 | 覆盖测试 57 项全过，含越权与锁定路径 | ✅ |
 | 02 看不到 | 未授权者读不到审计数据 | 无票据/坏票据/过期票据均 401，且**被拒行为本身也留痕** | ✅ |
@@ -25,7 +25,7 @@
 **一键验证命令**：
 
 ```bash
-python tools/audit_e2e_test.py      # 四组验收全流程（57 项断言）
+python tools/audit_e2e_test.py      # 四组测试全流程（57 项断言）
 python tools/verify_api.py          # 起后端并校验链完整性
 ```
 
@@ -166,7 +166,7 @@ GET /api/audit/verify
 | 登录后数据加载 | ✅ 用户总数 2、审计 50 条、最近操作显示"完整性校验 INTACT"（证据 `shot_dash_with_data.png`） |
 | 审计日志页 | ✅ 完整性卡片、筛选、分页、哈希链详情（证据 `shot_audit_view.png`） |
 | 直接改库告警 | ✅ 30 秒内弹窗，断裂序号 339（证据 `shot_tamper_alert_final.png`） |
-| 四组验收脚本 | ✅ `tools/audit_e2e_test.py` 57 项全部通过 |
+| 四组测试脚本 | ✅ `tools/audit_e2e_test.py` 57 项全部通过 |
 | 链完整性 | ✅ `/api/audit/verify` 返回 `intact: true` |
 | 原有功能 | ✅ 注册 / 审核 / 解锁 / 改密 / 邮件验证码 均未受影响 |
 
@@ -174,7 +174,7 @@ GET /api/audit/verify
 
 ```bash
 python tools/verify_install.py     # 校验安装目录文件是否齐全
-python tools/run_audit_e2e.py      # 起后端并跑四组验收（57 项）
+python tools/run_audit_e2e.py      # 起后端并跑四组测试（57 项）
 python tools/desktop_e2e.py tools/x.png "login:admin:Admin123,wait:6,shot:x.png"
 ```
 
@@ -295,7 +295,7 @@ python tools/desktop_e2e.py tools/x.png "login:admin:Admin123,wait:6,shot:x.png"
 最终状态：`/api/audit/verify` 返回 `intact: true`，全链自洽。
 
 > 说明：`tools/audit_e2e_test.py` 内建的篡改用例会在每个场景结束后
-> **自动还原**测试数据，所以正常跑完验收脚本不会留下断裂。
+> **自动还原**测试数据，所以正常跑完测试脚本不会留下断裂。
 
 ---
 
@@ -354,11 +354,11 @@ seq=764 /api/auth/logs   → {...,"Path":"/api/auth/logs","Query":"?adminUsernam
 **票据是明文存储**的（`Session.Ticket` 直接存 32 字节随机值的 Base64Url 串，
 `SessionService` 未做哈希）。
 
-- 对四组验收**无影响**：票据本身是 CSPRNG 生成的 32 字节随机值，
+- 对四组测试**无影响**：票据本身是 CSPRNG 生成的 32 字节随机值，
   客户端无法推算或伪造，`NO_TICKET` / `SESSION_INVALID` 的拦截依然成立；
 - 但严格说，这属于「会话令牌应存摘要而非明文」的加固点 ——
   一旦数据库只读泄露，攻击者可直接冒用未过期票据。
-- 结论：**不影响本次验收结论**。若追求更严的表述，
+- 结论：**不影响本次验证结论**。若追求更严的表述，
   可要么把实现改成存 SHA-256 摘要，要么把报告措辞改为"票据为不可推算的随机值"。
 
 ### 9.5 数据整理与可复现脚本

@@ -250,7 +250,7 @@ const roleLabel    = computed(() => ROLE_LABELS[role.value])
 
 **若不改**：`admin` 登录后会每 30 秒拿着一张没有审计权的票据去撞 `verify`，
 后端每次都返回 403、每次都写一条 `AUDIT_ACCESS_DENIED`。结果是
-**审计链被自己的假告警灌满**，验收时打开日志会看到成百条"越权访问被拒"。
+**审计链被自己的假告警灌满**，测试时打开日志会看到成百条"越权访问被拒"。
 
 ### 5.3 用户管理页
 
@@ -269,7 +269,7 @@ const roleLabel    = computed(() => ROLE_LABELS[role.value])
 
 ---
 
-## 六、验收要点
+## 六、验证要点
 
 改造完成后可以现场演示的四条对比：
 

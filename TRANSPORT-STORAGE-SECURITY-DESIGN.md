@@ -200,7 +200,7 @@
 | 脚本端口发现 | 已支持 `BASE` / 命令行端口，只需把 `http://` 换成 `https://` | 硬编码 `http://localhost:5007` 的几处会漏 |
 | 界面可见性 | 状态栏「后端已连接」→「后端已连接 · 加密」/「· 明文」（红） | 演示时讲不出"加密了" |
 
-**禁止**用 `verify=False` 绕过 —— 把信任锚固定成 `server.crt` 才是对的做法，而且这句话本身可以在验收时讲。
+**禁止**用 `verify=False` 绕过 —— 把信任锚固定成 `server.crt` 才是对的做法，而且这句话本身可以在评审时讲。
 
 涉及脚本（实测发 HTTP 到后端的那些）：`audit_e2e_test.py`、`cs_connect_check.py`、`desktop_e2e.py`、`diag_api.py`、`email_e2e_test.py`、`launch_desktop.py`、`lockout_clock_probe.py`、`password_event_probe.py`、`port_watch.py`、`race_storm_test.py`、`role_separation_test.py`、`run_audit_e2e.py`、`tamper_helper.py`、`ui_audit_check.py`、`ui_readonly_check.py`、`verify_api.py`、`verify_email.py`、`verify_install.py`、`ui_*.mjs`。
 
@@ -228,7 +228,7 @@
 
 ⇒ 结论：**票据用无盐 SHA-256（可选加服务端 pepper 做成 HMAC）**。这不是"偷懒"，而是盐的适用边界 —— 盐是为**低熵、可枚举**的输入（口令）准备的。
 
-**这条正好可以当成验收亮点**：能说清"为什么口令要盐、票据不要盐"，比"我给所有东西都加了盐"水平高一档。
+**这条正好可以当成设计亮点**：能说清"为什么口令要盐、票据不要盐"，比"我给所有东西都加了盐"水平高一档。
 
 **当前 `Sessions` 为 0 条 ⇒ 无存量迁移**；仍保留一段一次性升级逻辑（若遇到旧文档则原地改写），防止演示机上残留旧会话。
 
@@ -362,7 +362,7 @@ authserver.exe --pepper-import <封装文件>    # 导入并写回本机（覆�
 
 ---
 
-## 五、不做的事（明确列出，便于验收时说清边界）
+## 五、不做的事（明确列出，便于说清边界）
 
 1. 不做前端口令预哈希（反模式，见 §0）。
 2. 不做自定义报文加密（用标准 TLS）。
