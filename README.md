@@ -1,34 +1,50 @@
-# 实验一：建立可运行的口令认证基线
+# AuthBaseline
 
-> **本仓库不止实验一。** 这份 README 记录的是**实验一**的验收范围与实测结论；
-> 在一份可运行的口令认证基线之上，后续还迭代出了下列能力，各有独立文档：
->
-> | 文档 | 内容 |
-> |------|------|
-> | [`DESKTOP-README.md`](DESKTOP-README.md) | 桌面端使用教程（Tauri v2 + Vue 3 + .NET sidecar，打包为 Windows 桌面软件） |
-> | [`EMAIL-VERIFY-README.md`](EMAIL-VERIFY-README.md) | 邮箱验证码：注册绑定邮箱、忘记密码重置 |
-> | [`ROLE-SEPARATION-DESIGN.md`](ROLE-SEPARATION-DESIGN.md) | 角色分离（职责分离）改造：Admin 管用户但不可读审计，AuditAdmin 读审计但不管用户 |
-> | [`AUDIT-UPGRADE-DESIGN.md`](AUDIT-UPGRADE-DESIGN.md) | 实验二改造方案｜让所有安全事件可追责 |
-> | [`AUDIT-VERIFY-REPORT.md`](AUDIT-VERIFY-REPORT.md) | 实验二验收报告（含哈希链的独立复算） |
-> | [`TRANSPORT-STORAGE-SECURITY-DESIGN.md`](TRANSPORT-STORAGE-SECURITY-DESIGN.md) | 传输安全与存储安全改造方案（TLS / 票据哈希化 / 口令 pepper） |
+**一套可本地部署、职责分离、全程可追责的口令认证基线系统。**
+
+AuthBaseline 是一套完整的口令认证参考实现，覆盖认证系统的完整生命周期：注册审核、
+登录、口令复杂度校验与哈希存储、失败锁定、会话票据、基于角色的访问控制（职责分离），
+以及基于哈希链的审计日志。后端为 ASP.NET Core（.NET 8）+ MongoDB，前端是 Vue 3
+的桌面形态应用，并可通过 Tauri v2 打包为 Windows 桌面软件。
+
+它适合作为新系统的认证起点，也可作为认证与审计安全设计的参考实现：全部能力都可
+在本机跑起来、可复算、可验证，不依赖任何外部服务。
+
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+![.NET](https://img.shields.io/badge/.NET-8.0-512BD4)
+![Vue](https://img.shields.io/badge/Vue-3-42B883)
+![Platform](https://img.shields.io/badge/platform-Windows-0078D6)
+
+## 文档导航
+
+各能力模块都有独立文档，本 README 覆盖整体架构、接口清单与运行方式：
+
+| 文档 | 内容 |
+|------|------|
+| [`DESKTOP-README.md`](DESKTOP-README.md) | 桌面端使用与打包：Tauri v2 + Vue 3 + .NET sidecar，输出 Windows 安装包 |
+| [`EMAIL-VERIFY-README.md`](EMAIL-VERIFY-README.md) | 邮箱验证码：注册邮箱绑定、忘记密码重置 |
+| [`ROLE-SEPARATION-DESIGN.md`](ROLE-SEPARATION-DESIGN.md) | 角色分离（职责分离）：管理用户与读取审计互斥 |
+| [`AUDIT-UPGRADE-DESIGN.md`](AUDIT-UPGRADE-DESIGN.md) | 审计追责设计：让所有安全事件可追溯 |
+| [`AUDIT-VERIFY-REPORT.md`](AUDIT-VERIFY-REPORT.md) | 审计哈希链的独立复算与验证报告 |
+| [`TRANSPORT-STORAGE-SECURITY-DESIGN.md`](TRANSPORT-STORAGE-SECURITY-DESIGN.md) | 传输与存储安全设计：TLS、票据哈希化、口令 pepper |
 
 ## 一、技术栈
 
-- 后端：ASP.NET Core Web API（.NET 8），Visual Studio 2022
-- 数据库：MongoDB（建议使用 MongoDB Compass 可视化观察）
-- 前端：Vue 3（Composition API + Pinia + Vite），Tauri 封装的桌面软件风格 UI
+- 后端：ASP.NET Core Web API（.NET 8）—— 可用 Visual Studio 2022 或 .NET CLI 开发
+- 数据库：MongoDB（推荐搭配 MongoDB Compass 直接观察数据）
+- 前端：Vue 3（Composition API + Pinia + Vite），Tauri 封装的桌面软件形态 UI
 - 密码哈希：BCrypt
 
-> 前端由最初的「原生 HTML + CSS + JavaScript」重构为 Vue 3 单文件组件应用，
+> 前端最初是原生 HTML + CSS + JavaScript 实现，后重构为 Vue 3 单文件组件应用，
 > 呈现为**桌面软件形态**（标题栏 / 侧边栏 / 状态栏 / 可拖拽对话框 / 任务栏）。
-> 后端接口与业务逻辑未做任何改动，旧版前端已备份在 `AuthClient/legacy-wwwroot/`。
+> 后端接口与业务逻辑保持不变，旧版前端保留在 `AuthClient/legacy-wwwroot/` 以便对照。
 
 ## 二、项目结构
 
 ```
-实验一 建立可运行的口令认证基线/
-├── AuthBaseline.sln              # Visual Studio 2022 解决方案
-├── AuthServer/                   # 后端（本轮重构未改动）
+AuthBaseline/
+├── AuthBaseline.sln              # 解决方案文件（Visual Studio 2022 / dotnet CLI）
+├── AuthServer/                   # 后端（ASP.NET Core）
 │   ├── AuthServer.csproj
 │   ├── Program.cs                # 服务注册、中间件、CORS、静态文件
 │   ├── appsettings.json          # MongoDB 连接字符串
@@ -62,12 +78,14 @@
 
 1. 安装并启动 MongoDB（默认端口 `27017`）。
 2. 可选：安装 MongoDB Compass，连接 `mongodb://localhost:27017`，数据库名为 `AuthBaselineDb`。
-3. 使用 Visual Studio 2022 打开 `AuthBaseline.sln`。
+3. 安装 .NET 8 SDK，然后任选一种方式打开工程：
+   - Visual Studio 2022 打开 `AuthBaseline.sln`；
+   - 或使用 .NET CLI（`dotnet build` / `dotnet run`）。
 4. 首次打开后，NuGet 包会自动还原（MongoDB.Driver、BCrypt.Net-Next）。
 
 ## 四、运行步骤
 
-1. 在 Visual Studio 2022 中，将 `AuthServer` 设为启动项目。
+1. 在 Visual Studio 2022 中，将 `AuthServer` 设为启动项目（或执行 `dotnet run --project AuthServer`）。
 2. 按 `F5` 或 `Ctrl+F5` 运行。
 3. 浏览器打开 `http://localhost:5007/`。
 
@@ -78,8 +96,8 @@
 >
 > ⚠️ VS 默认使用的 `http` 启动配置走**明文对照模式**（自动设 `AUTHBASELINE_REQUIRE_HTTPS=false`），
 > 目的是让调试与既有脚本不受影响；要看加密形态请选 `https` 启动配置，或直接运行桌面端。
-> **桌面端首次启动会弹一次 Windows 证书信任确认框，选「是」**（写 `CurrentUser\Root`，
-> 不用管理员权限；产品路径是安装期写 `LocalMachine\Root`）。
+> **桌面端首次启动可能弹出一次 Windows 证书信任确认框，选「是」**（写 `CurrentUser\Root`，
+> 不用管理员权限；产品化路径是安装期写 `LocalMachine\Root`）。
 
 ### 前端开发（可选）
 
@@ -114,7 +132,8 @@ npm run build     # 只出浏览器产物 → ../AuthServer/wwwroot
 - 用户名：`admin`
 - 密码：`Admin123`
 
-> 建议首次登录后立即修改管理员密码。
+> ⚠️ 这是**公开的默认种子口令**，仅用于首次进入系统。请在任何非本机环境部署前修改，
+> 或通过 `set-role` / `create-account` 接口建立自己的管理员账号后停用默认账号。
 
 ## 六、功能说明
 
@@ -134,6 +153,8 @@ npm run build     # 只出浏览器产物 → ../AuthServer/wwwroot
 
 - 用户密码通过 BCrypt 哈希后存入 MongoDB。
 - 数据库中只保存 `passwordHash`，不保存明文。
+- 当前实现为 pepper + BCrypt + 内嵌盐（`v2$` 前缀），旧格式哈希在登录时自动升级。
+  详见 [TRANSPORT-STORAGE-SECURITY-DESIGN.md](TRANSPORT-STORAGE-SECURITY-DESIGN.md)。
 
 ### 4. 登录失败锁定
 
@@ -141,11 +162,13 @@ npm run build     # 只出浏览器产物 → ../AuthServer/wwwroot
 - 锁定持续 **3 分钟**。
 - **锁定期间即使输入正确密码，也拒绝登录**。
 - 3 分钟后系统自动解锁；或管理员可手动解锁。
+- 锁定期内同时记录墙钟与单调时钟，偏离超过容差以单调时钟为准，并写入 `CLOCK_ANOMALY`
+  审计事件 —— 防止通过回拨系统时间绕过锁定。
 
 ### 5. 修改密码
 
 - 登录后可在用户面板修改密码。
-- 修改成功后，旧密码立即失效。
+- 修改成功后，旧密码立即失效，旧会话票据同时吊销。
 
 ### 6. 注销用户
 
@@ -165,6 +188,9 @@ npm run build     # 只出浏览器产物 → ../AuthServer/wwwroot
 - `response`：响应内容
 - `timestamp`：UTC 时间
 
+日志按 `AuditLogs_yyyyMM` 分片存储，每条带 `selfHash` / `prevHash` / `seq` 构成哈希链，
+分片头部锚点记录在 `AuditChainHeads`，可通过 `GET /api/audit/verify` 校验完整性。
+
 ### 8. 桌面端界面（Vue 3）
 
 前端以**桌面软件**的形态呈现，而不是普通网页：
@@ -173,7 +199,7 @@ npm run build     # 只出浏览器产物 → ../AuthServer/wwwroot
 |------|------|
 | 标题栏 | 应用标识、主题切换（浅色/深色）、最小化 / 最大化 / 关闭 |
 | 侧边栏 | 功能导航（仪表盘、账号与口令、用户管理、审计日志），待审核数量角标 |
-| 状态栏 | 后端连通状态、上次同步时间、锁定倒计时、当前用户、系统时钟 |
+| 状态栏 | 后端连通状态、传输加密指示、上次同步时间、锁定倒计时、当前用户、系统时钟 |
 | 任务栏 | 最小化后可从任务栏恢复；关闭后桌面上保留图标，双击重新打开 |
 | 子窗口 | 注销确认、日志详情为可拖拽对话框，`Esc` 关闭 |
 | 通知 | 右上角应用内 Toast，按成功/错误/警告/信息分色 |
@@ -181,9 +207,9 @@ npm run build     # 只出浏览器产物 → ../AuthServer/wwwroot
 无障碍与规范：全矢量内联图标（无 emoji 充当图标）、表单均有标签与行内错误提示、
 焦点可见、`prefers-reduced-motion` 下自动关闭动效、深浅双主题均满足文本 4.5:1 对比度。
 
-## 七、验收测试用例
+## 七、测试用例
 
-> 以下用例已在本机用 curl 实测验证，全部符合预期（实测记录见第十一章第 5 节）。
+> 以下用例均已在开发机上实测验证，全部符合预期（实测记录见第十一章第 5 节）。
 
 ### 正常测试
 
@@ -215,12 +241,16 @@ npm run build     # 只出浏览器产物 → ../AuthServer/wwwroot
 | 3 | 3 分钟后再次用正确密码登录 | 登录成功（自动解锁） |
 | 4 | 或管理员手动点击“解锁” | 立即解锁，可用正确密码登录 |
 
+> 更多自动化验证脚本见 `tools/`：角色分离（`role_separation_test.py`）、
+> 时间回拨（`lockout_clock_probe.py`）、票据哈希化（`ticket_hash_probe.py`）、
+> 口令 pepper（`pepper_probe.py`）、审计链独立复算（`verify_chain_independent.py`）。
+
 ## 八、数据库状态观察
 
 打开 MongoDB Compass，查看 `AuthBaselineDb` 数据库：
 
 - `Users` 集合：观察 `status`、`failedLoginAttempts`、`lockoutEnd` 字段变化。
-- `AuditLogs` 集合：观察每次操作的状态流转证据。
+- `AuditLogs` / `AuditLogs_yyyyMM` 集合：观察每次操作的状态流转证据。
 
 典型的状态流转链：
 
@@ -274,6 +304,21 @@ npm run build     # 只出浏览器产物 → ../AuthServer/wwwroot
 | GET | `/api/audit/shards` | 审计读 | 分片清单与各片规模 |
 | GET | `/api/audit/stats` | 审计读 | 概览统计：总数、失败数、篡改告警数 |
 
+### 4. 角色与权限模型
+
+角色为**互斥枚举**，避免出现非法权限组合：
+
+| 角色 | 管理用户 | 分配角色 | 读取审计 |
+|------|:---:|:---:|:---:|
+| `User` | — | — | — |
+| `UserAdmin` | 仅普通用户 | — | — |
+| `Admin` | ✓ | ✓（含 AuditAdmin） | — |
+| `AuditAdmin` | — | — | ✓ |
+
+**职责分离**：`Admin` 能管理用户与分配角色，但**不能读取审计日志**；`AuditAdmin`
+能读取审计日志，但**不能管理用户**。两者权限互斥，任何单一角色都无法同时篡改数据与
+掩盖痕迹。
+
 ## 十、鲁棒性设计
 
 - 用户名统一转小写并去除首尾空格，避免大小写重复。
@@ -283,6 +328,7 @@ npm run build     # 只出浏览器产物 → ../AuthServer/wwwroot
 - 密码哈希使用 BCrypt（自适应成本，抗彩虹表）。
 - 响应使用统一格式 `{ success, code, message, data }`，前端易于处理。
 - 审计日志写入做了异常兜底：日志记录失败不会阻断注册/登录等主流程。
+- 数据库中的会话票据只保存哈希（无盐 SHA-256 + Base64Url），明文票据仅在签发时返回一次。
 
 ## 十一、常见问题排查
 
@@ -326,7 +372,7 @@ npm run build     # 只出浏览器产物 → ../AuthServer/wwwroot
 若 `5007` 被占用，修改 `AuthServer/Properties/launchSettings.json` 中的
 `applicationUrl` 即可。
 
-### 5. 实测记录（本次验收）
+### 5. 实测记录
 
 以下流程已用 curl 实测全部通过：
 
@@ -341,3 +387,27 @@ npm run build     # 只出浏览器产物 → ../AuthServer/wwwroot
 | 管理员解锁 | 200，`Locked → Enabled`，失败次数清零 |
 | 修改密码 | 200，旧密码立即失效 |
 | 审计日志落库 | 含 `statusBefore/After`、`operatorId`、时间戳 |
+
+## 十二、贡献指南
+
+欢迎 issue 与 pull request。
+
+**报告问题**：请附上复现步骤、期望行为与实际行为，以及环境信息（.NET 版本、MongoDB
+版本、是否桌面端）。与审计链、口令存储或传输层相关的现象，请一并给出对应的审计
+`reasonCode` 或错误码。
+
+**提交代码**：
+
+1. Fork 本仓库并从 `main` 切出特性分支（如 `feat/session-rotation`）。
+2. 一个提交聚焦一件事，提交信息使用 Conventional Commits 前缀
+   （`feat` / `fix` / `docs` / `test` / `chore`），并在正文说明动机与影响面。
+3. 改动涉及前端时，请用 `python tools/build_all.py frontend` 构建并确认两条产物链路
+   逐字节一致；涉及接口或权限模型时，请跑一遍 `tools/` 下对应的验证脚本。
+4. 发起 PR，描述变更内容、验证方式与已知限制。
+
+**安全漏洞**：请勿通过公开 issue 披露。审计链、口令存储、传输层与权限模型均属于
+安全敏感面，请私下联系维护者并给出一段可复现的说明。
+
+## 十三、许可证
+
+本项目基于 [MIT License](LICENSE) 发布，版权所有 (c) 2026 Ruiyan Diao。
