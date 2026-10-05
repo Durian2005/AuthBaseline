@@ -2,7 +2,8 @@
 import { computed, ref, useId } from 'vue'
 import AppIcon from './AppIcon.vue'
 
-const props = defineProps({
+// 只声明 props：模板里按名字直接引用，脚本内不需要 props 对象
+defineProps({
   modelValue: { type: String, default: '' },
   label: { type: String, default: '' },
   placeholder: { type: String, default: '' },

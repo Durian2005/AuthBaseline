@@ -12,11 +12,9 @@ import AccountView from './views/AccountView.vue'
 import UsersView from './views/UsersView.vue'
 import AuditView from './views/AuditView.vue'
 import { useSessionStore } from './stores/session'
-import { useToastStore } from './stores/toast'
 import { probe } from './api/client'
 
 const session = useSessionStore()
-const toast = useToastStore()
 
 /* ---------------- 主题 ---------------- */
 const THEME_KEY = 'auth.theme'
