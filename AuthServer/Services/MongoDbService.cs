@@ -35,6 +35,10 @@ public class MongoDbService
 
         // 预置管理员账号（如果不存在），使用同步方法避免构造函数中 .Wait() 死锁
         SeedAdmin();
+
+        // 沉睡账号治理的数据准备：从审计里回填 lastLoginAt。
+        // 放在最后：它需要 Users 与 AuditLogs_* 都可用。
+        BackfillLastLoginAt();
     }
 
     private void EnsureIndexes()
@@ -234,6 +238,80 @@ public class MongoDbService
             // 回填失败不应阻断启动，但必须显式暴露 —— 否则会出现
             // "老管理员登录后没了管理权限"这种难以定位的现象。
             Console.WriteLine($"[Mongo] 角色回填失败（可能导致老管理员权限丢失）: {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// 沉睡账号治理的一次性数据回填：给缺少 <c>lastLoginAt</c> 的账号，
+    /// 从审计日志里找出它**最后一次成功登录**的时间补上。
+    ///
+    /// 为什么要回填而不是"从现在开始攒"：登录审计（<c>LOGIN_SUCCESS</c>）早已在记录，
+    /// 存量数据完全够用。若不回填，所有老账号的基准时间都退化成创建时间，
+    /// 于是"注册很久但天天在用"的账号会被误判成沉睡 —— 这正是治理功能
+    /// 最不该犯的错。回填之后，基准时间才是真实可信的。
+    ///
+    /// 两条硬性边界：
+    ///   ① **只读**审计分片。回填是"从审计里算出一个值"，不是"改审计"——
+    ///      任何对 AuditLogs_* 的写入都会破坏哈希链。
+    ///   ② **只写** Users 的新字段，用 Unset 时保留其余字段不动。
+    ///
+    /// 幂等：只处理 <c>lastLoginAt</c> 缺失的账号，回填后字段存在，下次启动命中 0 条。
+    /// </summary>
+    private void BackfillLastLoginAt()
+    {
+        try
+        {
+            var missing = _users.Find(Builders<User>.Filter
+                .Exists("lastLoginAt", false)).ToList();
+            if (missing.Count == 0) return;
+
+            // 一次取回全部审计分片名（含改造前的 AuditLogs 主集合）。
+            var shardNames = new List<string>();
+            using (var cursor = _database.ListCollectionNames())
+            {
+                foreach (var n in cursor.ToList())
+                {
+                    if (n.StartsWith("AuditLogs", StringComparison.Ordinal)) shardNames.Add(n);
+                }
+            }
+            if (shardNames.Count == 0) return;
+
+            var filled = 0;
+            foreach (var user in missing)
+            {
+                // 在每个分片里各查一把"该用户最近一次成功登录"，再跨分片取最大。
+                // 排序放服务端（Sort + Limit 1），避免把某人的全部登录记录拉回内存。
+                DateTime? latest = null;
+                foreach (var shard in shardNames)
+                {
+                    var col = _database.GetCollection<AuditLog>(shard);
+                    var filter = Builders<AuditLog>.Filter.And(
+                        Builders<AuditLog>.Filter.Eq(a => a.OperatorName, user.Username),
+                        Builders<AuditLog>.Filter.Eq(a => a.Action, AuditAction.LoginSuccess));
+                    var hit = col.Find(filter)
+                        .Sort(Builders<AuditLog>.Sort.Descending(a => a.Timestamp))
+                        .Limit(1)
+                        .FirstOrDefault();
+                    if (hit != null && (latest is null || hit.Timestamp > latest.Value))
+                        latest = hit.Timestamp;
+                }
+
+                if (latest is null) continue; // 从未登录过：保持 null，判定时回退 createdAt
+
+                // 只写这一个字段，绝不 ReplaceOne（那会带上反序列化出的整套字段，风险更大）。
+                _users.UpdateOne(Builders<User>.Filter.Eq(u => u.Id, user.Id),
+                    Builders<User>.Update.Set(u => u.LastLoginAt, latest.Value));
+                filled++;
+            }
+
+            if (filled > 0)
+                Console.WriteLine($"[Mongo] 沉睡治理回填：{filled} 个账号的 lastLoginAt 已从审计补齐");
+        }
+        catch (Exception ex)
+        {
+            // 回填失败不应阻断启动：功能退化为"基准时间取 createdAt"，
+            // 判定会偏保守（可能多报几个沉睡），不会导致任何不可逆后果。
+            Console.WriteLine($"[Mongo] lastLoginAt 回填失败（判定将回退到 createdAt）: {ex.Message}");
         }
     }
 

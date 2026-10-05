@@ -237,6 +237,22 @@ export const api = {
 
   unlock: (username) => request('/auth/unlock', { method: 'POST', body: { username } }),
 
+  /**
+   * 冻结账号（沉睡账号治理）。
+   *
+   * 与 deleteUser 的区别是**可逆性**：冻结只是置为不可登录，
+   * 用 unlock 即可恢复；注销则是永久删除。这两个动作在界面上
+   * 必须用不同的措辞与颜色，避免"想冻结却点成注销"。
+   */
+  freezeUser: (username, reason = '') =>
+    request('/auth/freeze-user', { method: 'POST', body: { username, reason } }),
+
+  /**
+   * 沉睡账号清单（只读）。
+   * 返回 { thresholdDays, items, protectedItems, frozenItems }。
+   */
+  getDormantUsers: (signal) => request('/auth/dormant-users', { signal }),
+
   deleteUser: (username) => request('/auth/delete-user', { method: 'POST', body: { username } }),
 
   /**

@@ -132,6 +132,37 @@ public class User
     [BsonElement("createdAt")]
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
 
+    /* ==================== 沉睡（僵尸）账号治理 ==================== */
+
+    /// <summary>
+    /// 最后一次**成功登录**的时刻（UTC）。
+    ///
+    /// 为什么必须单独存字段，而不是每次去审计里现查：
+    /// 审计是分片的（<c>AuditLogs_yyyyMM</c>），要回答"这人多久没来了"
+    /// 就得把全部分片扫一遍，代价随日志量线性增长；而判定沉睡账号
+    /// 恰恰是"绝大多数人都在沉睡"的访问模式，会把最坏情况变成常态。
+    /// 存成一个字段后，判定退化成一次单集合扫描。
+    ///
+    /// 兼容性：老数据没有该字段（为 null）。此时判定回退到 <see cref="CreatedAt"/>，
+    /// 并在启动时由 MongoDbService 从审计里一次性回填 —— 所以 null 只是一个
+    /// 短暂的过渡态，不是长期语义。
+    /// </summary>
+    [BsonElement("lastLoginAt")]
+    [BsonIgnoreIfNull]
+    public DateTime? LastLoginAt { get; set; }
+
+    /// <summary>
+    /// 被管理员**冻结**的时刻（UTC）。为 null 表示当前未被冻结。
+    ///
+    /// 与 <see cref="Status"/> = Disabled 是一对：Status 表达"现在能不能登录"
+    /// （鉴权只看它），本字段回答"什么时候冻结的、冻结了多久"。
+    /// 之所以要两个而不是只留一个，是因为 Status 会被其它路径改写
+    /// （如管理员解锁），届时冻结时间就不该再残留。
+    /// </summary>
+    [BsonElement("dormantFrozenAt")]
+    [BsonIgnoreIfNull]
+    public DateTime? DormantFrozenAt { get; set; }
+
     /// <summary>
     /// 改造前的管理员布尔位。**已废弃，代码不再读写**，仅保留在库中以备追溯历史。
     /// 角色判定统一走 Role。
@@ -162,6 +193,35 @@ public class UserResponse
     public int FailedLoginAttempts { get; set; }
     public DateTime? LockoutEnd { get; set; }
     public DateTime CreatedAt { get; set; }
+
+    /// <summary>
+    /// 最后一次成功登录时刻（UTC）。从未登录（老数据且未回填）时为 null。
+    /// 由沉睡账号治理引入，**仅追加，不改动既有字段的语义**。
+    /// </summary>
+    public DateTime? LastLoginAt { get; set; }
+
+    /// <summary>
+    /// 距基准时间（<see cref="LastLoginAt"/>，缺失时取 <see cref="CreatedAt"/>）的天数。
+    /// 由后端算好下发，避免前端各自实现一套"差多少天"的算法而产生口径分歧。
+    /// </summary>
+    public int DormantDays { get; set; }
+
+    /// <summary>
+    /// 是否达到沉睡阈值（默认 90 天）。**这只是"判定"，不改任何状态** ——
+    /// 沉睡不等于不能登录；真正不能登录的是 <see cref="Frozen"/>。
+    /// </summary>
+    public bool Dormant { get; set; }
+
+    /// <summary>
+    /// 是否已被冻结（<c>Status == Disabled</c>）。冻结后登录被拒，但可由管理员解除。
+    /// </summary>
+    public bool Frozen { get; set; }
+
+    /// <summary>
+    /// 该角色是否受保护、不参与冻结处置（Admin / UserAdmin / AuditAdmin）。
+    /// 前端据此把管理账号单独分区，不显示冻结按钮。
+    /// </summary>
+    public bool DormantProtected { get; set; }
 
     /// <summary>
     /// 是否具备用户管理能力（Admin / UserAdmin）。
@@ -226,6 +286,18 @@ public static class UserRoles
     /// 管理员（含初始 admin）在这里被结构性排除。
     /// </summary>
     public static bool CanReadAudit(UserRole role) => role == UserRole.AuditAdmin;
+
+    /// <summary>
+    /// 该角色是否**受保护、不参与沉睡账号冻结**。
+    ///
+    /// 为什么管理类角色要结构性排除：管理账号可能长期不登录（`admin` 尤其如此），
+    /// 但它们不是"僵尸" —— 冻结一个管理员等于拿走系统的一项能力，
+    /// 而沉睡账号治理的本意只是清理"没人在用的普通账号"。
+    /// 把这条规则放在角色判定出口而不是各处 if，是为了让"冻结范围"
+    /// 永远不可能因为某个接口漏改而悄悄扩大。
+    /// </summary>
+    public static bool IsDormantProtected(UserRole role) =>
+        role is UserRole.Admin or UserRole.UserAdmin or UserRole.AuditAdmin;
 
     /// <summary>两个 User 是否指向同一个账号（用户名是系统内的唯一键，Id 作为补充）。</summary>
     public static bool IsSameAccount(User a, User b)

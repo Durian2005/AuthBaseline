@@ -68,6 +68,26 @@ public class DeleteUserRequest
 }
 
 /// <summary>
+/// 沉睡（僵尸）账号治理：冻结未被使用的账号。
+///
+/// 语义与 <see cref="DeleteUserRequest"/> 有本质区别 ——
+/// 注销是**不可逆**的，冻结只是"暂时不让登录"，随时可解冻。
+/// 两者分成两个接口，是为了让"点了注销"这个动作在代码层面
+/// 就不可能被误当成"治理沉睡账号"来执行。
+/// </summary>
+public class FreezeUserRequest
+{
+    public string Username { get; set; } = string.Empty;
+    public string AdminUsername { get; set; } = string.Empty;
+
+    /// <summary>
+    /// 冻结原因（可空）。治理动作应当能回答"为什么把他关了"，
+    /// 留一个自由填写的位置比只记一个布尔值更有用。
+    /// </summary>
+    public string Reason { get; set; } = string.Empty;
+}
+
+/// <summary>
 /// 管理员创建账号（用户管理员 / 审计管理员）。
 ///
 /// 与自助注册的区别：**不绑邮箱、不需要验证码、建号即启用**。

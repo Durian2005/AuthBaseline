@@ -150,6 +150,21 @@ button {
   border-color: var(--c-danger-hover);
 }
 
+/* 警示态按钮：用于"冻结"这类**可逆但影响登录**的操作。
+   刻意不用 danger（红）—— 红色在本项目里专指"不可逆的注销"，
+   两种可逆性完全不同的操作若同色，用户很难在下意识点击前分辨。 */
+.btn--warn {
+  background: var(--c-warn);
+  border-color: var(--c-warn);
+  color: #fff;
+}
+[data-theme='dark'] .btn--warn {
+  color: #241703;
+}
+.btn--warn:hover:not(:disabled) {
+  filter: brightness(1.08);
+}
+
 .btn--ghost {
   background: transparent;
   border-color: transparent;

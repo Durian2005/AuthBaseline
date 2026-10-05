@@ -188,6 +188,17 @@ public static class AuditAction
     /// 没有它的话，"还有多少账号没升级"只能靠直连数据库统计，审计员无从下手。
     /// </summary>
     public const string PasswordHashUpgraded = "PASSWORD_HASH_UPGRADED";
+
+    // ---- 沉睡（僵尸）账号治理 ----
+    // 为什么冻结沿用 Unlock 的反向动作而不复用 SetRole / DeleteUser：
+    // 治理动作必须在审计里与"日常管理"分得开 —— 审计员要能一条查询
+    // 捞出"全部因沉睡治理而冻结/解冻的账号"，否则这类批量处置会淹没在普通操作里。
+
+    /// <summary>因沉睡治理冻结账号（置 Disabled，登录被拒，可解冻）。</summary>
+    public const string DormantFreeze = "DORMANT_FREEZE";
+
+    /// <summary>解除冻结（Disabled → Enabled），账号恢复可登录。</summary>
+    public const string DormantRestore = "DORMANT_RESTORE";
 }
 
 /// <summary>
@@ -252,6 +263,19 @@ public static class AuditReason
     public const string NotFound = "NOT_FOUND";
     public const string NotPending = "NOT_PENDING";
     public const string NotLocked = "NOT_LOCKED";
+
+    /// <summary>目标未被冻结，因此"解除冻结"无从下手（与 NotLocked 同理，但针对治理冻结）。</summary>
+    public const string NotFrozen = "NOT_FROZEN";
+
+    /// <summary>
+    /// 目标角色受保护，不参与沉睡冻结（Admin / UserAdmin / AuditAdmin）。
+    ///
+    /// 独立成码而不是共用 ForbiddenTarget：两者含义不同 ——
+    /// ForbiddenTarget 是"你没有资格处置他"（关系问题，换个人就能办），
+    /// 本码是"**谁都不能**冻结这个角色"（结构性问题，换谁都不行）。
+    /// 混在一起会让审计员误以为换个管理员就能冻结管理账号。
+    /// </summary>
+    public const string DormantProtectedRole = "DORMANT_PROTECTED_ROLE";
     public const string CodeInvalid = "CODE_INVALID";
 
     /// <summary>验证码与所填邮箱不是同一封信。</summary>
