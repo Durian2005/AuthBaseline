@@ -6,6 +6,15 @@
     <ImplicitUsings>enable</ImplicitUsings>
   </PropertyGroup>
 
+  <!-- 发布产物落在项目目录内的 publish/（npm run publish:backend 的 -o 参数），
+       而 Sdk.Web 默认把项目目录下 **/* 收作 Content，会把上一次的 publish/ 再复制
+       进这一次的产物里，层层嵌套出 publish/publish/publish。
+       这里显式排除，让发布目录只反映当前源码。 -->
+  <ItemGroup>
+    <Content Remove="publish\**" />
+    <None Remove="publish\**" />
+  </ItemGroup>
+
   <ItemGroup>
     <PackageReference Include="BCrypt.Net-Next" Version="4.0.3" />
     <PackageReference Include="MailKit" Version="4.17.0" />
