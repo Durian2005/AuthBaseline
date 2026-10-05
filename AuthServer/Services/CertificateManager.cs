@@ -82,7 +82,7 @@ public sealed class CertificateUnavailableException : Exception
 /// 用户只信任一次 CA（5 年），leaf 到期时用 CA 无感重签（1 年），不需要再次弹框。
 /// 顺带还能讲清一条证书链，这在验收时是加分项。
 ///
-/// ── 方案来源与两处修正（阶段 0 实测，见 TRANSPORT-STORAGE-SECURITY-DESIGN.md §6.1）
+/// ── 方案来源与两处修正（阶段 0 实测，见 docs/design/TRANSPORT-STORAGE-SECURITY-DESIGN.md §6.1）
 ///   1) **leaf 私钥必须持久化**。用 RSA.Create() 得到的临时密钥做**服务端**认证时，
 ///      Schannel 直接抛 `The platform does not support ephemeral keys`，而客户端只看到
 ///      `IOException: Received an unexpected EOF` —— 症状指向客户端、根因在服务端，极易误判成"方案不行"。

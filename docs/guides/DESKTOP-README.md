@@ -134,7 +134,7 @@ CA 公钥写入 `CurrentUser\Root`（**刻意不放在安装目录**，否则会
 界面左下角状态栏会显示「加密」徽记，悬停可见证书主题、到期日与信任存储 ——
 这枚徽记的判据是后端返回的**实际链路**是否加密（`Request.IsHttps`），不是"地址是不是 https 开头"。
 开发态 `dotnet run` 默认走明文对照模式（状态栏显示红色「明文」），两者互不污染。
-详见 [TRANSPORT-STORAGE-SECURITY-DESIGN.md](TRANSPORT-STORAGE-SECURITY-DESIGN.md) §6.2 / §6.3。
+详见 [TRANSPORT-STORAGE-SECURITY-DESIGN.md](../design/TRANSPORT-STORAGE-SECURITY-DESIGN.md) §6.2 / §6.3。
 
 **Q：sidecar 为什么用动态端口？**
 A：`src-tauri/src/lib.rs` 在启动时 `bind("127.0.0.1:0")` 申请一个空闲端口，
@@ -236,5 +236,5 @@ A：后端进程会启动，但接口调用会失败（连接数据库超时）�
 - 开发态 `dotnet run` 默认仍是明文，23 个既有脚本零改动。
 
 验证：`python tools/ui_tls_check.py`（起真实桌面端 → CDP 断言 10 项 → 同实例跑接口回归）。
-详见 [TRANSPORT-STORAGE-SECURITY-DESIGN.md](TRANSPORT-STORAGE-SECURITY-DESIGN.md) §6.3。
+详见 [TRANSPORT-STORAGE-SECURITY-DESIGN.md](../design/TRANSPORT-STORAGE-SECURITY-DESIGN.md) §6.3。
 

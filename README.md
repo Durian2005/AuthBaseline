@@ -21,12 +21,14 @@ AuthBaseline 是一套完整的口令认证参考实现，覆盖认证系统的�
 
 | 文档 | 内容 |
 |------|------|
-| [`DESKTOP-README.md`](DESKTOP-README.md) | 桌面端使用与打包：Tauri v2 + Vue 3 + .NET sidecar，输出 Windows 安装包 |
-| [`EMAIL-VERIFY-README.md`](EMAIL-VERIFY-README.md) | 邮箱验证码：注册邮箱绑定、忘记密码重置 |
-| [`ROLE-SEPARATION-DESIGN.md`](ROLE-SEPARATION-DESIGN.md) | 角色分离（职责分离）：管理用户与读取审计互斥 |
-| [`AUDIT-UPGRADE-DESIGN.md`](AUDIT-UPGRADE-DESIGN.md) | 审计追责设计：让所有安全事件可追溯 |
-| [`AUDIT-VERIFY-REPORT.md`](AUDIT-VERIFY-REPORT.md) | 审计哈希链的独立复算与验证报告 |
-| [`TRANSPORT-STORAGE-SECURITY-DESIGN.md`](TRANSPORT-STORAGE-SECURITY-DESIGN.md) | 传输与存储安全设计：TLS、票据哈希化、口令 pepper |
+| [`docs/guides/DESKTOP-README.md`](docs/guides/DESKTOP-README.md) | 桌面端使用与打包：Tauri v2 + Vue 3 + .NET sidecar，输出 Windows 安装包 |
+| [`docs/guides/EMAIL-VERIFY-README.md`](docs/guides/EMAIL-VERIFY-README.md) | 邮箱验证码：注册邮箱绑定、忘记密码重置 |
+| [`docs/design/ROLE-SEPARATION-DESIGN.md`](docs/design/ROLE-SEPARATION-DESIGN.md) | 角色分离（职责分离）：管理用户与读取审计互斥 |
+| [`docs/design/AUDIT-UPGRADE-DESIGN.md`](docs/design/AUDIT-UPGRADE-DESIGN.md) | 审计追责设计：让所有安全事件可追溯 |
+| [`docs/design/TRANSPORT-STORAGE-SECURITY-DESIGN.md`](docs/design/TRANSPORT-STORAGE-SECURITY-DESIGN.md) | 传输与存储安全设计：TLS、票据哈希化、口令 pepper |
+| [`docs/design/ZOMBIE-ACCOUNT-GOVERNANCE-DESIGN.md`](docs/design/ZOMBIE-ACCOUNT-GOVERNANCE-DESIGN.md) | 沉睡账号治理：90 天自动冻结，可解冻、绝不删除 |
+| [`docs/reports/AUDIT-VERIFY-REPORT.md`](docs/reports/AUDIT-VERIFY-REPORT.md) | 审计哈希链的独立复算与验证报告 |
+| [`docs/reports/CODE-QUALITY-REPORT.md`](docs/reports/CODE-QUALITY-REPORT.md) | 代码质量审计报告与整理路线 |
 
 ## 一、技术栈
 
@@ -49,28 +51,52 @@ AuthBaseline/
 │   ├── Program.cs                # 服务注册、中间件、CORS、静态文件
 │   ├── appsettings.json          # MongoDB 连接字符串
 │   ├── Controllers/
-│   │   └── AuthController.cs     # 注册/审核/登录/改密/锁定/解锁/日志接口
+│   │   ├── AuthControllerBase.cs     # 共享基类：票据鉴权、权限守卫、锁定判定
+│   │   ├── AuthController.cs         # 登录 / 登出 / 传输层状态
+│   │   ├── AccountController.cs      # 注册 / 邮箱验证码 / 忘记密码 / 修改口令
+│   │   ├── UserAdminController.cs    # 审核 / 解锁 / 冻结 / 注销 / 建号 / 角色任免
+│   │   └── AuditController.cs        # 审计查询、分片、统计、哈希链校验
 │   ├── Models/
-│   │   ├── User.cs               # 用户实体
-│   │   ├── AuditLog.cs           # 审计日志实体
+│   │   ├── User.cs / Session.cs / EmailCode.cs
+│   │   ├── AuditLog.cs           # 审计实体 + 动作 / 结果 / 原因码收口
 │   │   ├── ApiResponse.cs        # 统一响应
-│   │   └── AuthDtos.cs           # 请求/响应 DTO
+│   │   ├── BusinessCodes.cs      # 业务码收口（返给用户的那一套，刻意与审计码分离）
+│   │   └── AuthDtos.cs           # 请求 / 响应 DTO
 │   ├── Services/
-│   │   └── MongoDbService.cs     # MongoDB 连接与管理员种子
+│   │   ├── MongoDbService.cs     # MongoDB 连接与管理员种子
+│   │   ├── AuditService.cs       # 审计写入、分片轮转、哈希链
+│   │   ├── AuditWriter.cs        # 审计写入的唯一出口（自动补齐来源 IP / UA）
+│   │   ├── SessionService.cs     # 会话票据签发 / 校验 / 吊销
+│   │   ├── PasswordHasher.cs     # 口令哈希唯一出口（pepper + BCrypt）
+│   │   ├── PepperProvider.cs     # 本机 pepper 的 DPAPI 存取（另有 PepperCli.cs）
+│   │   ├── TicketHasher.cs       # 票据哈希（无盐 SHA-256 + Base64Url）
+│   │   ├── TimeGuard.cs          # 时钟护栏：墙钟 + 单调时钟双线判定
+│   │   ├── CertificateManager.cs # 本机私有 CA 与 leaf 证书
+│   │   ├── DormantAccountService.cs  # 沉睡账号判定与冻结
+│   │   └── EmailSender.cs / VerificationService.cs / EmailOptions.cs
 │   └── wwwroot/                  # 前端构建产物（由 AuthClient 构建生成）
 ├── AuthClient/                   # 前端源码（Vue 3）
 │   ├── package.json
-│   ├── vite.config.js            # 开发代理 /api → 5007，构建输出 → ../AuthServer/wwwroot
+│   ├── vite.config.js            # 开发代理 /api → 5007；两种 mode 决定产物输出目录
 │   ├── smoke_test.py             # 端到端接口冒烟测试（26 项）
 │   ├── legacy-wwwroot/           # 旧版原生前端备份
 │   └── src/
 │       ├── main.js
 │       ├── App.vue               # 桌面外壳：窗口/最小化/最大化/关闭/壁纸/任务栏
-│       ├── styles/               # 设计令牌与基础样式
+│       ├── styles/               # 设计令牌、基础样式、表单共享样式
 │       ├── api/client.js         # API 封装与错误分类
-│       ├── stores/               # Pinia：会话状态 + 通知
-│       ├── components/           # 外壳与通用组件（图标、窗口、表格、徽章…）
+│       ├── composables/          # clock（全局心跳）/ poller（轮询工厂）/ useEmailCode
+│       ├── stores/               # Pinia
+│       │   ├── session.js        # 会话状态 + 各角色域的组装根
+│       │   ├── roles.js          # 角色常量与显示标签
+│       │   └── domains/          # auditDomain（审计域）/ adminDomain（用户管理域）
+│       ├── components/           # 外壳与通用组件；auth/ 与 users/ 放表单子组件
 │       └── views/                # 登录、仪表盘、账号口令、用户管理、审计日志
+├── docs/                         # 设计、报告与指南
+│   ├── design/                   # 四份 *-DESIGN.md（角色分离 / 审计 / 传输存储 / 沉睡账号）
+│   ├── reports/                  # 审计链验证报告、代码质量报告
+│   └── guides/                   # 桌面端打包、邮箱验证码使用指南
+├── tools/                        # 验证与运维脚本（分类索引见 tools/README.md）
 └── README.md
 ```
 
@@ -154,7 +180,7 @@ npm run build     # 只出浏览器产物 → ../AuthServer/wwwroot
 - 用户密码通过 BCrypt 哈希后存入 MongoDB。
 - 数据库中只保存 `passwordHash`，不保存明文。
 - 当前实现为 pepper + BCrypt + 内嵌盐（`v2$` 前缀），旧格式哈希在登录时自动升级。
-  详见 [TRANSPORT-STORAGE-SECURITY-DESIGN.md](TRANSPORT-STORAGE-SECURITY-DESIGN.md)。
+  详见 [docs/design/TRANSPORT-STORAGE-SECURITY-DESIGN.md](docs/design/TRANSPORT-STORAGE-SECURITY-DESIGN.md)。
 
 ### 4. 登录失败锁定
 
@@ -172,26 +198,47 @@ npm run build     # 只出浏览器产物 → ../AuthServer/wwwroot
 
 ### 6. 注销用户
 
-- 管理员可在用户列表点击“注销”删除普通用户账号，操作前会弹窗二次确认，防止误删。
-- **管理员账号不可被注销**（包含注销自己），避免系统失去管理员而无法恢复。
-- 注销会写入审计日志，`statusAfter` 记为 `Deleted`。
+- 管理员可在用户列表点击「注销」删除账号，操作前会弹窗二次确认，防止误删。
+- **处置范围随操作者身份而定**（判定集中在 `UserRoles.CanBeManagedBy`）：
+  - `Admin` —— 除自己以外任意账号都能注销，含审计管理员与其它管理员；
+  - `UserAdmin` —— 只能注销普通用户与用户管理员，够不到审计管理员与管理员。
+- **任何角色都不能注销自己**，避免系统里最后一个能任命角色的账号被删掉。
+- 注销会写入审计日志，`statusAfter` 记为 `Deleted`，且**不可逆**（数据库中不存在回收站集合）。
 
-### 7. 审计日志
+### 7. 沉睡账号治理
 
-每个关键操作都会在 MongoDB `AuditLogs` 集合中记录：
+- 判定基准是 `lastLoginAt`（缺失时回退 `createdAt`），超过阈值（默认 **90 天**）未登录即视为沉睡。
+- 处置方式是**冻结**（置 `Disabled`）而不是删除（**红线：绝不删除账号**），可由用户管理员
+  通过 `/api/auth/unlock` 解冻。
+- **管理账号默认排除自动判定**，防止权力真空；命中时审计记 `DORMANT_PROTECTED_ROLE`。
+- 判定时间源走 `TimeGuard.WallNow()`，可在演示时通过修改系统时间验证。
+- 详见 [docs/design/ZOMBIE-ACCOUNT-GOVERNANCE-DESIGN.md](docs/design/ZOMBIE-ACCOUNT-GOVERNANCE-DESIGN.md)。
+
+### 8. 审计日志
+
+每个关键操作都会在 MongoDB 审计集合中记录：
 
 - `operatorId` / `operatorName`：操作者
-- `action`：动作（REGISTER / LOGIN / APPROVE / UNLOCK / DELETE_USER / CHANGE_PASSWORD）
-- `statusBefore`：操作前状态
-- `statusAfter`：操作后状态
-- `request`：请求内容（已脱敏，不含密码）
-- `response`：响应内容
-- `timestamp`：UTC 时间
+- `action`：动作（`Login` / `Register` / `Approve` / `Unlock` / `DeleteUser` / `ChangePassword` /
+  `FreezeUser` / `SetRole` / `AuditVerify` / `AuditAccessDenied` …）
+- `result`：结果（`Success` / `Failed`）
+- `reasonCode`：失败原因码（如 `WrongOldPassword` / `InvalidCredentials` / `AccountLocked` /
+  `PasswordReused` / `ClockAnomaly`），用于检索弱口令与口令猜测等事件
+- `statusBefore` / `statusAfter`：操作前后的账号状态
+- `request` / `response`：请求与响应内容（已脱敏，不含口令）
+- `timestamp`：UTC 时间；`seq` / `selfHash` / `prevHash`：哈希链字段
 
-日志按 `AuditLogs_yyyyMM` 分片存储，每条带 `selfHash` / `prevHash` / `seq` 构成哈希链，
+> **成败按动作分开记录**（如 `LoginSuccess` 与 `LoginFailed`），失败项必带 `reasonCode`。
+> 审计写入属**旁路**：写不进去也绝不阻断登录、改密等主流程。
+>
+> ⚠️ 防篡改口径：这是**无密钥**的 SHA-256 链（非 HMAC），只保证「局部增删改会留下无法
+> 局部修补的断点」，可用 `tools/verify_chain_independent.py` 独立复算，
+> 不等价于「不可篡改」。
+
+日志按 `AuditLogs_yyyyMM` **分片**存储，每条带 `selfHash` / `prevHash` / `seq` 构成哈希链，
 分片头部锚点记录在 `AuditChainHeads`，可通过 `GET /api/audit/verify` 校验完整性。
 
-### 8. 桌面端界面（Vue 3）
+### 9. 桌面端界面（Vue 3）
 
 前端以**桌面软件**的形态呈现，而不是普通网页：
 
@@ -209,7 +256,7 @@ npm run build     # 只出浏览器产物 → ../AuthServer/wwwroot
 
 ## 七、测试用例
 
-> 以下用例均已在开发机上实测验证，全部符合预期（实测记录见第十一章第 5 节）。
+> 以下用例均已在开发机上实测验证，全部符合预期（实测记录见第十一章第 6 节）。
 
 ### 正常测试
 
@@ -241,60 +288,83 @@ npm run build     # 只出浏览器产物 → ../AuthServer/wwwroot
 | 3 | 3 分钟后再次用正确密码登录 | 登录成功（自动解锁） |
 | 4 | 或管理员手动点击“解锁” | 立即解锁，可用正确密码登录 |
 
+### 治理测试（沉睡账号）
+
+| 步骤 | 操作 | 预期结果 |
+|------|------|----------|
+| 1 | 把系统时间前拨 90 天以上，刷新用户列表 | 长期未登录账号出现在「沉睡候选」 |
+| 2 | 对候选账号点「冻结」 | 置为 `Disabled`，登录被拒（`ACCOUNT_DISABLED`），账号**未删除** |
+| 3 | 用户管理员点「解除冻结」 | 恢复 `Enabled`，可正常登录 |
+| 4 | 对比管理账号 | 不参与自动判定，审计记 `DORMANT_PROTECTED_ROLE` |
+
 > 更多自动化验证脚本见 `tools/`：角色分离（`role_separation_test.py`）、
 > 时间回拨（`lockout_clock_probe.py`）、票据哈希化（`ticket_hash_probe.py`）、
-> 口令 pepper（`pepper_probe.py`）、审计链独立复算（`verify_chain_independent.py`）。
+> 口令 pepper（`pepper_probe.py`）、沉睡账号（`dormant_account_probe.py`）、
+> 审计链独立复算（`verify_chain_independent.py`）。
+> 完整清单与分类索引见 [`tools/README.md`](tools/README.md)。
 
 ## 八、数据库状态观察
 
 打开 MongoDB Compass，查看 `AuthBaselineDb` 数据库：
 
-- `Users` 集合：观察 `status`、`failedLoginAttempts`、`lockoutEnd` 字段变化。
-- `AuditLogs` / `AuditLogs_yyyyMM` 集合：观察每次操作的状态流转证据。
+- `Users` 集合：观察 `status`、`failedLoginAttempts`、`lockoutEnd` 字段变化，
+  以及沉睡治理用到的 `lastLoginAt` / `dormantFrozenAt`。
+- `AuditLogs_yyyyMM` 集合：按月分片的审计日志，观察每次操作的状态流转证据。
+- `AuditChainHeads` 集合：哈希链的头部锚点。
+- `Sessions` 集合：会话票据（**只存哈希**，看不到明文票据）。
+- `EmailCodes` 集合：邮箱验证码（带有效期与使用标记）。
 
 典型的状态流转链：
 
 ```
 待审核（Pending） → 启用（Enabled） → 锁定（Locked） → 启用（Enabled）
+                                 ↘ 冻结（Disabled） → 启用（Enabled）
 ```
+
+> 本项目**没有** `DeletedUsers` 之类的回收站集合 —— 注销不可逆，这是刻意的设计而非遗漏。
 
 ## 九、接口清单
 
-> 下表为后端当前实际暴露的全部接口（共 **18** 个）。
+> 下表为后端当前实际暴露的全部接口（共 **20** 个）。
 > 鉴权自「角色分离」改造起改为**服务端签发的 Bearer 票据**（`Authorization: Bearer <ticket>`），
 > 不再使用早期的 `?adminUsername=xxx` 由客户端自证身份的方式。
 > 鉴权失败会写入一条 `AUDIT_ACCESS_DENIED` 事件，使越权尝试可追溯。
+>
+> 控制器按业务域拆分（`AuthController` / `AccountController` / `UserAdminController` /
+> `AuditController`，共享基类 `AuthControllerBase`），但**路由路径一字未变** ——
+> 拆分只动文件边界，不动对外契约。
 
-### 1. 认证与账号（`api/auth`）
+### 1. 认证与传输（`api/auth`）
+
+| 方法 | 路径 | 鉴权 | 说明 |
+|------|------|------|------|
+| POST | `/api/auth/login` | 匿名 | 用户登录，成功返回会话票据 |
+| POST | `/api/auth/logout` | 需票据 | 注销当前会话（吊销票据） |
+| GET | `/api/auth/transport` | 匿名 | 传输层状态：当前链路是否加密（TLS）、证书主题与到期日。**刻意不做鉴权** —— 状态栏在登录页就要显示，且内容属于公钥信息 |
+
+### 2. 账号与口令（`api/auth`）
 
 | 方法 | 路径 | 鉴权 | 说明 |
 |------|------|------|------|
 | POST | `/api/auth/register` | 匿名 | 用户注册（校验邮箱验证码，创建后状态为待审核） |
-| POST | `/api/auth/login` | 匿名 | 用户登录，成功返回会话票据 |
-| POST | `/api/auth/logout` | 需票据 | 注销当前会话（吊销票据） |
 | POST | `/api/auth/send-email-code` | 匿名 | 发送邮箱验证码（注册与重置口令共用）；对不存在的邮箱返回与真实发信**逐字一致**的响应，防账号枚举 |
 | POST | `/api/auth/reset-password` | 匿名（凭验证码） | 忘记密码：校验邮箱验证码后直接设置新口令 |
 | POST | `/api/auth/change-password` | 需票据 | 修改自己的口令；新旧口令不得相同 |
-| GET | `/api/auth/transport` | 匿名 | 传输层状态：当前链路是否加密（TLS）、证书主题与到期日。**刻意不做鉴权** —— 状态栏在登录页就要显示，且内容属于公钥信息 |
 
-> ⚠️ **传输层**：桌面端（Tauri 壳 + sidecar）走 **HTTPS（TLS 1.3）**，
-> 证书为本机私有 CA（`CN=AuthBaseline Local CA`）签发的 leaf，存于
-> `%LOCALAPPDATA%\AuthBaselineData\certs\`，CA 公钥写入 `CurrentUser\Root`；
-> 开发态 `dotnet run` 默认显式走明文对照模式。
-> 详见 [TRANSPORT-STORAGE-SECURITY-DESIGN.md](TRANSPORT-STORAGE-SECURITY-DESIGN.md) 的 §6.2 / §6.3 实施记录。
-
-### 2. 用户管理（`api/auth`）
+### 3. 用户管理（`api/auth`）
 
 | 方法 | 路径 | 鉴权 | 说明 |
 |------|------|------|------|
-| GET | `/api/auth/users` | 用户管理员 | 获取用户列表 |
+| GET | `/api/auth/users` | 用户管理员 | 获取用户列表（含沉睡候选与受保护标记） |
+| GET | `/api/auth/dormant-users` | 用户管理员 | 沉睡账号候选：超过阈值天数未登录、且角色不受保护的账号 |
 | POST | `/api/auth/approve` | 用户管理员 | 审核通过待审核用户 |
-| POST | `/api/auth/unlock` | 用户管理员 | 手动解锁被锁定的账号 |
+| POST | `/api/auth/unlock` | 用户管理员 | 手动解锁被锁定的账号，也用于**解除冻结**（`Disabled → Enabled`） |
+| POST | `/api/auth/freeze-user` | 用户管理员 | 冻结沉睡账号（置 `Disabled`），**可解冻、绝不删除** |
 | POST | `/api/auth/delete-user` | 用户管理员 | 注销普通用户（管理员账号不可被注销） |
 | POST | `/api/auth/create-account` | 管理员 | 管理员直接创建账号，需二次校验操作者口令 |
 | POST | `/api/auth/set-role` | 管理员 | 任免用户角色（含 AuditAdmin），需二次校验操作者口令 |
 
-### 3. 审计日志
+### 4. 审计日志
 
 | 方法 | 路径 | 鉴权 | 说明 |
 |------|------|------|------|
@@ -303,6 +373,9 @@ npm run build     # 只出浏览器产物 → ../AuthServer/wwwroot
 | GET | `/api/audit/verify` | 审计读 | 哈希链完整性校验，返回断点序号与所在分片 |
 | GET | `/api/audit/shards` | 审计读 | 分片清单与各片规模 |
 | GET | `/api/audit/stats` | 审计读 | 概览统计：总数、失败数、篡改告警数 |
+
+> ⚠️ **审计域没有任何写接口**。控制器只暴露上述 5 个 GET，后端不存在删除或修改审计
+> 日志的路径；界面上的「重置筛选」只是清空查询条件，与日志本体无关。
 
 ### 4. 角色与权限模型
 
@@ -322,13 +395,19 @@ npm run build     # 只出浏览器产物 → ../AuthServer/wwwroot
 ## 十、鲁棒性设计
 
 - 用户名统一转小写并去除首尾空格，避免大小写重复。
-- 注册、登录、改密接口对密码字段做了复杂度校验。
+- 口令复杂度**由服务端裁决**并留痕：前端不做提交门禁，否则「反复提交弱口令」这类
+  安全事件在后端完全看不见。
 - 所有写操作均记录审计日志，便于追溯攻击与异常。
-- 锁定状态优先于密码校验，确保暴力破解期间即使撞对密码也无法进入。
-- 密码哈希使用 BCrypt（自适应成本，抗彩虹表）。
+- 锁定状态优先于口令校验，确保暴力破解期间即使撞对口令也无法进入。
+- 锁定期同时记录墙钟与单调时钟（`Environment.TickCount64`），偏离超过容差时以单调时钟
+  为准并写 `CLOCK_ANOMALY` —— 回拨系统时间这条最廉价的绕过路径被堵死且留痕
+  （口径：堵死且留痕，不是「不可绕过」）。
+- 口令哈希使用 BCrypt（自适应成本，抗彩虹表），外层再叠 pepper（存于本机 DPAPI 保护的文件）。
 - 响应使用统一格式 `{ success, code, message, data }`，前端易于处理。
 - 审计日志写入做了异常兜底：日志记录失败不会阻断注册/登录等主流程。
 - 数据库中的会话票据只保存哈希（无盐 SHA-256 + Base64Url），明文票据仅在签发时返回一次。
+- 防账号枚举：`send-email-code` 对不存在的邮箱返回与真实发信**逐字一致**的响应，
+  而审计侧仍如实记为失败。
 
 ## 十一、常见问题排查
 
@@ -352,8 +431,10 @@ npm run build     # 只出浏览器产物 → ../AuthServer/wwwroot
 
 - **MongoDB Compass 只是客户端，不自带数据库服务**，必须另外启动 MongoDB Server，
   默认监听 `127.0.0.1:27017`。
-- 数据库名为 `AuthBaselineDb`，集合为 `Users` 和 `AuditLogs`。
-- 只有后端成功启动并收到请求后才会写入数据。首次启动会自动建唯一索引并预置管理员 `admin`。
+- 数据库名为 `AuthBaselineDb`，集合为 `Users`、`Sessions`、`EmailCodes`、
+  `AuditLogs_yyyyMM`（按月分片）与 `AuditChainHeads`。
+- 只有后端成功启动并收到请求后才会写入数据。首次启动会自动建唯一索引并预置管理员 `admin`
+  （`MongoDbService` 是**懒构造**：迁移发生在第一个真正触库的请求上）。
 - Compass 里看不到时，点一下刷新按钮。
 
 ### 3. 已知坑：审计日志字段必须是 string
@@ -367,12 +448,21 @@ npm run build     # 只出浏览器产物 → ../AuthServer/wwwroot
 本项目已改为 `string`（写入前用 `JsonSerializer.Serialize` 序列化成 JSON 字符串），
 并对日志写入加了 try-catch —— 审计日志属于旁路记录，失败绝不能拖垮主流程。
 
-### 4. 端口被占用
+### 4. 所有接口都返回 500，且响应体是空的
+
+最常见的原因是**数据库里的用户文档带了当前版本不认识的字段**：C# 驱动的模型绑定遇到
+未知字段会抛 `FormatException`（不忽略），于是在管理员种子阶段就失败，
+连不需要鉴权的 `/api/auth/transport` 也会 500。
+
+典型触发场景：换了新版本的库，却还在跑旧版编译产物。**处置方式是重新发布并
+安装当前版本**，不要靠改库去迁就旧二进制。
+
+### 5. 端口被占用
 
 若 `5007` 被占用，修改 `AuthServer/Properties/launchSettings.json` 中的
 `applicationUrl` 即可。
 
-### 5. 实测记录
+### 6. 实测记录
 
 以下流程已用 curl 实测全部通过：
 

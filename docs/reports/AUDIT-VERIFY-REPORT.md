@@ -1,7 +1,7 @@
 # 审计追责验证报告｜让所有安全事件可追溯
 
 对应四组验证目标：**01 记得全 · 02 看不到 · 03 改不掉 · 04 撑得住**。
-改造方案见 `AUDIT-UPGRADE-DESIGN.md`，本文件只记录**实测结果与证据**。
+改造方案见 `docs/design/AUDIT-UPGRADE-DESIGN.md`，本文件只记录**实测结果与证据**。
 
 交付形态：**Tauri 桌面端软件**（`AuthBaseline_1.0.0_x64-setup.exe`），
 内置 .NET 8 后端 sidecar 与 MongoDB 存储，装完即用，无需另起服务。

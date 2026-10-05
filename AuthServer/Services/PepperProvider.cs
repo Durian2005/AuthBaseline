@@ -33,7 +33,7 @@ public sealed class PepperUnavailableException : Exception
 ///   pepper：全库共用、**与哈希分离存放**，防的是"库被整体拿走"。两者不互相替代。
 ///   也正因如此，pepper 绝不能写进会随程序一起分发的地方 ——
 ///   本项目里 `appsettings.Local.json` 会被 `tauri.conf.json` 的 bundle.resources
-///   打进安装包，所以它是**明令禁止**的存放位置（详见 TRANSPORT-STORAGE-SECURITY-DESIGN.md §4.2）。
+///   打进安装包，所以它是**明令禁止**的存放位置（详见 docs/design/TRANSPORT-STORAGE-SECURITY-DESIGN.md §4.2）。
 ///
 /// ── 存放与保护 ────────────────────────────────────────────
 /// 默认落 `%LOCALAPPDATA%\AuthBaselineData\pepper.dat`，内容为 DPAPI(CurrentUser) 密文。
