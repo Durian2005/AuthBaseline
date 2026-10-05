@@ -32,25 +32,29 @@ import hashlib
 
 from datetime import datetime, timezone
 
-from pymongo import MongoClient
+# 公共探针基础层：库名守卫 + 代理绕过 + 后端启动。
+# 改造前的写法 `DB = sys.argv[3]` 无任何校验 —— 传参错位就会把真实库名
+# 喂给 drop_database()（10-05 事故形态）。现在统一走 resolve_probe_db()。
+from _probe_common import ProbeDb, resolve_probe_db, start_backend, http_call
 
 EXE = sys.argv[1]
 PORT = int(sys.argv[2])
-DB = sys.argv[3]
+DB = resolve_probe_db("AuthBaselineRoleProbe")
 BASE = "http://127.0.0.1:%d" % PORT
 
 # 默认跑完即清库（见文件末尾"收尾"）。加 --keep 可强制保留测试库供人工翻查
 # （失败时会自动保留，不必显式加）。
-KEEP = "--keep" in sys.argv[4:]
+KEEP = "--keep" in sys.argv
 
 print("exe    :", EXE)
 print("端口   :", PORT)
 print("测试库 :", DB)
 
+# 受守卫的测试库句柄：破坏性操作只能经它执行，真实库名一律被拦。
+probe_db = ProbeDb(DB)
+
 # 清理可能残留的旧测试库，保证从"全新库"起步（此时后端会播种 admin）
-_cli = MongoClient("mongodb://localhost:27017", serverSelectionTimeoutMS=8000)
-if DB in _cli.list_database_names():
-    _cli.drop_database(DB)
+if probe_db.drop_if_exists():
     print("已清理旧测试库")
 
 PASSED, FAILED = [], []
@@ -63,26 +67,7 @@ def check(name, cond, detail=""):
 
 
 def call(method, path, body=None, ticket=None, timeout=90):
-    req = urllib.request.Request(BASE + path, method=method)
-    req.add_header("Content-Type", "application/json")
-    if ticket:
-        req.add_header("Authorization", "Bearer " + ticket)
-    data = json.dumps(body).encode() if body is not None else None
-    try:
-        with urllib.request.urlopen(req, data, timeout=timeout) as r:
-            text = r.read().decode("utf-8", "replace")
-            try:
-                return r.status, json.loads(text or "{}")
-            except Exception:
-                return r.status, {}
-    except urllib.error.HTTPError as e:
-        text = e.read().decode("utf-8", "replace")
-        try:
-            return e.code, json.loads(text or "{}")
-        except Exception:
-            return e.code, {}
-    except Exception as e:
-        return 0, {"err": str(e)}
+    return http_call(BASE, method, path, body=body, ticket=ticket, timeout=timeout)
 
 
 def login(username, password):
@@ -93,14 +78,9 @@ def login(username, password):
 
 # ---------- 启动 ----------
 print("\n[1] 启动后端（全新库，自动播种 admin/Admin123）...")
-LOG_PATH = os.path.join(tempfile.gettempdir(), "role_sep_%d.log" % PORT)
-# 注意：stdout 必须重定向到文件而不是 PIPE —— 后端每请求打一行日志，
-# 管道缓冲区被撑满会让子进程阻塞在写 stdout，后续请求全部超时。
-logf = open(LOG_PATH, "wb")
-env = {**os.environ,
-       "ASPNETCORE_URLS": "http://127.0.0.1:%d" % PORT,
-       "MongoDbSettings__DatabaseName": DB}
-proc = subprocess.Popen([EXE], env=env, stdout=logf, stderr=subprocess.STDOUT)
+# start_backend 会**强制**注入 MongoDbSettings__DatabaseName=DB，保证后端
+# 与探针的 pymongo 操作的是同一个库（这正是 10-05 事故的结构性根因）。
+proc = start_backend(EXE, PORT, DB)
 
 ready = False
 for _ in range(60):
@@ -148,7 +128,7 @@ check("创建「审计管理员」auditor01 → 成功", st == 200, "HTTP %s / %
 check("  返回角色 = AuditAdmin", (b.get("data") or {}).get("role") == "AuditAdmin")
 
 # 库里确认这两个账号确实没有邮箱、状态是启用
-users = {u["username"]: u for u in _cli[DB]["Users"].find()}
+users = {u["username"]: u for u in probe_db["Users"].find()}
 for name in ("ops01", "auditor01"):
     u = users.get(name) or {}
     check("%s 库记录：status=Enabled 且 email 为空" % name,
@@ -260,7 +240,7 @@ print("\n[7] 注销范围：管理员能注销审计管理员，用户管理员�
 
 # 对照组：普通用户直接落库，避免绕"注册 + 邮箱验证码"这条与本段无关的链路。
 # 注销只认目标账号的角色，不需要目标能登录，所以口令哈希给占位值即可。
-_cli[DB]["Users"].insert_one({
+probe_db["Users"].insert_one({
     "username": "todelete", "passwordHash": "x", "status": "Enabled",
     "role": "User", "failedLoginAttempts": 0,
     "createdAt": datetime.now(timezone.utc),
@@ -299,7 +279,7 @@ st, b = call("GET", "/api/audit/logs", ticket=auditor_tk)
 check("被注销账号的票据立即失效", st == 401 and b.get("code") == "SESSION_REVOKED",
       "HTTP %s / %s" % (st, b.get("code")))
 check("auditor01 已从库中删除",
-      _cli[DB]["Users"].find_one({"username": "auditor01"}) is None)
+      probe_db["Users"].find_one({"username": "auditor01"}) is None)
 
 st, b = call("POST", "/api/auth/delete-user", {"username": "nosuchuser"}, ticket=admin_tk)
 check("注销不存在的账号 → 404",
@@ -362,21 +342,21 @@ check("登录：账号存在但口令错误被拒（与'账号不存在'同码�
 
 # --- 审计口径核对 ---
 # 分片名在整段（含第 9 段）复用，因此在这里就枚举好，不要等到后面再定义。
-cols = [n for n in _cli[DB].list_collection_names() if n.startswith("AuditLogs")]
+cols = [n for n in probe_db.list_collection_names() if n.startswith("AuditLogs")]
 
 
 def count(action, reason=None):
     q = {"action": action}
     if reason:
         q["reasonCode"] = reason
-    return sum(_cli[DB][n].count_documents(q) for n in cols)
+    return sum(probe_db[n].count_documents(q) for n in cols)
 
 
 cp_failed = count("CHANGE_PASSWORD_FAILED")
 check("改密失败已留痕（CHANGE_PASSWORD_FAILED，独立动作）", cp_failed >= 4, "%d 条" % cp_failed)
 
 check("改密失败动作本身即 result=失败",
-      sum(_cli[DB][n].count_documents(
+      sum(probe_db[n].count_documents(
           {"action": "CHANGE_PASSWORD_FAILED", "result": "失败"}) for n in cols) == cp_failed,
       "两者应完全一致")
 
@@ -392,25 +372,25 @@ check("空字段带 EMPTY_FIELDS", count("CHANGE_PASSWORD_FAILED", "EMPTY_FIELDS
 check("改密成功仍走 CHANGE_PASSWORD（动作层面与失败分开）",
       count("CHANGE_PASSWORD") >= 1, "%d 条" % count("CHANGE_PASSWORD"))
 check("CHANGE_PASSWORD 动作下不存在失败记录（失败已全部改走 _FAILED）",
-      sum(_cli[DB][n].count_documents(
+      sum(probe_db[n].count_documents(
           {"action": "CHANGE_PASSWORD", "result": "失败"}) for n in cols) == 0)
 
 check("登录失败带 INVALID_CREDENTIALS（账号不存在与口令错误同码）",
       count("LOGIN_FAILED", "INVALID_CREDENTIALS") >= 2,
       "%d 条" % count("LOGIN_FAILED", "INVALID_CREDENTIALS"))
 check("登录失败不再有空原因码",
-      sum(_cli[DB][n].count_documents(
+      sum(probe_db[n].count_documents(
           {"action": "LOGIN_FAILED", "reasonCode": {"$in": [None, ""]}}) for n in cols) == 0)
 
 check("注册失败带原因码（本库若未触发注册失败则计 0，不作判负）",
-      sum(_cli[DB][n].count_documents(
+      sum(probe_db[n].count_documents(
           {"action": "REGISTER", "result": "失败", "reasonCode": {"$nin": [None, ""]}})
           for n in cols) >= 0)
 
 # 口令本身绝不能出现在任何日志里
 leak = 0
 for n in cols:
-    for d in _cli[DB][n].find({}, {"request": 1, "response": 1, "_id": 0}):
+    for d in probe_db[n].find({}, {"request": 1, "response": 1, "_id": 0}):
         blob = (d.get("request") or "") + (d.get("response") or "")
         for secret in ("Ops12345", "Ops9x8y7z", "NewPass123", "wrongold1A", "WrongPass1"):
             if secret in blob:
@@ -419,28 +399,28 @@ check("口令明文未进入审计日志（含请求与响应报文）", leak ==
 
 # ---------- 9. 角色回填与审计链 ----------
 print("\n[9] 数据与审计链检查")
-admin_doc = _cli[DB]["Users"].find_one({"username": "admin"})
+admin_doc = probe_db["Users"].find_one({"username": "admin"})
 check("admin 的 role 字段 = Admin", admin_doc.get("role") == "Admin",
       "role=%s" % admin_doc.get("role"))
 
 # 越权尝试是否留痕
 denied = 0
 for n in cols:
-    denied += _cli[DB][n].count_documents({"action": "AUDIT_ACCESS_DENIED"})
+    denied += probe_db[n].count_documents({"action": "AUDIT_ACCESS_DENIED"})
 check("越权尝试已写入审计链（AUDIT_ACCESS_DENIED）", denied > 0, "%d 条" % denied)
 
 # 三条角色任免记录
-created = sum(_cli[DB][n].count_documents({"action": "CREATE_ACCOUNT"}) for n in cols)
-setrole = sum(_cli[DB][n].count_documents({"action": "SET_ROLE"}) for n in cols)
+created = sum(probe_db[n].count_documents({"action": "CREATE_ACCOUNT"}) for n in cols)
+setrole = sum(probe_db[n].count_documents({"action": "SET_ROLE"}) for n in cols)
 check("创建账号已留痕（CREATE_ACCOUNT）", created > 0, "%d 条" % created)
 check("角色变更已留痕（SET_ROLE）", setrole > 0, "%d 条" % setrole)
 
 # 注销留痕：成功与失败都要落链（失败含越权与自保护，共 6 次调用）
-deleted = sum(_cli[DB][n].count_documents({"action": "DELETE_USER"}) for n in cols)
+deleted = sum(probe_db[n].count_documents({"action": "DELETE_USER"}) for n in cols)
 check("注销操作已留痕（DELETE_USER，成功与拒绝均记录）", deleted >= 6, "%d 条" % deleted)
 
 # 被拒的注销必须带 FORBIDDEN_TARGET，才能把"越级注销尝试"单独筛出来
-fbd = sum(_cli[DB][n].count_documents(
+fbd = sum(probe_db[n].count_documents(
     {"action": "DELETE_USER", "reasonCode": "FORBIDDEN_TARGET"}) for n in cols)
 check("越级注销尝试带 FORBIDDEN_TARGET", fbd >= 3, "%d 条" % fbd)
 
@@ -465,7 +445,7 @@ def ch(d):
 
 docs = []
 for n in cols:
-    docs += list(_cli[DB][n].find({"selfHash": {"$nin": [None, ""]}}))
+    docs += list(probe_db[n].find({"selfHash": {"$nin": [None, ""]}}))
 docs.sort(key=lambda x: x["seq"])
 prev, bad = GEN, []
 for d in docs:
@@ -497,7 +477,7 @@ print("  结论：%s" % ("PASS ✅ 角色分离生效" if not FAILED else "FAIL 
 if FAILED or KEEP:
     print("  测试库保留：%s（%s）" % (DB, "有失败项，留现场排查" if FAILED else "--keep 指定"))
 else:
-    _cli.drop_database(DB)
+    probe_db.drop()
     print("  测试库已清理：%s" % DB)
 print("=" * 64)
 sys.exit(1 if FAILED else 0)

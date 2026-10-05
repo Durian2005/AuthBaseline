@@ -64,7 +64,7 @@ def main():
     print("[3] 跑只读验证")
     env2 = dict(os.environ)
     env2["E2E_CDP"] = "http://127.0.0.1:%d" % PORT
-    env2["E2E_SHOTDIR"] = str(ROOT / "tools")
+    env2["E2E_SHOTDIR"] = str(ROOT / "tools" / "evidence")
     r = subprocess.run(
         [NODE, str(ROOT / "tools" / "ui_readonly_events.mjs")],
         cwd=str(ROOT), env=env2,

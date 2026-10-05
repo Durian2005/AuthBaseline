@@ -12,11 +12,15 @@
 用法：
     python tools/tamper_helper.py show          # 显示链尾若干条（改前先抄下原值）
     python tools/tamper_helper.py verify        # 校验当前链是否完整
-    python tools/tamper_helper.py restore <seq> <原action> <原target>
-                                                # 按记录的原值还原
+    python tools/tamper_helper.py restore <seq> <原action> <原target> --i-know-this-is-the-real-db
+                                                # 按记录的原值还原（会写库，需确认）
     python tools/tamper_helper.py watch         # 轮询监测，直到发现链断裂
+
+⚠️ 只有 `restore` 会写库，因此只有它需要 `--i-know-this-is-the-real-db`
+   确认开关；`show` / `verify` / `watch` 是只读诊断，随时可用。
 """
 import json
+import os
 import socket
 import subprocess
 import sys
@@ -25,9 +29,21 @@ from pathlib import Path
 
 import pymongo
 
+# 真实库门禁：`restore` 子命令会**直接改写审计记录**（把 action/target 改回原值）。
+# 它天然是为真实库设计的（配合 Compass 做"改不掉"演示），所以用门禁而不是探针守卫：
+# 默认拒绝，需要显式确认。show / verify / watch 三个只读子命令不受影响。
+from _probe_common import require_real_db_optin
+
 ROOT = Path(__file__).resolve().parents[1]
 EXE = ROOT / "AuthServer" / "publish" / "AuthServer.exe"
-DB = pymongo.MongoClient("mongodb://localhost:27017", serverSelectionTimeoutMS=3000)["AuthBaselineDb"]
+DB_NAME = "AuthBaselineDb"
+DB = pymongo.MongoClient("mongodb://localhost:27017", serverSelectionTimeoutMS=3000)[DB_NAME]
+
+# `verify` 要调 `/api/audit/verify`，该接口按职责分离**只对审计管理员开放**。
+# 所以这里不能用 admin（Admin 角色会被 403 挡回）。默认值只是演示用的种子口令，
+# 真实库跑请用环境变量换成审计管理员。
+VERIFY_USER = os.environ.get("TAMPER_HELPER_USER", "admin")
+VERIFY_PASS = os.environ.get("TAMPER_HELPER_PASS", "Admin123")
 
 
 def shards():
@@ -117,10 +133,32 @@ def cmd_verify():
                 payload = out
             return json.loads(payload)
 
-        j = req("POST", "/api/auth/login", {"username": "admin", "password": "Admin123"})
+        j = req("POST", "/api/auth/login", {"username": VERIFY_USER, "password": VERIFY_PASS})
+        if not j.get("success"):
+            print("登录失败（HTTP body: %s）—— 无法校验链" % j.get("code"))
+            return 2
         tok = (j.get("data") or {}).get("ticket")
         r = req("GET", "/api/audit/verify", headers={"Authorization": "Bearer " + tok})
+
         d = r.get("data") or {}
+        # ⚠️ 这里必须区分"没有结论"和"结论是链断裂"。
+        # 旧写法只看 `d.get("intact")` 的真假，于是**任何拿不到结论的响应**
+        # （403 无权限、502、空 body……）都会走进 else 分支，被打印成
+        # "链已断裂！"，且断裂字段全是 None —— 一次彻头彻尾的假阳性。
+        # 实测踩到过：库里只有 Admin 账号时，`/api/audit/verify` 恒返回 403
+        # （职责分离：Admin 不可读审计），脚本却报"链已断裂"。
+        if "intact" not in d:
+            print("未取得校验结论，**不能**据此判断链是否断裂。")
+            print("  后端返回：code=%s  message=%s"
+                  % (r.get("code"), r.get("message")))
+            if r.get("code") == "NOT_AUDIT_ADMIN":
+                print("  → 原因：当前账号不是**审计管理员**。")
+                print("    校验接口按职责分离只对 AuditAdmin 开放（Admin 不可读审计）。")
+                print("    请改用审计管理员账号：")
+                print("        TAMPER_HELPER_USER=<审计管理员> TAMPER_HELPER_PASS=<口令> \\")
+                print("            python tools/tamper_helper.py verify")
+            return 2
+
         if d.get("intact"):
             print("链完整：%s 条记录全部自洽" % d.get("checked"))
         else:
@@ -141,6 +179,12 @@ def cmd_verify():
 
 def cmd_restore(seq, action, target):
     """把指定记录恢复为原值，哈希随之自动复原。"""
+    require_real_db_optin(
+        DB_NAME,
+        script="tamper_helper.py",
+        operation="还原审计记录（改写 action/target 字段）",
+        argv=sys.argv[1:],
+    )
     name, d = find_by_seq(int(seq))
     if not d:
         print("找不到 seq=%s 的记录" % seq)

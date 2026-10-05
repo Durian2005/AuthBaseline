@@ -210,7 +210,7 @@ def main():
     if not EXE.exists():
         print(f"未找到 {EXE}")
         return 2
-    out = Path(sys.argv[1] if len(sys.argv) > 1 else "desktop_audit.png")
+    out = Path(sys.argv[1] if len(sys.argv) > 1 else "tools/evidence/desktop_audit.png")
     settle = float(sys.argv[2] if len(sys.argv) > 2 else "16")
     steps = sys.argv[3] if len(sys.argv) > 3 else ""
 

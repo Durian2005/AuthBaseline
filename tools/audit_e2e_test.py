@@ -16,9 +16,16 @@
   - 存在管理员账号 admin / Admin123（可用 ADMIN_USER / ADMIN_PASS 覆盖）
   - 需要 pymongo：pip install pymongo
 
+⚠️ 本脚本会**故意删改审计分片文档**来模拟"绕过应用直接改库"，
+   所以默认**拒绝**运行，必须先显式确认目标库：
+
 用法：
-  python tools/audit_e2e_test.py
-  python tools/audit_e2e_test.py --keep   # 保留注入的篡改数据，便于人工查看弹窗
+  python tools/audit_e2e_test.py --i-know-this-is-the-real-db
+  python tools/audit_e2e_test.py --i-know-this-is-the-real-db --keep
+      # --keep：保留注入的篡改数据，便于人工查看弹窗
+
+  更稳的做法：把 DB_NAME 指向测试库（库名里含 `Probe`）先演练一遍 ——
+  例如 DB_NAME=AuditE2eProbe，此时**不需要**确认开关。
 """
 import argparse
 import json
@@ -35,6 +42,13 @@ try:
 except ImportError:
     print("缺少 pymongo，请先执行：pip install pymongo")
     sys.exit(2)
+
+# 真实库门禁：本脚本会**故意删改审计分片文档**来模拟篡改，
+# 而 `DB_NAME` 默认指向真实库 —— 这正是 10-05 数据损毁事故的脚本形态。
+# 接入统一门禁：默认拒绝，必须显式加 --i-know-this-is-the-real-db 才放行。
+# （为什么不用探针的 `_guard`：见 `_probe_common.require_real_db_optin` 的说明 ——
+#   探针打真实库是 bug，本脚本打真实库是设计意图，两套语义刻意分开。）
+from _probe_common import require_real_db_optin
 
 BASE = os.environ.get("BASE", "http://localhost:5007")
 ADMIN_USER = os.environ.get("ADMIN_USER", "admin")
@@ -155,9 +169,21 @@ def register_real_user(username, password, db):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--keep", action="store_true", help="保留注入的篡改数据")
+    parser.add_argument("--i-know-this-is-the-real-db", action="store_true",
+                        help="二次确认：允许对真实库执行篡改注入（会删改审计分片）")
     args = parser.parse_args()
 
-    # 0. 前置检查
+    # 0. 门禁 —— 必须在**任何**触库动作之前。
+    #    本脚本会 delete_one / insert_one 审计分片文档来模拟篡改；
+    #    若在"删了还没插回去"之间中断，链上就留下无法局部修补的洞。
+    require_real_db_optin(
+        DB_NAME,
+        script="audit_e2e_test.py",
+        operation="注入篡改（删改审计分片文档）并在结束时清理测试账号",
+        argv=sys.argv[1:],
+    )
+
+    # 1. 前置检查
     try:
         with urllib.request.urlopen(BASE + "/favicon.svg", timeout=10) as resp:
             reachable = resp.status < 500

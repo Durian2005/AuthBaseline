@@ -20,8 +20,15 @@ r"""桌面端界面级验证：启动安装版 → 登录 → 截图 → 可选�
   tamper              直接改数据库制造篡改（需要 python 驱动 pymongo）
   deny                从应用之外直接用 HTTP 打管理接口，复现"越权访问被拒"
 
+⚠️ `tamper` 步骤会**绕过应用直接改审计记录**，目标是真实库。
+   为防误触发，该步骤现在需要显式确认（其余步骤不受影响）：
+       python tools/desktop_e2e.py <输出图片> login:admin:Admin123,tamper \
+              --i-know-this-is-the-real-db
+   可用 E2E_DB 把目标库指向测试库（库名含 `Probe` 时无需确认）。
+
 环境变量：
   E2E_APPDIR   覆盖安装目录（默认 %LOCALAPPDATA%\AuthBaseline）
+  E2E_DB       覆盖 tamper 步骤的目标库（默认 AuthBaselineDb）
   E2E_SETTLE   首次截图前的等待秒数（默认 16）
   E2E_TAMPER_WAIT  篡改后等待自动巡检弹窗的秒数（默认 8，巡检周期 30s 需调大）
   E2E_DENY_WAIT    越权后等待巡检弹窗的秒数（默认 14，越权巡检周期 10s）
@@ -35,10 +42,18 @@ import time
 from ctypes import wintypes
 from pathlib import Path
 
+# 真实库门禁：`tamper` 步骤会绕过应用直接改审计记录（模拟"改不掉"场景），
+# 目标是真实库 —— 接入统一门禁后，该步骤默认拒绝，需要显式确认。
+from _probe_common import require_real_db_optin
+
 APP_DIR = Path(os.environ.get(
     "E2E_APPDIR", os.path.join(os.environ.get("LOCALAPPDATA") or os.path.expanduser("~/AppData/Local"), "AuthBaseline")))
 EXE = APP_DIR / "auth-baseline-desktop.exe"
 TITLE_KEY = "基线系统"
+#: `tamper` 步骤要改的库。与安装版后端的 DatabaseName 一致。
+#: 抽成常量而不是散在函数里 —— 门禁与真正的写操作必须指向**同一个**事实来源，
+#: 两处各写一遍字面量，迟早会出现"门禁查 A 库、写入 B 库"的错位。
+TAMPER_DB_NAME = os.environ.get("E2E_DB", "AuthBaselineDb")
 # 与 tauri.conf.json 保持一致，保证未重装的旧包也能正常渲染
 BROWSER_ARGS = ("--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection "
                 "--single-process --disable-gpu")
@@ -268,7 +283,7 @@ def tamper_db():
     try:
         cli = pymongo.MongoClient("mongodb://localhost:27017",
                                   serverSelectionTimeoutMS=5000)
-        db = cli["AuthBaselineDb"]
+        db = cli[TAMPER_DB_NAME]
         coll_name, doc = None, None
         for name in db.list_collection_names():
             if not name.startswith("AuditLogs"):
@@ -385,7 +400,7 @@ def main():
     if not EXE.exists():
         print(f"未找到 {EXE}")
         return 2
-    out = Path(sys.argv[1] if len(sys.argv) > 1 else "tools/desktop_audit.png")
+    out = Path(sys.argv[1] if len(sys.argv) > 1 else "tools/evidence/desktop_audit.png")
     settle = float(os.environ.get("E2E_SETTLE", "16"))
     steps = sys.argv[2] if len(sys.argv) > 2 else ""
 
@@ -469,6 +484,15 @@ def main():
                 deny_audit()
                 time.sleep(float(os.environ.get("E2E_DENY_WAIT", "14")))
             elif step == "tamper":
+                # 门禁落在**写库那一刻**，而不是脚本入口 —— 否则
+                # login / shot / deny 这些只读步骤也会被一并拦下。
+                # 只有真的要改库模拟篡改时，才要求确认目标库。
+                require_real_db_optin(
+                    TAMPER_DB_NAME,
+                    script="desktop_e2e.py",
+                    operation="注入篡改（把最新一条审计记录的 action 改成 TAMPERED_BY_ATTACKER）",
+                    argv=sys.argv[1:],
+                )
                 tamper_db()
                 time.sleep(float(os.environ.get("E2E_TAMPER_WAIT", "8")))
             else:

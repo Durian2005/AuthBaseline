@@ -33,7 +33,16 @@ import urllib.request
 from datetime import datetime, timedelta
 
 from bson import ObjectId
-from pymongo import MongoClient
+
+# 公共探针基础层：库名守卫 + 代理绕过 + 后端启动。
+# 改造前用 `next((a for a in sys.argv[3:] if not a.startswith("--")), ...)`
+# —— 扫描式解析最危险：任何非 -- 前缀的参数都会被当成库名喂给 drop_database()。
+from _probe_common import (
+    ProbeDb,
+    resolve_probe_db,
+    start_backend as _common_start_backend,
+    http_call,
+)
 
 try:
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -44,18 +53,17 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 EXE = sys.argv[1] if len(sys.argv) > 1 and not sys.argv[1].startswith("--") \
     else os.path.join(ROOT, "AuthServer", "bin", "Release", "net8.0", "AuthServer.exe")
 PORT = int(sys.argv[2]) if len(sys.argv) > 2 and not sys.argv[2].startswith("--") else 5231
-DB = next((a for a in sys.argv[3:] if not a.startswith("--")), "TicketHashProbe")
+DB = resolve_probe_db("TicketHashProbe")
 BASE = "http://127.0.0.1:%d" % PORT
 KEEP = "--keep" in sys.argv
 
 ADMIN_USER = os.environ.get("E2E_ADMIN", "admin")
 ADMIN_PW = os.environ.get("E2E_ADMIN_PASS", "Admin123")
 
-_cli = MongoClient("mongodb://localhost:27017", serverSelectionTimeoutMS=8000)
-if DB in _cli.list_database_names():
-    _cli.drop_database(DB)
+probe_db = ProbeDb(DB)
+if probe_db.drop_if_exists():
     print("已清理旧测试库", DB)
-db = _cli[DB]
+db = probe_db
 
 PASSED, FAILED = [], []
 
@@ -65,19 +73,10 @@ def check(name, cond, detail=""):
     print("  [%s] %s%s" % ("OK  " if cond else "FAIL", name, ("  — " + str(detail)) if detail else ""))
 
 
+# 显式绕过系统代理：本机/沙箱可能注入失效的 http_proxy，会把 127.0.0.1 的
+# 请求拦成 HTTP 502，看起来像"后端未就绪"。环回请求本就不该走代理。
 def call(method, path, body=None, ticket=None, timeout=60):
-    req = urllib.request.Request(BASE + path, method=method)
-    req.add_header("Content-Type", "application/json")
-    if ticket:
-        req.add_header("Authorization", "Bearer " + ticket)
-    data = json.dumps(body).encode() if body is not None else None
-    try:
-        with urllib.request.urlopen(req, data, timeout=timeout) as r:
-            return r.status, json.loads(r.read().decode("utf-8", "replace") or "{}")
-    except urllib.error.HTTPError as e:
-        return e.code, json.loads(e.read().decode("utf-8", "replace") or "{}")
-    except Exception as e:
-        return 0, {"err": str(e)}
+    return http_call(BASE, method, path, body=body, ticket=ticket, timeout=timeout)
 
 
 def b64url(raw: bytes) -> str:
@@ -105,37 +104,35 @@ print("端口   :", PORT)
 print("测试库 :", DB, "（全新库起步，跑完即清）")
 print("\n[1] 启动后端（全新库会自动播种 admin/Admin123）...")
 
-LOG = os.path.join(tempfile.gettempdir(), "ticket_hash_probe_%d.log" % PORT)
-# stdout 必须重定向到文件：管道撑满会让后端假死
-env = {**os.environ,
-       "ASPNETCORE_URLS": "http://127.0.0.1:%d" % PORT,
-       "MongoDbSettings__DatabaseName": DB}
+# stdout 必须重定向到文件：管道撑满会让后端假死。
+# 库名注入同样由公共层负责 —— 保证后端与 pymongo 用同一个库。
+LOG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "buildlogs")
 
 
-def start_backend():
-    """起后端并等就绪。独立运行时没有 wwwroot，GET / 返回 404 也算已监听。"""
-    logf = open(LOG, "ab")
-    p = subprocess.Popen([EXE], env=env, stdout=logf, stderr=subprocess.STDOUT)
+def launch_backend():
+    """起后端并等就绪。独立运行时没有 wwwroot，GET / 返回 404 也算已监听。
+
+    函数名刻意不叫 start_backend：避免遮蔽公共层的同名函数。
+    """
+    p = _common_start_backend(EXE, PORT, DB, log_dir=LOG_DIR,
+                              log_name="ticket_hash_probe_%d.log" % PORT)
     for _ in range(60):
         st, _ = call("GET", "/")
         if st != 0:
-            return p, logf
+            return p
         time.sleep(0.5)
     p.kill()
-    raise RuntimeError("60 秒未就绪，日志见 " + LOG)
+    raise RuntimeError("60 秒未就绪，日志见 " + os.path.join(
+        LOG_DIR, "ticket_hash_probe_%d.log" % PORT))
 
 
-def stop_backend(p, logf):
+def stop_backend(p):
     p.kill()
     p.wait(timeout=10)
-    try:
-        logf.close()
-    except Exception:
-        pass
     time.sleep(0.8)          # 等监听端口彻底释放再重启
 
 
-proc, logf = start_backend()
+proc = launch_backend()
 print("  就绪 (PID=%d)" % proc.pid)
 
 st, b, tk1 = login(ADMIN_USER, ADMIN_PW)
@@ -309,8 +306,8 @@ check("已造出改造前形态的会话（含明文 ticket 字段）", bool(bef
       "字段：%s" % (", ".join(sorted(before.keys())) if before else "未插入"))
 
 print("  重启后端，触发启动期的升级逻辑…")
-stop_backend(proc, logf)
-proc, logf = start_backend()
+stop_backend(proc)
+proc = launch_backend()
 
 # ⚠️ 时序坑：MongoDbService 是**懒构造**（第一次被 DI 解析时才建索引/跑迁移），
 #    所以"等 GET / 就绪"远远不够 —— 静态文件中间件的 404 根本没碰数据库。
@@ -348,12 +345,12 @@ check("升级后的 ticketHash 同样不能当票据用", st_legacy_hash == 401,
 
 
 # ---------- 10. 收尾 ----------
-stop_backend(proc, logf)
+stop_backend(proc)
 
 if FAILED or KEEP:
     print("\n  测试库保留：%s" % DB)
 else:
-    _cli.drop_database(DB)
+    probe_db.drop()
     print("\n  测试库已清理：%s" % DB)
 
 print("\n" + "=" * 68)

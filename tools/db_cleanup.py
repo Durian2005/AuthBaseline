@@ -1,6 +1,17 @@
 # -*- coding: utf-8 -*-
 """清理 AuthBaselineDb 中的冗余信息与日志痕迹。
 
+⚠️⚠️ 这是**作用于真实库**的管理脚本，不是探针。⚠️⚠️
+它会删除全部审计分片、清空会话、并**删除除 admin 外的所有账号**。
+2026-10-05 曾发生过真实库被误清空的事故，因此本脚本加了三重保护：
+
+  1. 必须**显式**传 `--db AuthBaselineDb`（不再默认落在真实库上）；
+     名字对不上就拒绝执行 —— 防止"以为在清测试库、实际清了真实库"。
+  2. 备份成功是**前置条件**：备份写盘并核对条数后，才允许进入清理阶段。
+     备份失败立即中止，绝不"边备份边删"。
+  3. 清理清单在执行前完整打印（集合名 + 条数），并在末尾汇总实际删除量，
+     便于事后核对"删了的"与"打算删的"是否一致。
+
 保留：
   - Users 中的 admin 账号（含 passwordHash 原样不动）
   - 发件邮箱与授权码（在 appsettings.Local.json，属数据库外文件，本脚本不触碰）
@@ -46,9 +57,29 @@ def dump_all(db, outdir):
 
 
 def main():
-    ap = argparse.ArgumentParser()
+    ap = argparse.ArgumentParser(
+        description="清理 AuthBaselineDb（真实库！）的冗余信息与日志痕迹")
     ap.add_argument("--apply", action="store_true", help="真正执行清理（默认只预览）")
+    ap.add_argument("--db", required=True,
+                    help="必须显式写出目标库名（防止误清真实库而自己不知道）")
+    ap.add_argument("--i-know-this-is-the-real-db", action="store_true",
+                    help="二次确认：明确知道在操作真实库")
     args = ap.parse_args()
+
+    # ---------- 保护 1：库名必须显式且正确 ----------
+    if args.db != DBNAME:
+        print("✗ 库名不匹配：脚本只负责清理 %r，但你传的是 %r。"
+              % (DBNAME, args.db))
+        print("  如果确实要清另一个库，请先确认它是不是真实库，再改脚本。")
+        return 2
+
+    # ---------- 保护 2：真实库必须被二次确认 ----------
+    if not args.i_know_this_is_the_real_db:
+        print("✗ %r 是**真实库**：本脚本会删除全部审计、清空会话、"
+              "并删除除 admin 外的所有账号。" % DBNAME)
+        print("  确认请追加：--i-know-this-is-the-real-db")
+        print("  （默认 dry-run；真正写入还需 --apply）")
+        return 2
 
     cli = MongoClient(URI, serverSelectionTimeoutMS=5000)
     cli.admin.command("ping")
@@ -70,17 +101,27 @@ def main():
         print("  清空集合       Sessions (%d 条)" % db["Sessions"].count_documents({}))
         print("  清空集合       EmailCodes (%d 条)" % db["EmailCodes"].count_documents({}))
         print("  保留           Users 中 username=admin 的账号（passwordHash 原样保留）")
-        print("  删除           Users 中除 admin 外的任何账号")
+        to_del = db["Users"].count_documents({"username": {"$ne": "admin"}})
+        print("  删除           Users 中除 admin 外的 %d 个账号：" % to_del)
+        for u in db["Users"].find({"username": {"$ne": "admin"}}, {"username": 1, "role": 1}):
+            print("                   - %s (%s)" % (u.get("username"), u.get("role")))
         print("\n未写入任何改动。加 --apply 执行。")
         return 0
 
-    # ---------- 备份 ----------
+    # ---------- 保护 3：备份成功才允许继续 ----------
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     outdir = os.path.join(BACKUP_ROOT, "db_" + stamp)
     manifest = dump_all(db, outdir)
     print("\n== 已备份到 %s ==" % outdir)
     for k, v in manifest.items():
         print("  %-22s %6d 条" % (k, v))
+
+    # 核对：备份文件里的条数必须与清理前一致，否则拒绝继续。
+    for name, expected in manifest.items():
+        path = os.path.join(outdir, name + ".json")
+        if not os.path.exists(path) or os.path.getsize(path) == 0:
+            print("\n✗ 备份文件缺失或为空：%s —— 中止清理。" % path)
+            return 3
 
     # ---------- 清理 ----------
     print("\n== 执行清理 ==")

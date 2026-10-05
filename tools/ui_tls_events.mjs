@@ -16,12 +16,12 @@
  * 用法（必须由 Python 侧在同一进程内先启动应用，见 tools/ui_tls_check.py）：
  *   E2E_CDP 调试端口，默认 http://127.0.0.1:9333
  *   E2E_USER / E2E_PASS 登录凭据（不内置默认值，由外层传入）
- *   E2E_SHOTDIR 截图目录，默认 tools
+ *   E2E_SHOTDIR 截图目录，默认 tools/evidence
  */
 import fs from 'node:fs'
 
 const CDP = process.env.E2E_CDP || 'http://127.0.0.1:9333'
-const OUT = process.env.E2E_SHOTDIR || 'tools'
+const OUT = process.env.E2E_SHOTDIR || 'tools/evidence'
 const USER = process.env.E2E_USER || ''
 const PASS = process.env.E2E_PASS || ''
 

@@ -45,7 +45,17 @@ import urllib.request
 from datetime import datetime, timezone
 
 import bcrypt
-from pymongo import MongoClient
+
+# 公共探针基础层：库名守卫 + 代理绕过 + 后端启动。
+# 改造前用 `next((a for a in sys.argv[3:] if not a.startswith("--")), ...)`
+# —— 扫描式解析最危险：任何非 -- 前缀的参数都会被当成库名喂给 drop_database()。
+from _probe_common import (
+    ProbeDb,
+    resolve_probe_db,
+    start_backend as _common_start_backend,
+    http_call,
+    _guard,
+)
 
 try:
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -56,7 +66,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 EXE = sys.argv[1] if len(sys.argv) > 1 and not sys.argv[1].startswith("--") \
     else os.path.join(ROOT, "AuthServer", "bin", "Release", "net8.0", "AuthServer.exe")
 PORT = int(sys.argv[2]) if len(sys.argv) > 2 and not sys.argv[2].startswith("--") else 5232
-DB = next((a for a in sys.argv[3:] if not a.startswith("--")), "PepperProbe")
+DB = resolve_probe_db("PepperProbe")
 FRESH_DB = DB + "Fresh"
 MIG_DB = DB + "Mig"
 BASE = "http://127.0.0.1:%d" % PORT
@@ -82,18 +92,7 @@ def check(name, cond, detail=""):
 
 # ---------- HTTP ----------
 def call(method, path, body=None, ticket=None, timeout=60):
-    req = urllib.request.Request(BASE + path, method=method)
-    req.add_header("Content-Type", "application/json")
-    if ticket:
-        req.add_header("Authorization", "Bearer " + ticket)
-    data = json.dumps(body).encode() if body is not None else None
-    try:
-        with urllib.request.urlopen(req, data, timeout=timeout) as r:
-            return r.status, json.loads(r.read().decode("utf-8", "replace") or "{}")
-    except urllib.error.HTTPError as e:
-        return e.code, json.loads(e.read().decode("utf-8", "replace") or "{}")
-    except Exception as e:
-        return 0, {"err": str(e)}
+    return http_call(BASE, method, path, body=body, ticket=ticket, timeout=timeout)
 
 
 def login(username, password):
@@ -137,12 +136,14 @@ def legacy_hash(password: str) -> str:
 
 
 # ---------- 库 ----------
-_cli = MongoClient("mongodb://localhost:27017", serverSelectionTimeoutMS=8000)
-for _d in (DB, FRESH_DB, MIG_DB):
-    if _d in _cli.list_database_names():
-        _cli.drop_database(_d)
-        print("已清理旧测试库", _d)
-db = _cli[DB]
+# 三个测试库全部经守卫构造：DB 来自 resolve_probe_db（已过白名单），
+# 派生库 FRESH_DB / MIG_DB 会在 ProbeDb 构造期再过一次守卫。
+probe_dbs = {name: ProbeDb(name) for name in (DB, FRESH_DB, MIG_DB)}
+for _name, _pdb in probe_dbs.items():
+    if _pdb.drop_if_exists():
+        print("已清理旧测试库", _name)
+probe_db = probe_dbs[DB]
+db = probe_db
 
 
 def audit_docs():
@@ -170,7 +171,11 @@ def read_log(path: str) -> str:
 
 
 def base_env(dbname, extra):
-    """构造子进程环境；显式清掉可能从外部继承的 pepper 变量，避免污染结论。"""
+    """构造子进程环境；显式清掉可能从外部继承的 pepper 变量，避免污染结论。
+
+    库名先过公共层守卫 —— 三个库由 `dbname` 动态传入，必须逐个确认不是真实库。
+    """
+    _guard(dbname, action="pepper_probe 启动后端")
     env = {**os.environ,
            "ASPNETCORE_URLS": "http://127.0.0.1:%d" % PORT,
            "MongoDbSettings__DatabaseName": dbname}
@@ -182,7 +187,12 @@ def base_env(dbname, extra):
 
 
 def start(extra, tag, dbname=DB, timeout=60):
-    """起后端并等就绪。返回 (proc, logf, logpath)。"""
+    """起后端并等就绪。返回 (proc, logf, logpath)。
+
+    这里保留自管的日志句柄（而不是用公共层 _common_start_backend），
+    因为本探针需要在同一次运行里对**三个不同库**反复起停，
+    每个 tag 一个独立日志文件更便于定位。
+    """
     logpath = os.path.join(LOG_DIR, "%s.log" % tag)
     logf = open(logpath, "wb")
     p = subprocess.Popen([EXE], env=base_env(dbname, extra), stdout=logf, stderr=subprocess.STDOUT)
@@ -480,9 +490,9 @@ finally:
         print("\n  测试库保留：%s / %s / %s" % (DB, FRESH_DB, MIG_DB))
         print("  临时目录保留：%s" % tmp_dirs)
     else:
-        for d in (DB, FRESH_DB, MIG_DB):
+        for d, _pdb in probe_dbs.items():
             try:
-                _cli.drop_database(d)
+                _pdb.drop()
             except Exception:
                 pass
         print("\n  测试库已清理：%s / %s / %s" % (DB, FRESH_DB, MIG_DB))

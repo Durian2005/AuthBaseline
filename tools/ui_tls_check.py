@@ -75,7 +75,7 @@ def main():
     print("[3] 跑 TLS 界面验证")
     env2 = dict(os.environ)
     env2["E2E_CDP"] = "http://127.0.0.1:%d" % PORT
-    env2["E2E_SHOTDIR"] = str(ROOT / "tools")
+    env2["E2E_SHOTDIR"] = str(ROOT / "tools" / "evidence")
     env2.setdefault("E2E_USER", "admin")
     env2.setdefault("E2E_PASS", "Admin123")
     r = subprocess.run([NODE, str(ROOT / "tools" / "ui_tls_events.mjs")],

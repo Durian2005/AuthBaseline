@@ -43,6 +43,25 @@ def find_port():
     return None, pid
 
 
+# 显式绕过系统代理：本机/沙箱可能注入失效的 http_proxy，会把 127.0.0.1 的
+# 请求拦成 HTTP 502，看起来像"后端未就绪"。环回请求本就不该走代理。
+#
+# ⚠️ SSL 上下文必须挂在 HTTPSHandler 上，**不能**传给 opener.open(..., context=) ——
+# `OpenerDirector.open()` 根本不接受 context 关键字（会抛 TypeError 并被吞成 HTTP 0），
+# 看起来像"后端没在跑"。这里按是否有 ctx 构造两个 opener 缓存复用。
+_OPENERS = {}
+
+
+def _opener(ctx=None):
+    key = ctx is not None
+    if key not in _OPENERS:
+        handlers = [urllib.request.ProxyHandler({})]
+        if ctx is not None:
+            handlers.append(urllib.request.HTTPSHandler(context=ctx))
+        _OPENERS[key] = urllib.request.build_opener(*handlers)
+    return _OPENERS[key]
+
+
 def call(base, method, path, body=None, ticket=None, raw=False, ctx=None):
     req = urllib.request.Request(base + path, method=method)
     req.add_header("Content-Type", "application/json")
@@ -50,7 +69,7 @@ def call(base, method, path, body=None, ticket=None, raw=False, ctx=None):
         req.add_header("Authorization", "Bearer " + ticket)
     data = json.dumps(body).encode() if body is not None else None
     try:
-        with urllib.request.urlopen(req, data, timeout=15, context=ctx) as r:
+        with _opener(ctx).open(req, data, timeout=15) as r:
             text = r.read().decode("utf-8", errors="replace")
             return r.status, (text if raw else json.loads(text or "{}"))
     except urllib.error.HTTPError as e:

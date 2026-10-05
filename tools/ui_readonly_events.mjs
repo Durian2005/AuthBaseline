@@ -18,7 +18,7 @@
 import fs from 'node:fs'
 
 const CDP = process.env.E2E_CDP || 'http://127.0.0.1:9333'
-const OUT = process.env.E2E_SHOTDIR || 'tools'
+const OUT = process.env.E2E_SHOTDIR || 'tools/evidence'
 /**
  * 账号与口令一律走环境变量，**不留默认值**（理由同 ui_audit_events.mjs：
  * 写真实账号名等于随仓库泄漏，写测试库名字换库即静默失败）。

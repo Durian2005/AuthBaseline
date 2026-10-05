@@ -45,7 +45,15 @@ import urllib.error
 import urllib.request
 from datetime import datetime, timedelta, timezone
 
-from pymongo import MongoClient
+# 公共探针基础层：库名守卫 + 代理绕过 + 后端启动。
+# 改造前的 `sys.argv[3] if ...` 无白名单校验 —— 传参错位就会把真实库名喂给
+# drop_database()（10-05 事故形态）。现在统一走 resolve_probe_db()。
+from _probe_common import (
+    ProbeDb,
+    resolve_probe_db,
+    start_backend as _common_start_backend,
+    http_call,
+)
 
 try:
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -54,7 +62,7 @@ except Exception:
 
 EXE = sys.argv[1]
 PORT = int(sys.argv[2])
-DB = sys.argv[3] if len(sys.argv) > 3 and not sys.argv[3].startswith("--") else "AuthBaselineLockProbe"
+DB = resolve_probe_db("AuthBaselineLockProbe")
 BASE = "http://127.0.0.1:%d" % PORT
 KEEP = "--keep" in sys.argv
 
@@ -88,11 +96,11 @@ def uptime_ms():
     return int(_k32.GetTickCount64())
 
 
-_cli = MongoClient("mongodb://localhost:27017", serverSelectionTimeoutMS=8000)
-if DB in _cli.list_database_names():
-    _cli.drop_database(DB)
+# 受守卫的测试库句柄：破坏性操作只能经它执行。
+probe_db = ProbeDb(DB)
+if probe_db.drop_if_exists():
     print("已清理旧测试库")
-db = _cli[DB]
+db = probe_db
 
 PASSED, FAILED = [], []
 
@@ -103,18 +111,7 @@ def check(name, cond, detail=""):
 
 
 def call(method, path, body=None, ticket=None, timeout=60):
-    req = urllib.request.Request(BASE + path, method=method)
-    req.add_header("Content-Type", "application/json")
-    if ticket:
-        req.add_header("Authorization", "Bearer " + ticket)
-    data = json.dumps(body).encode() if body is not None else None
-    try:
-        with urllib.request.urlopen(req, data, timeout=timeout) as r:
-            return r.status, json.loads(r.read().decode("utf-8", "replace") or "{}")
-    except urllib.error.HTTPError as e:
-        return e.code, json.loads(e.read().decode("utf-8", "replace") or "{}")
-    except Exception as e:
-        return 0, {"err": str(e)}
+    return http_call(BASE, method, path, body=body, ticket=ticket, timeout=timeout)
 
 
 def login(password, username=VICTIM):
@@ -183,33 +180,36 @@ def wrong_three_times():
 # ---------- 后端起停（加固后的场景需要在不同"墙钟偏移"下各跑一轮） ----------
 
 LOG = os.path.join(tempfile.gettempdir(), "lock_probe_%d.log" % PORT)
+LOG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "buildlogs")
 if os.path.exists(LOG):
     os.remove(LOG)
 
 
-def start_backend(skew_seconds=None):
+def launch_backend(skew_seconds=None):
     """起后端。skew_seconds 非 None 时通过演示开关给"锁定判定看到的墙钟"加偏移。
 
-    逐次追加到同一个日志文件，便于事后回看每一次启动的失败原因。
+    库名注入与日志重定向统一由 _probe_common.start_backend 负责 ——
+    它与探针的 pymongo 用的是**同一个库**（这是 10-05 事故的结构性修复）。
+    本函数只叠加"时钟偏移"这一个专属环境变量。
+    函数名刻意不叫 start_backend：避免遮蔽公共层的同名函数。
     """
-    env = {**os.environ,
-           "ASPNETCORE_URLS": "http://127.0.0.1:%d" % PORT,
-           "MongoDbSettings__DatabaseName": DB}
-    if skew_seconds is None:
-        env.pop(SKEW_ENV, None)
-    else:
-        env[SKEW_ENV] = str(skew_seconds)
-    logf = open(LOG, "ab")
-    proc = subprocess.Popen([EXE], env=env, stdout=logf, stderr=subprocess.STDOUT)
+    extra = {}
+    if skew_seconds is not None:
+        extra[SKEW_ENV] = str(skew_seconds)
+    # 每次启动用独立日志，便于事后回看每一次启动的失败原因。
+    proc = _common_start_backend(EXE, PORT, DB, extra_env=extra,
+                                 log_dir=LOG_DIR,
+                                 log_name="lock_probe_%d.log" % PORT)
     for _ in range(80):
         st, _ = call("GET", "/")
         if st != 0:
-            return proc, logf
+            return proc
         time.sleep(0.5)
     print("  !! 未就绪，日志尾部：")
     proc.kill()
     try:
-        tail = open(LOG, encoding="utf-8", errors="replace").read()[-1500:]
+        logpath = os.path.join(LOG_DIR, "lock_probe_%d.log" % PORT)
+        tail = open(logpath, encoding="utf-8", errors="replace").read()[-1500:]
         print(tail)
     except Exception:
         pass
@@ -217,24 +217,27 @@ def start_backend(skew_seconds=None):
 
 
 def restart(skew_seconds=None):
-    """停掉当前后端并以新的墙钟偏移重启，返回 (proc, logfile, ticket)。"""
-    global _proc, _logf
+    """停掉当前后端并以新的墙钟偏移重启，返回 (proc, ticket)。
+
+    日志文件句柄由 _probe_common 持有，本脚本不再需要自己管 ——
+    每次启动写同一个 buildlogs/lock_probe_<port>.log。
+    """
+    global _proc
     try:
         _proc.kill()
         _proc.wait(timeout=10)
-        _logf.close()
     except Exception:
         pass
     time.sleep(0.8)                      # 让监听端口彻底释放
-    _proc, _logf = start_backend(skew_seconds)
+    _proc = launch_backend(skew_seconds)
     label = "墙钟偏移 %+d 秒" % skew_seconds if skew_seconds is not None else "墙钟正常"
     print("    后端已重启（%s, PID=%d）" % (label, _proc.pid))
-    return _proc, _logf, admin_login()
+    return _proc, admin_login()
 
 
 # ---------- 启动 ----------
 print("\n[1] 启动后端（全新测试库，自动播种 admin）...")
-_proc, _logf = start_backend(None)
+_proc = launch_backend(None)
 print("  就绪 (PID=%d)" % _proc.pid)
 
 admin_tk = admin_login()
@@ -353,7 +356,7 @@ check("审计时间戳与本机真实 UTC 一致（偏差 < 10 秒）→ 无独�
 # ---------- 8. 前拨 10 分钟 ----------
 print("\n[8] 加固：把判定所见的墙钟**前拨 10 分钟**，看锁能不能被提前解开")
 print("    先以墙钟正常重启，重新把靶子账号锁上（锚点由此记录）")
-_, _, admin_tk = restart(None)
+_, admin_tk = restart(None)
 call("POST", "/api/auth/unlock", {"username": VICTIM, "operatorPassword": ADMIN_PW}, ticket=admin_tk)
 wrong_three_times()
 u0 = user_doc()
@@ -361,7 +364,7 @@ end0 = naive(u0.get("lockoutEnd"))
 print("    已锁定，lockoutEnd=%s  锚点 wallAt=%s / uptimeAt=%.1f 秒"
       % (end0, naive(u0.get("lockoutWallAt")), (u0.get("lockoutUptimeAt") or 0) / 1000))
 
-_, _, admin_tk = restart(FORWARD_SKEW)
+_, admin_tk = restart(FORWARD_SKEW)
 seen_now = naive(utc_now()) + timedelta(seconds=FORWARD_SKEW)
 print("    重启后后端看到的「现在」= %s" % seen_now)
 
@@ -399,13 +402,13 @@ check("同一轮锁定内时钟异常只留一条记录（靠 lockoutDriftLogged
 
 # ---------- 10. 回拨 1 小时 ----------
 print("\n[10] 加固：把判定所见的墙钟**回拨 1 小时**，看会不会把锁拖成一小时")
-_, _, admin_tk = restart(None)
+_, admin_tk = restart(None)
 call("POST", "/api/auth/unlock", {"username": VICTIM, "operatorPassword": ADMIN_PW}, ticket=admin_tk)
 wrong_three_times()
 u1 = user_doc()
 end1 = naive(u1.get("lockoutEnd"))
 
-_, _, admin_tk = restart(BACKWARD_SKEW)
+_, admin_tk = restart(BACKWARD_SKEW)
 seen_back = naive(utc_now()) + timedelta(seconds=BACKWARD_SKEW)
 st, b = login(VICTIM_PW)
 rem = (b.get("data") or {}).get("remainingSeconds")   # ASP.NET 默认 camelCase 序列化
@@ -425,7 +428,7 @@ check("该记录归因为「回拨」（CLOCK_ROLLED_BACKWARD），与攻击方�
 print("\n[11] 已知边界：模拟「机器重启过」（把运行时长锚点改成大于当前 uptime）")
 print("     重启会让单调线归零，锚点随之失效 ⇒ 判定退回墙钟。断言它确实如此 ——")
 print("     边界要能被验证，而不是嘴上说挡不住。")
-_, _, admin_tk = restart(FORWARD_SKEW)          # 墙钟仍然前拨，模拟「拨钟 + 重启」
+_, admin_tk = restart(FORWARD_SKEW)          # 墙钟仍然前拨，模拟「拨钟 + 重启」
 db["Users"].update_one({"username": VICTIM},
                        {"$set": {"lockoutUptimeAt": uptime_ms() + 10 * 60 * 1000}})
 st, b = login(VICTIM_PW)
@@ -436,14 +439,13 @@ check("锚点失效后退回墙钟判定 ⇒ 此时拨钟**仍可**解锁（已�
 try:
     _proc.kill()
     _proc.wait(timeout=10)
-    _logf.close()
 except Exception:
     pass
 
 if FAILED or KEEP:
     print("\n  测试库保留：%s" % DB)
 else:
-    _cli.drop_database(DB)
+    probe_db.drop()
     print("\n  测试库已清理：%s" % DB)
 
 print("\n" + "=" * 70)

@@ -22,7 +22,7 @@
 import fs from 'node:fs'
 
 const CDP = process.env.E2E_CDP || 'http://127.0.0.1:9333'
-const OUT = process.env.E2E_SHOTDIR || 'tools'
+const OUT = process.env.E2E_SHOTDIR || 'tools/evidence'
 /**
  * 注：用户名与口令一律走环境变量传入，**不留默认值**。
  * 两头都试过，都不行：

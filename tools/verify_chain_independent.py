@@ -101,7 +101,12 @@ print(" 篡改告警 (AUDIT_TAMPERED) 固化情况")
 print("=" * 70)
 print("  总数            :", len(tampered))
 print("  全部在链上      :", all(compute_hash(d) == d.get("selfHash") for d in tampered))
-print("  seq 范围        : %s ~ %s" % (tampered[0]["seq"], tampered[-1]["seq"]))
+# "当前无告警"是**健康状态**，不是异常 —— 早先这里直接取 tampered[0]，
+# 在干净的库上必然 IndexError 崩掉，把"链完好"误报成"脚本出错"。
+if tampered:
+    print("  seq 范围        : %s ~ %s" % (tampered[0]["seq"], tampered[-1]["seq"]))
+else:
+    print("  seq 范围        : —（当前链上没有篡改告警记录，属正常状态）")
 
 # 按断裂点分组，识别"篡改事件轮次"
 groups = OrderedDict()
@@ -117,32 +122,40 @@ for k, v in sorted(groups.items(), key=lambda kv: kv[1][0]["seq"]):
              v[-1]["seq"], str(v[-1]["timestamp"])[:19]))
 
 # ---- 最后一轮"改了又改回"的时间线 ----
-print()
-print("=" * 70)
-print(" 最后一轮完整时间线（改了 → 告警 → 改回 → 恢复）")
-print("=" * 70)
-last_tampered_seq = tampered[-1]["seq"]
-window = [d for d in docs if last_tampered_seq - 12 <= d["seq"] <= last_tampered_seq + 12]
-for d in window:
-    mark = ""
-    if d["action"] == "AUDIT_TAMPERED":
-        mark = "  ← 篡改告警"
-    elif d["action"] == "AUDIT_VERIFY":
-        mark = "  ← 完整性校验 %s" % ("通过(链已恢复)" if d.get("result") == "成功" else "失败(链仍断)")
-    print("  seq=%-5s %s  %-16s %-6s %s%s"
-          % (d["seq"], str(d["timestamp"])[:19], d["action"], d.get("result"),
-             d.get("operatorName"), mark))
+# 无告警时这段分析没有主角，直接跳过 —— 早先会取 tampered[-1] 而 IndexError。
+if not tampered:
+    print()
+    print("=" * 70)
+    print(" 无篡改告警，跳过时间线分析与巡检节奏统计")
+    print(" （链上没有任何 AUDIT_TAMPERED，说明库未被直接改动过）")
+    print("=" * 70)
+else:
+    print()
+    print("=" * 70)
+    print(" 最后一轮完整时间线（改了 → 告警 → 改回 → 恢复）")
+    print("=" * 70)
+    last_tampered_seq = tampered[-1]["seq"]
+    window = [d for d in docs if last_tampered_seq - 12 <= d["seq"] <= last_tampered_seq + 12]
+    for d in window:
+        mark = ""
+        if d["action"] == "AUDIT_TAMPERED":
+            mark = "  ← 篡改告警"
+        elif d["action"] == "AUDIT_VERIFY":
+            mark = "  ← 完整性校验 %s" % ("通过(链已恢复)" if d.get("result") == "成功" else "失败(链仍断)")
+        print("  seq=%-5s %s  %-16s %-6s %s%s"
+              % (d["seq"], str(d["timestamp"])[:19], d["action"], d.get("result"),
+                 d.get("operatorName"), mark))
 
-# ---- 相邻 AUDIT_TAMPERED 的时间间隔 ----
-print()
-print("  相邻两次篡改告警的时间间隔（秒）—— 验证是否按 30 秒巡检节奏写入：")
-gaps = []
-for a, b in zip(tampered, tampered[1:]):
-    if a.get("target") == b.get("target"):
-        gaps.append((b["timestamp"] - a["timestamp"]).total_seconds())
-if gaps:
-    from collections import Counter
-    c = Counter(round(g) for g in gaps)
-    for gap, n in sorted(c.items()):
-        print("    %4ds 出现 %d 次" % (gap, n))
-    print("  平均间隔 = %.1f 秒" % (sum(gaps) / len(gaps)))
+    # ---- 相邻 AUDIT_TAMPERED 的时间间隔 ----
+    print()
+    print("  相邻两次篡改告警的时间间隔（秒）—— 验证是否按 30 秒巡检节奏写入：")
+    gaps = []
+    for a, b in zip(tampered, tampered[1:]):
+        if a.get("target") == b.get("target"):
+            gaps.append((b["timestamp"] - a["timestamp"]).total_seconds())
+    if gaps:
+        from collections import Counter
+        c = Counter(round(g) for g in gaps)
+        for gap, n in sorted(c.items()):
+            print("    %4ds 出现 %d 次" % (gap, n))
+        print("  平均间隔 = %.1f 秒" % (sum(gaps) / len(gaps)))
