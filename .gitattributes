@@ -32,3 +32,13 @@
 *.zip binary
 *.gz binary
 *.pdf binary
+
+# macOS 图标（虽然本仓库只出 Windows 安装包，但 Tauri 的 icons/ 目录里带着它）。
+# 它虽然能被 git 的自动探测判为二进制，但显式声明后行为才不依赖启发式。
+*.icns binary
+
+# 凭据类：DPAPI 密文与 PKCS#12 证书库。本项目约定它们**不入库**，
+# 这里再声明一次是为了万一有人误 add 时不会被当成文本转换（转换会直接损坏文件）。
+*.dpapi binary
+*.pfx binary
+*.p12 binary
