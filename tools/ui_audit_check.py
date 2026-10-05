@@ -6,9 +6,14 @@
   所以"起桌面端 + 连 CDP + 跑断言 + 关进程"必须在同一个进程内完成。
 
 用法：
-  python tools/ui_audit_check.py
+  python tools/ui_audit_check.py [--no-seed]
 环境变量：
   E2E_APPDIR  安装目录，默认 %LOCALAPPDATA%\\AuthBaseline
+
+⚠️ 本脚本会**向真实库写入 1 条审计**：跑断言前先发一次改密请求自造「改密失败」记录
+   （见 ui_audit_events.mjs 顶部说明）。造法是最温和的一条路径 —— 新旧口令传同一个值，
+   后端稳定走到 PASSWORD_REUSED 分支，只记失败，**不改口令、不累加失败次数、不触发锁定**。
+   --no-seed 可跳过写库（此时若库里没有改密失败记录，相关断言会失败）。
 """
 import os
 import subprocess
@@ -65,6 +70,9 @@ def main():
     env2 = dict(os.environ)
     env2["E2E_CDP"] = "http://127.0.0.1:%d" % PORT
     env2["E2E_SHOTDIR"] = str(ROOT / "tools" / "evidence")
+    if "--no-seed" in sys.argv:
+        env2["E2E_NO_SEED"] = "1"
+        print("    --no-seed：本次不写库，改为只读验证")
     r = subprocess.run(
         [NODE, str(ROOT / "tools" / "ui_audit_events.mjs")],
         cwd=str(ROOT), env=env2,

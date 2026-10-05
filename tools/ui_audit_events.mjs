@@ -18,6 +18,12 @@
  * 这样测的仍是真实打包后的前端产物，而不是 dev server。
  *
  * 用法（必须由 Python 侧在同一进程内先启动应用，见 tools/ui_audit_check.py）。
+ *
+ * ⚠️ 前置数据自造（2026-10-06 加）：本脚本断言「能筛出改密失败」，而这条记录原本靠
+ *    演示时**手工制造**留下 —— 库一旦被清空或换库，断言就以 0 行失败，看着像回归，
+ *    实为前置数据缺失（10-05 清库后就是这样）。现在脚本自己补一条：发一次改密请求，
+ *    新旧口令给成**同一个值** ⇒ 走 PASSWORD_REUSED 分支，只写审计，**不改口令、
+ *    不累加失败次数、不触发锁定**。设 E2E_NO_SEED=1 可跳过（只读模式）。
  */
 import fs from 'node:fs'
 
@@ -231,6 +237,39 @@ async function main() {
     }
   `)
   check('已建立登录会话', after.ticket === true, `ticket=${after.ticket}`)
+
+  // ---- 前置数据自造：先写一条「改密失败」审计 ----
+  //
+  // 为什么必须自造：下面几条断言要求"按动作筛「改密失败」有数据"。这条记录原先
+  // 依赖演示时手工制造，一旦库被清空/更换就变成 0 行 —— 表现和"筛选功能坏了"一模一样，
+  // 但根因完全不同（10-05 清库后正是如此）。
+  //
+  // 造法刻意选最温和的一条路径：新旧口令传**同一个值**，后端在"旧口令验过之后"才判
+  // 新旧相同，于是稳定落到 PASSWORD_REUSED 分支 —— 只写一条失败审计，
+  // **不改口令、不累加失败次数、不触发锁定**。
+  // 万一 E2E_PASS 已不是当前口令，会落到 WRONG_OLD_PASSWORD，同样是
+  // CHANGE_PASSWORD_FAILED，一样满足断言（该接口也不累加 failedLoginAttempts）。
+  if (process.env.E2E_NO_SEED) {
+    console.log('  跳过自造前置数据（E2E_NO_SEED 已设）—— 库里若无改密失败记录，相关断言会失败')
+  } else {
+    const seeded = await evalJs(c, `
+      const r = await fetch('/api/auth/change-password', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          username: ${JSON.stringify(USER)},
+          oldPassword: ${JSON.stringify(PASS)},
+          newPassword: ${JSON.stringify(PASS)}
+        })
+      })
+      let j = null
+      try { j = await r.json() } catch {}
+      return { status: r.status, code: (j && j.code) || '', message: (j && j.message) || '' }
+    `)
+    console.log(`    自造前置数据 -> HTTP ${seeded.status} ${seeded.code} ${seeded.message}`)
+    check('自造出一条「改密失败」审计（供下面的筛选断言使用）', seeded.status >= 400,
+      `HTTP ${seeded.status} code=${seeded.code}`)
+  }
 
   // 点侧边栏"审计日志"
   const clicked = await evalJs(c, `
