@@ -110,7 +110,10 @@ public class Program
         builder.Services.AddEndpointsApiExplorer();
         builder.Services.AddSwaggerGen();
 
-        // 注册 pepper（单例）：MongoDbService 与 AuthController 都依赖它。
+        // AuditWriter 需要读当前请求的来源 IP / User-Agent，因此要有 HttpContext 访问器。
+        builder.Services.AddHttpContextAccessor();
+
+        // 注册 pepper（单例）：MongoDbService 与各控制器基类都依赖它。
         builder.Services.AddSingleton(pepper);
 
         // 传输层状态：**降级运行时也必须注册** —— 否则 /api/auth/transport 在明文模式下会 500，
@@ -146,6 +149,9 @@ public class Program
         // AuditService 由它统一串行化哈希链写入；SessionService 负责票据签发与校验。
         builder.Services.AddSingleton<AuditService>();
         builder.Services.AddSingleton<SessionService>();
+
+        // 审计写入的统一出口：自动补齐来源 IP / User-Agent，控制器只描述"发生了什么"。
+        builder.Services.AddSingleton<AuditWriter>();
 
         // 允许前端跨域访问
         builder.Services.AddCors(options =>

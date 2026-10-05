@@ -18,12 +18,16 @@ public class AuditController : ControllerBase
     private readonly AuditService _audit;
     private readonly SessionService _sessions;
     private readonly MongoDbService _db;
+    /// <summary>审计写入的统一出口：自动补齐来源 IP / User-Agent。</summary>
+    private readonly AuditWriter _auditWriter;
 
-    public AuditController(AuditService audit, SessionService sessions, MongoDbService db)
+    public AuditController(AuditService audit, SessionService sessions, MongoDbService db,
+        AuditWriter auditWriter)
     {
         _audit = audit;
         _sessions = sessions;
         _db = db;
+        _auditWriter = auditWriter;
     }
 
     private string? ReadTicket()
@@ -34,13 +38,6 @@ public class AuditController : ControllerBase
         return raw.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)
             ? raw[prefix.Length..].Trim()
             : null;
-    }
-
-    private string ClientIp()
-    {
-        var forwarded = Request.Headers["X-Forwarded-For"].ToString();
-        if (!string.IsNullOrWhiteSpace(forwarded)) return forwarded.Split(',')[0].Trim();
-        return HttpContext.Connection.RemoteIpAddress?.ToString() ?? "unknown";
     }
 
     /**
@@ -65,7 +62,7 @@ public class AuditController : ControllerBase
         if (auth.Success) return (auth.User, null);
 
         var resp = new ApiResponse { Success = false, Code = auth.ReasonCode, Message = auth.Message };
-        await _audit.WriteAsync(new AuditEntry
+        await _auditWriter.WriteAsync(new AuditEntry
         {
             OperatorId = auth.User?.Id ?? "anonymous",
             OperatorName = auth.User?.Username ?? "anonymous",
@@ -86,9 +83,7 @@ public class AuditController : ControllerBase
             StatusAfter = auth.User?.Status.ToString() ?? "N/A",
             Target = target,
             Result = AuditResult.Failed,
-            ReasonCode = auth.ReasonCode,
-            SourceIp = ClientIp(),
-            SourceUserAgent = Request.Headers.UserAgent.ToString()
+            ReasonCode = auth.ReasonCode
         });
         return (null, StatusCode(auth.HttpStatus, resp));
     }
@@ -114,7 +109,7 @@ public class AuditController : ControllerBase
         // 这样"系统曾经检测到篡改"本身就是一条不可否认的审计记录。
         if (!result.Intact)
         {
-            await _audit.WriteAsync(new AuditEntry
+            await _auditWriter.WriteAsync(new AuditEntry
             {
                 OperatorId = auditor!.Id,
                 OperatorName = auditor.Username,
@@ -125,13 +120,11 @@ public class AuditController : ControllerBase
                 StatusAfter = "TAMPERED",
                 Target = $"seq:{result.FirstBrokenSeq}",
                 Result = AuditResult.Failed,
-                ReasonCode = AuditReason.ChainBroken,
-                SourceIp = ClientIp(),
-                SourceUserAgent = Request.Headers.UserAgent.ToString()
+                ReasonCode = AuditReason.ChainBroken
             });
         }
 
-        await _audit.WriteAsync(new AuditEntry
+        await _auditWriter.WriteAsync(new AuditEntry
         {
             OperatorId = auditor!.Id,
             OperatorName = auditor.Username,
@@ -142,9 +135,7 @@ public class AuditController : ControllerBase
             StatusAfter = result.Intact ? "INTACT" : "TAMPERED",
             Target = "audit/verify",
             Result = result.Intact ? AuditResult.Success : AuditResult.Failed,
-            ReasonCode = result.Intact ? "" : AuditReason.ChainBroken,
-            SourceIp = ClientIp(),
-            SourceUserAgent = Request.Headers.UserAgent.ToString()
+            ReasonCode = result.Intact ? "" : AuditReason.ChainBroken
         });
 
         return Ok(new ApiResponse<ChainVerifyResult>
@@ -167,7 +158,7 @@ public class AuditController : ControllerBase
         return Ok(new ApiResponse<object>
         {
             Success = true,
-            Code = "OK",
+            Code = BusinessCode.Ok,
             Data = shards
         });
     }
@@ -184,7 +175,7 @@ public class AuditController : ControllerBase
 
         var (items, total) = await _audit.QueryAsync(shard, keyword, action, result, page, pageSize, includeArchived);
 
-        await _audit.WriteAsync(new AuditEntry
+        await _auditWriter.WriteAsync(new AuditEntry
         {
             OperatorId = auditor!.Id,
             OperatorName = auditor.Username,
@@ -194,15 +185,13 @@ public class AuditController : ControllerBase
             Response = new { Returned = items.Count, Total = total },
             StatusAfter = "N/A",
             Target = shard ?? "all",
-            Result = AuditResult.Success,
-            SourceIp = ClientIp(),
-            SourceUserAgent = Request.Headers.UserAgent.ToString()
+            Result = AuditResult.Success
         });
 
         return Ok(new ApiResponse<object>
         {
             Success = true,
-            Code = "OK",
+            Code = BusinessCode.Ok,
             Data = new { Items = items, Total = total, Page = page, PageSize = pageSize }
         });
     }
@@ -218,7 +207,7 @@ public class AuditController : ControllerBase
         return Ok(new ApiResponse<object>
         {
             Success = true,
-            Code = "OK",
+            Code = BusinessCode.Ok,
             Data = new
             {
                 Total = total,
@@ -230,6 +219,46 @@ public class AuditController : ControllerBase
                 AccessDenied = denied,
                 LatestDeniedSeq = latestDeniedSeq
             }
+        });
+    }
+
+    /**
+     * 审计日志查询（兼容旧路径 api/auth/logs）。
+     *
+     * 旧版是 Limit(200) 硬编码 —— 写多少都只看得到最近 200 条，"撑得住"无从谈起。
+     * 现在改为分页 + 跨分片，与 api/audit/logs 走同一套逻辑。
+     * 保留这条路径是为了不让既有调用方失效（回归脚本 audit_e2e_test.py 会直接打它）。
+     *
+     * 路由写在动作上且以 / 开头 ⇒ 是**绝对路径**，不会被控制器的 api/audit 前缀接管，
+     * 这也是"把旧入口收归审计域"这件事能成立的前提。
+     *
+     * 鉴权失败时写入的是 AUDIT_ACCESS_DENIED 而不是 AUDIT_QUERY：
+     * 这里记录的是"有人试图看审计数据但被拒绝"这件事本身。
+     * 若沿用 AuditQuery，拒绝事件就会和正常查询混在同一个动作下，
+     * 只能靠 result=失败 间接区分，验收时无法一条查询列出全部越权尝试
+     * —— 用 curl / PowerShell 直接打这个地址的被拒记录也会因此漏掉。
+     */
+    [HttpGet("/api/auth/logs")]
+    public async Task<IActionResult> LegacyAuthLogs([FromQuery] string? shard,
+        [FromQuery] string? keyword, [FromQuery] string? action, [FromQuery] string? result,
+        [FromQuery] int page = 1, [FromQuery] int pageSize = 50,
+        [FromQuery] bool includeArchived = true)
+    {
+        var (auditor, deny) = await RequireAuditAsync(AuditAction.AuditAccessDenied, "logs");
+        if (deny != null) return deny;
+
+        var (items, total) = await _audit.QueryAsync(shard, keyword, action, result, page, pageSize, includeArchived);
+
+        await _auditWriter.WriteAsync(auditor!.Id, auditor.Username, AuditAction.AuditQuery, "N/A",
+            new { shard, keyword, action, result, page, pageSize },
+            new { Returned = items.Count, Total = total },
+            "N/A", "logs", AuditResult.Success);
+
+        return Ok(new ApiResponse<object>
+        {
+            Success = true,
+            Code = BusinessCode.Ok,
+            Data = new { Items = items, Total = total, Page = page, PageSize = pageSize }
         });
     }
 }
