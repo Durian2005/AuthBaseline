@@ -4,11 +4,13 @@ import AppIcon from '../components/AppIcon.vue'
 import StatusBadge from '../components/StatusBadge.vue'
 import Spinner from '../components/Spinner.vue'
 import ConfirmDialog from '../components/ConfirmDialog.vue'
-import AppWindow from '../components/AppWindow.vue'
-import PasswordField from '../components/PasswordField.vue'
 import { useSessionStore } from '../stores/session'
 import { useToastStore } from '../stores/toast'
 import { formatDateTime, formatDuration } from '../utils/format'
+import CreateAccountDialog from '../components/users/CreateAccountDialog.vue'
+import SetRoleDialog from '../components/users/SetRoleDialog.vue'
+import FreezeAccountDialog from '../components/users/FreezeAccountDialog.vue'
+import { dormantText, roleLabelOf } from '../utils/userDisplay'
 import { now } from '../composables/clock'
 
 const session = useSessionStore()
@@ -40,7 +42,8 @@ const FILTERS = [
   { key: 'all', label: '全部' },
   { key: 'Pending', label: '待审核' },
   { key: 'Enabled', label: '启用' },
-  { key: 'Locked', label: '锁定' }
+  { key: 'Locked', label: '锁定' },
+  { key: 'Disabled', label: '已冻结' }
 ]
 
 const filteredUsers = computed(() => {
@@ -78,6 +81,49 @@ async function run(action, username) {
   }
 }
 
+/* ---------------- 沉睡账号治理（冻结 / 解除冻结） ----------------
+ * 判定阈值与基准时间全部由后端下发（session.dormant），
+ * 前端只负责展示与发起处置 —— 不自己算"差多少天"，
+ * 否则会出现"后端判沉睡、前端按另一套阈值显示"的口径分歧。
+ */
+
+/** 是否被冻结（后端 Status=Disabled 的语义化别名） */
+function isFrozen(user) {
+  return user?.status === 'Disabled'
+}
+
+/**
+ * 能否冻结该账号。
+ *
+ * 三个条件缺一不可，与后端 DormantFreeze 的校验一一对应：
+ *   · 确实处于沉睡候选（后端已在 candidates 里做过筛选，这里是二次确认）；
+ *   · 角色不受保护（管理账号永不参与冻结）；
+ *   · 不是操作者自己。
+ * 前端隐藏按钮只是提前告知，真正的把关在后端 —— 手敲请求一样会被拒并留痕。
+ */
+function canFreeze(user) {
+  if (!user) return false
+  if (user.dormantProtected) return false
+  if (isSelf(user)) return false
+  return user.dormant === true && user.status === 'Enabled'
+}
+
+/** 能否解除冻结：被冻结 + 有处置权限（与注销共用同一套范围判定） */
+function canUnfreeze(user) {
+  if (!user || !isFrozen(user)) return false
+  if (isSelf(user)) return false
+  if (session.isRoleAdmin) return true
+  return user.role === 'User' || user.role === 'UserAdmin'
+}
+
+
+const freezeTarget = ref(null)
+
+/** 打开冻结确认弹窗（表单与提交由 FreezeAccountDialog 自持） */
+function openFreeze(user) {
+  freezeTarget.value = user
+}
+
 /* ---------------- 注销确认 ---------------- */
 const target = ref(null)
 const deleting = ref(false)
@@ -112,16 +158,6 @@ async function confirmDelete() {
 
 /* ---------------- 角色显示与处置权限 ---------------- */
 
-const ROLE_TAGS = {
-  Admin: '管理员',
-  UserAdmin: '用户管理员',
-  AuditAdmin: '审计管理员',
-  User: '普通用户'
-}
-
-function roleTag(user) {
-  return ROLE_TAGS[user?.role] ?? '普通用户'
-}
 
 /** 这一行是不是操作者自己 —— 自己永远是"受保护"的那一行。 */
 function isSelf(user) {
@@ -159,38 +195,10 @@ function canDelete(user) {
  * 仅凭会话票据不足以防冒用，所以这里必须再输一次自己的口令。
  */
 const showCreate = ref(false)
-const createForm = ref({ username: '', password: '', role: 'UserAdmin', operatorPassword: '' })
-const createError = ref('')
-const creating = ref(false)
 
+/** 打开新建账号弹窗（表单与提交由 CreateAccountDialog 自持） */
 function openCreate() {
-  createForm.value = { username: '', password: '', role: 'UserAdmin', operatorPassword: '' }
-  createError.value = ''
   showCreate.value = true
-}
-
-async function confirmCreate() {
-  const f = createForm.value
-  if (!f.username.trim() || !f.password || !f.operatorPassword) {
-    createError.value = '请填写账号、初始口令与您本人的登录口令'
-    return
-  }
-  creating.value = true
-  createError.value = ''
-  try {
-    const res = await session.createAccount(
-      f.username.trim(),
-      f.password,
-      f.role,
-      f.operatorPassword
-    )
-    toast.success(res?.message || '账号已创建')
-    showCreate.value = false
-  } catch (err) {
-    createError.value = err?.message || '创建失败'
-  } finally {
-    creating.value = false
-  }
 }
 
 /* ---------------- 变更角色 ----------------
@@ -198,41 +206,10 @@ async function confirmCreate() {
  * 变更成功后**对方**需要重新登录（后端会吊销其票据），操作者自己的会话不受影响。
  */
 const roleTarget = ref(null)
-const roleForm = ref({ role: 'UserAdmin', operatorPassword: '' })
-const roleError = ref('')
-const savingRole = ref(false)
 
+/** 打开变更角色弹窗（表单与提交由 SetRoleDialog 自持） */
 function openRole(user) {
   roleTarget.value = user
-  // 默认给一个"反直觉但最常用"的预设：从非审计岗切到审计岗
-  roleForm.value = {
-    role: user.role === 'AuditAdmin' ? 'UserAdmin' : 'AuditAdmin',
-    operatorPassword: ''
-  }
-  roleError.value = ''
-}
-
-async function confirmRole() {
-  if (!roleTarget.value) return
-  if (!roleForm.value.operatorPassword) {
-    roleError.value = '请输入您本人的登录口令'
-    return
-  }
-  savingRole.value = true
-  roleError.value = ''
-  try {
-    const res = await session.setRole(
-      roleTarget.value.username,
-      roleForm.value.role,
-      roleForm.value.operatorPassword
-    )
-    toast.success(res?.message || '角色已变更')
-    roleTarget.value = null
-  } catch (err) {
-    roleError.value = err?.message || '变更失败'
-  } finally {
-    savingRole.value = false
-  }
 }
 
 async function refresh() {
@@ -407,7 +384,7 @@ onMounted(() => {
               </td>
               <td>
                 <span class="tag" :class="{ 'tag--audit': u.role === 'AuditAdmin' }">
-                  {{ roleTag(u) }}
+                  {{ roleLabelOf(u) }}
                 </span>
               </td>
               <!-- 后端只返回脱敏邮箱：管理员能看到"绑没绑、验没验"，但拿不到完整地址。
@@ -488,6 +465,143 @@ onMounted(() => {
       </div>
     </section>
 
+    <!-- 沉睡账号治理 -->
+    <section class="panel">
+      <div class="panel__head">
+        <h3 class="panel__title">
+          <AppIcon name="clock" :size="15" />
+          <span>长期未登录账号</span>
+          <span v-if="session.dormantCandidates.length" class="chip">
+            {{ session.dormantCandidates.length }}
+          </span>
+        </h3>
+        <p class="panel__hint">
+          超过 <strong>{{ session.dormantThresholdDays ?? '—' }}</strong> 天未登录即为沉睡。
+          冻结后该账号无法登录，但随时可解除，<strong>不会删除任何数据</strong>。
+        </p>
+      </div>
+
+      <!-- 可冻结的普通账号 -->
+      <p class="panel__meta">
+        沉睡候选 {{ session.dormantCandidates.length }} 个
+        <span v-if="session.frozenAccounts.length"> · 已冻结 {{ session.frozenAccounts.length }} 个</span>
+      </p>
+
+      <div v-if="session.dormantCandidates.length" class="table-wrap">
+        <table class="table table--dense">
+          <thead>
+            <tr>
+              <th style="width: 26%">用户名</th>
+              <th style="width: 110px">角色</th>
+              <th>上次登录</th>
+              <th style="width: 120px">操作</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-for="u in session.dormantCandidates" :key="u.id">
+              <td class="cell-name selectable">{{ u.username }}</td>
+              <td><span class="tag">{{ roleLabelOf(u) }}</span></td>
+              <td class="table__mono">
+                <span class="stale">{{ dormantText(u) }}</span>
+                <span v-if="u.lastLoginAt" class="muted"> · {{ formatDateTime(u.lastLoginAt) }}</span>
+              </td>
+              <td>
+                <button
+                  v-if="canFreeze(u)"
+                  type="button"
+                  class="btn btn--sm btn--warn"
+                  :disabled="busyUser === u.username"
+                  @click="openFreeze(u)"
+                >
+                  <AppIcon name="lock" :size="13" />
+                  <span>冻结</span>
+                </button>
+                <!-- 不可冻结的行也要说清原因，别只留一个空单元格 -->
+                <span v-else class="muted">{{ isSelf(u) ? '受保护' : '不参与自动判定' }}</span>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div v-else class="empty">
+        <AppIcon name="check-circle" :size="22" />
+        <p class="empty__title">没有需要处置的沉睡账号</p>
+        <p class="empty__desc">所有普通账号近期都有活动记录</p>
+      </div>
+
+      <!-- 已冻结账号：可解除 -->
+      <template v-if="session.frozenAccounts.length">
+        <p class="panel__meta panel__meta--divider">已冻结账号（可解除）</p>
+        <div class="table-wrap">
+          <table class="table table--dense">
+            <thead>
+              <tr>
+                <th style="width: 26%">用户名</th>
+                <th style="width: 110px">角色</th>
+                <th>上次登录</th>
+                <th style="width: 120px">操作</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="u in session.frozenAccounts" :key="u.id">
+                <td class="cell-name selectable">{{ u.username }}</td>
+                <td><span class="tag">{{ roleLabelOf(u) }}</span></td>
+                <td class="table__mono">
+                  <span>{{ dormantText(u) }}</span>
+                </td>
+                <td>
+                  <button
+                    v-if="canUnfreeze(u)"
+                    type="button"
+                    class="btn btn--sm"
+                    :disabled="busyUser === u.username"
+                    @click="run('unlock', u.username)"
+                  >
+                    <Spinner v-if="busyUser === u.username" :size="12" />
+                    <AppIcon v-else name="unlock" :size="13" />
+                    <span>解除冻结</span>
+                  </button>
+                  <span v-else class="muted">无权限</span>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </template>
+
+      <!-- 管理账号：达到阈值也只提示，不参与冻结 -->
+      <template v-if="session.dormantProtected.length">
+        <p class="panel__meta panel__meta--divider">
+          管理账号（不参与冻结）
+        </p>
+        <div class="table-wrap">
+          <table class="table table--dense">
+            <thead>
+              <tr>
+                <th style="width: 26%">用户名</th>
+                <th style="width: 110px">角色</th>
+                <th>上次登录</th>
+                <th style="width: 200px">说明</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="u in session.dormantProtected" :key="u.id">
+                <td class="cell-name selectable">{{ u.username }}</td>
+                <td>
+                  <span class="tag" :class="{ 'tag--audit': u.role === 'AuditAdmin' }">
+                    {{ roleLabelOf(u) }}
+                  </span>
+                </td>
+                <td class="table__mono">{{ dormantText(u) }}</td>
+                <td class="muted">管理角色，冻结会影响系统职责，故不参与自动治理</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </template>
+    </section>
+
     <!-- 注销确认 -->
     <ConfirmDialog
       :open="!!target"
@@ -502,137 +616,17 @@ onMounted(() => {
       @confirm="confirmDelete"
     />
 
+    <!-- 冻结确认：可逆操作，用 warn 色调而非 danger，
+         与"注销"（永久、红色）在视觉上明确区分 -->
+    <FreezeAccountDialog v-model:target="freezeTarget" />
+
     <!-- 新建账号：用户管理员 / 审计管理员。
          这两类账号不需要邮箱，建号即可登录；但需二次校验操作者本人口令。 -->
-    <AppWindow
-      :open="showCreate"
-      title="新建账号"
-      icon="user-plus"
-      tone="primary"
-      :width="460"
-      :close-on-overlay="!creating"
-      @close="!creating && (showCreate = false)"
-    >
-      <div class="form">
-        <div class="form__notice">
-          <AppIcon name="info" :size="15" :stroke-width="2" />
-          <span>
-            新建账号<strong>无需绑定邮箱</strong>，创建后即可用初始口令登录。
-            这两类账号与管理员账号权限不同，请按职责选择角色。
-          </span>
-        </div>
-
-        <div v-if="createError" class="alert" role="alert">
-          <AppIcon name="alert-triangle" :size="15" :stroke-width="2" />
-          <span class="selectable">{{ createError }}</span>
-        </div>
-
-        <label class="field">
-          <span class="field__label">账号</span>
-          <input
-            v-model="createForm.username"
-            class="input"
-            type="text"
-            placeholder="例如 auditor01"
-            autocomplete="off"
-            spellcheck="false"
-          />
-        </label>
-
-        <label class="field">
-          <span class="field__label">角色</span>
-          <select v-model="createForm.role" class="input select">
-            <option value="UserAdmin">用户管理员 —— 可管理用户，不能查看审计日志</option>
-            <option value="AuditAdmin">审计管理员 —— 只能查看审计日志，不能管理用户</option>
-          </select>
-        </label>
-
-        <PasswordField
-          v-model="createForm.password"
-          label="初始口令"
-          placeholder="至少 8 位，含大小写字母与数字"
-          autocomplete="new-password"
-        />
-
-        <PasswordField
-          v-model="createForm.operatorPassword"
-          label="您的登录口令（二次确认）"
-          placeholder="输入你自己的密码以确认身份"
-          autocomplete="off"
-          :invalid="!!createError"
-          :error="createError"
-          @enter="confirmCreate"
-        />
-      </div>
-
-      <template #footer>
-        <button type="button" class="btn" :disabled="creating" @click="showCreate = false">
-          取消
-        </button>
-        <button type="button" class="btn btn--primary" :disabled="creating" @click="confirmCreate">
-          <Spinner v-if="creating" :size="13" />
-          <span>创建账号</span>
-        </button>
-      </template>
-    </AppWindow>
+    <CreateAccountDialog v-model:open="showCreate" />
 
     <!-- 变更角色：把某位账号指定为审计管理员（或撤销审计权限）。
          角色任免是系统内权限最高的操作，需二次校验操作者本人口令。 -->
-    <AppWindow
-      :open="!!roleTarget"
-      title="变更账号角色"
-      icon="swap"
-      tone="warn"
-      :width="460"
-      :close-on-overlay="!savingRole"
-      @close="!savingRole && (roleTarget = null)"
-    >
-      <div v-if="roleTarget" class="form">
-        <div class="form__notice">
-          <AppIcon name="alert-triangle" :size="15" :stroke-width="2" />
-          <span>
-            正在变更「<strong>{{ roleTarget.username }}</strong>」的角色
-            （当前：{{ roleTag(roleTarget) }}）。变更后该账号的登录状态会被作废，
-            需要重新登录才能生效。
-          </span>
-        </div>
-
-        <div v-if="roleError" class="alert" role="alert">
-          <AppIcon name="alert-triangle" :size="15" :stroke-width="2" />
-          <span class="selectable">{{ roleError }}</span>
-        </div>
-
-        <label class="field">
-          <span class="field__label">变更为</span>
-          <select v-model="roleForm.role" class="input select">
-            <option value="AuditAdmin">审计管理员 —— 只能查看审计日志，不能管理用户</option>
-            <option value="UserAdmin">用户管理员 —— 可管理用户，不能查看审计日志</option>
-            <option value="User">普通用户 —— 撤销全部管理能力</option>
-          </select>
-        </label>
-
-        <PasswordField
-          v-model="roleForm.operatorPassword"
-          label="您的登录口令（二次确认）"
-          placeholder="输入你自己的密码以确认身份"
-          autocomplete="off"
-          :invalid="!!roleError"
-          :error="roleError"
-          autofocus
-          @enter="confirmRole"
-        />
-      </div>
-
-      <template #footer>
-        <button type="button" class="btn" :disabled="savingRole" @click="roleTarget = null">
-          取消
-        </button>
-        <button type="button" class="btn btn--primary" :disabled="savingRole" @click="confirmRole">
-          <Spinner v-if="savingRole" :size="13" />
-          <span>确认变更</span>
-        </button>
-      </template>
-    </AppWindow>
+    <SetRoleDialog v-model:target="roleTarget" />
   </div>
 </template>
 
@@ -774,6 +768,33 @@ onMounted(() => {
   color: var(--c-text-muted);
 }
 
+/* 分组之间的分隔标题：让"候选 / 已冻结 / 管理账号"三段看得出一段一段 */
+.panel__meta--divider {
+  padding-top: var(--sp-2);
+  border-top: 1px solid var(--c-border);
+  margin-top: var(--sp-2);
+  font-weight: 600;
+  color: var(--c-text-subtle);
+}
+
+/* 沉睡时长用警示色：这是管理员需要立刻注意到的信号 */
+.stale {
+  color: var(--st-locked-fg);
+  font-weight: 600;
+}
+
+/* 页头下方的口径说明（阈值 + 可逆性），措辞必须让"不会删数据"一眼可见 */
+.panel__hint {
+  flex: 1;
+  max-width: 560px;
+  font-size: var(--fs-sm);
+  color: var(--c-text-muted);
+  line-height: 1.5;
+}
+.panel__hint strong {
+  color: var(--c-text);
+}
+
 .select {
   height: 28px;
   width: auto;
@@ -781,42 +802,6 @@ onMounted(() => {
   cursor: pointer;
 }
 
-/* ---------- 新建账号 / 变更角色弹窗 ---------- */
-.form {
-  display: flex;
-  flex-direction: column;
-  gap: var(--sp-3);
-}
-
-.form__notice {
-  display: flex;
-  align-items: flex-start;
-  gap: var(--sp-2);
-  padding: var(--sp-2) var(--sp-3);
-  border: 1px solid color-mix(in srgb, var(--st-pending-fg) 34%, transparent);
-  border-radius: var(--r-md);
-  background: var(--st-pending-bg);
-  color: var(--c-text);
-  font-size: var(--fs-sm);
-  line-height: 1.55;
-}
-.form__notice > svg {
-  flex-shrink: 0;
-  margin-top: 2px;
-  color: var(--st-pending-fg);
-}
-
-.field {
-  display: flex;
-  flex-direction: column;
-  gap: var(--sp-2);
-}
-
-.field__label {
-  font-size: var(--fs-sm);
-  font-weight: 600;
-  color: var(--c-text-muted);
-}
 
 /* ---------- 页头操作区 ---------- */
 .head__actions {
@@ -826,21 +811,4 @@ onMounted(() => {
   flex-shrink: 0;
 }
 
-.alert {
-  display: flex;
-  align-items: flex-start;
-  gap: var(--sp-2);
-  padding: var(--sp-2) var(--sp-3);
-  border-radius: var(--r-md);
-  border: 1px solid color-mix(in srgb, var(--c-danger) 30%, transparent);
-  background: var(--c-danger-soft);
-  color: var(--c-text);
-  font-size: var(--fs-sm);
-  line-height: 1.5;
-}
-.alert > svg {
-  flex-shrink: 0;
-  margin-top: 2px;
-  color: var(--c-danger);
-}
 </style>

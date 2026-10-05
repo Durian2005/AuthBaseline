@@ -1,0 +1,77 @@
+/*
+ * 表单类弹窗（新建账号 / 变更角色 / 冻结账号）的公共样式。
+ *
+ * 这三块样式原先长在 UsersView.vue 的 <style scoped> 里。把弹窗拆成独立组件后，
+ * 样式会跟着组件走 —— 若每个组件各复制一份，改一次间距要改三处，
+ * 正是拆分本想避免的问题。
+ *
+ * 因此抽到本文件，由各弹窗组件以
+ *     <style scoped src="../../styles/form-dialog.css"></style>
+ * 引入。`scoped` 仍由各组件独立生成作用域属性，样式不会外溢到其它组件 ——
+ * 这一点很关键：本文件里的 .field / .select 与 base.css 里的同名类并存，
+ * 靠 scoped 保证只有弹窗内部用到这里更紧的版本。
+ *
+ * 不放进 base.css 的原因：那是全局样式，而这几条只在弹窗这种"窄容器"里成立
+ * （例如 .select 压缩到 28px 高是为了塞进弹窗的一行字段）。
+ */
+
+.form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+}
+
+.form__notice {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--sp-2);
+  padding: var(--sp-2) var(--sp-3);
+  border: 1px solid color-mix(in srgb, var(--st-pending-fg) 34%, transparent);
+  border-radius: var(--r-md);
+  background: var(--st-pending-bg);
+  color: var(--c-text);
+  font-size: var(--fs-sm);
+  line-height: 1.55;
+}
+.form__notice > svg {
+  flex-shrink: 0;
+  margin-top: 2px;
+  color: var(--st-pending-fg);
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+}
+
+.field__label {
+  font-size: var(--fs-sm);
+  font-weight: 600;
+  color: var(--c-text-muted);
+}
+
+.select {
+  height: 28px;
+  width: auto;
+  padding-right: var(--sp-2);
+  cursor: pointer;
+}
+
+.alert {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--sp-2);
+  padding: var(--sp-2) var(--sp-3);
+  border-radius: var(--r-md);
+  border: 1px solid color-mix(in srgb, var(--c-danger) 30%, transparent);
+  background: var(--c-danger-soft);
+  color: var(--c-text);
+  font-size: var(--fs-sm);
+  line-height: 1.5;
+}
+.alert > svg {
+  flex-shrink: 0;
+  margin-top: 2px;
+  color: var(--c-danger);
+}

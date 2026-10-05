@@ -1,0 +1,38 @@
+/*
+ * 登录页各表单（登录 / 注册 / 找回密码）共用的样式。
+ *
+ * 这三块样式原先长在 LoginView.vue 的 <style scoped> 里。注册与找回密码
+ * 拆成独立组件后，样式必须跟着组件走，否则子组件里的表单会掉样式 ——
+ * 因此抽到本文件，由 LoginView 与两个表单组件各自以
+ *     <style scoped src="..."></style>
+ * 引入。`scoped` 由各组件独立生成作用域属性，样式不会外溢。
+ */
+
+.stack {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-4);
+}
+
+.btn--lg {
+  height: 34px;
+  font-size: var(--fs-md);
+}
+
+/* ---------- 邮箱 + 验证码同一行 ---------- */
+.field__row {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+}
+.field__row .input {
+  flex: 1;
+  min-width: 0;
+}
+.code-btn {
+  flex: 0 0 auto;
+  height: 32px;
+  padding: 0 var(--sp-3);
+  font-size: var(--fs-sm);
+  font-variant-numeric: tabular-nums;
+}
