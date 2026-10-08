@@ -31,9 +31,37 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 LOGDIR = os.path.join(ROOT, "tools", "buildlogs")
 CLIENT = os.path.join(ROOT, "AuthClient")
 DOTNET = r"C:\Program Files\dotnet\dotnet.exe"
-NPM = os.environ.get("WB_NPM") or os.path.join(
-    os.path.expanduser("~"), ".workbuddy", "binaries", "node",
-    "versions", "22.22.2-3", "npm.CMD")
+NODE_VERSIONS = os.path.join(os.path.expanduser("~"), ".workbuddy", "binaries", "node", "versions")
+
+
+def _find_npm():
+    """定位 npm 可执行文件。
+
+    为什么不写死一个版本目录：原先这里硬编码 `.../node/versions/22.22.2-3/npm.CMD`，
+    而 workbuddy 托管 node 的版本目录名带构建号、会随环境更新（本机实测已从
+    `22.22.2-3` 变成 `22.22.2-6`）。写死的后果是**整条构建链某天突然
+    FileNotFoundError**，且报错信息只说"系统找不到指定的文件"、看不出是版本漂移。
+    改为：环境变量覆盖 → 版本目录里挑一个可用的 → 最后退回 PATH。
+    """
+    override = os.environ.get("WB_NPM")
+    if override:
+        return override
+    if os.path.isdir(NODE_VERSIONS):
+        found = []
+        for ver in os.listdir(NODE_VERSIONS):
+            for fn in ("npm.CMD", "npm.cmd", "npm"):
+                p = os.path.join(NODE_VERSIONS, ver, fn)
+                if os.path.isfile(p):
+                    found.append((ver, p))
+        if found:
+            # 版本目录名字符串序即可满足"取最新"：22.22.2-6 > 22.22.2-3；
+            # 真出现 22.22.2-10 这类跨位数时再换成元组比较。
+            found.sort()
+            return found[-1][1]
+    return "npm.cmd"
+
+
+NPM = _find_npm()
 
 # 两条分发链路的落点，务必与 vite.config.js 的 outDir 保持一致
 WWW = os.path.join(ROOT, "AuthServer", "wwwroot")
