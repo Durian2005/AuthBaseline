@@ -34,7 +34,11 @@ public readonly record struct LockoutVerdict(
     long DriftSeconds);
 
 /// <summary>
-/// 时钟护栏：让"账号锁定"不再单纯依赖可被操纵的本机墙钟。
+/// 时钟护栏：让"账号锁定"与"失败计数窗口"都不再单纯依赖可被操纵的本机墙钟。
+///
+/// 本类服务两个判定（两者的加固理由完全相同 —— 墙钟可被拨动，且拨动方向对攻击者有利）：
+///   1. <see cref="Assess"/>：锁定何时到期。拨快时钟 = 提前解锁；
+///   2. <see cref="WindowExpired"/>：失败计数窗口是否作废。拨快时钟 = 计数清零 = 重新拿回尝试机会。
 ///
 /// 背景（这一点是本类存在的全部理由）：
 ///   加固前判定式为 `LockoutEnd > DateTime.UtcNow`，两个操作数都受墙钟控制 ——
@@ -137,6 +141,34 @@ public static class TimeGuard
 
         return new LockoutVerdict(reliableNow < lockoutEnd, Math.Max(remaining, 0),
             reliableNow, drift, driftSeconds);
+    }
+
+    /// <summary>
+    /// 判定"失败计数窗口"是否已经作废（纯函数：不读时钟、不碰数据库，便于直接喂场景做测试）。
+    ///
+    /// 语义：窗口自锚点起算 <paramref name="window"/> 这么久；已经走满 ⇒ 返回 true，
+    /// 表示调用方应当把失败计数归零、并开启一个新窗口。
+    ///
+    /// 为什么不能用墙钟判：窗口过期 = 计数清零 = **重新拿回 3 次尝试机会**，
+    /// 这是对攻击者有利的方向。若按墙钟判，拨快 3 分钟即可让窗口提前作废，
+    /// 于是"每错 2 次就把钟拨快 3 分钟"能让账号永远锁不上 —— 新开一个比无窗口更糟的口子。
+    /// 因此这里与 <see cref="Assess"/> 同源：优先用系统运行时长这条单调线，
+    /// 且取单调线只会让窗口**保持有效**（继续累计），fail-closed。
+    ///
+    /// 两条已知边界（与锁定判定**逐字一致**，不额外宽松）：
+    ///   1. 缺少锚点（老数据）⇒ 视为"没有进行中的窗口"，返回 true，由调用方开新窗口；
+    ///   2. 运行时长比锚点还小 ⇒ 机器重启过、单调线断了一截 ⇒ 退回墙钟判定。
+    /// </summary>
+    public static bool WindowExpired(DateTime? windowWallAt, long? windowUptimeAt,
+        DateTime wallNow, long uptimeMs, TimeSpan window)
+    {
+        if (windowWallAt is null)
+            return true;
+
+        if (windowUptimeAt is null || uptimeMs < windowUptimeAt.Value)
+            return wallNow - windowWallAt.Value >= window;
+
+        return TimeSpan.FromMilliseconds(uptimeMs - windowUptimeAt.Value) >= window;
     }
 
     /// <summary>无单调证据时的退路：完全按墙钟判定（加固前的行为）。</summary>

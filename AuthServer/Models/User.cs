@@ -129,6 +129,41 @@ public class User
     [BsonElement("lockoutDriftLogged")]
     public bool LockoutDriftLogged { get; set; }
 
+    /* ==================== 失败计数窗口 ==================== */
+
+    /// <summary>
+    /// 「失败计数窗口」起始时刻的**墙钟**读数。与下一个字段成对使用，用途见 TimeGuard。
+    ///
+    /// 为什么需要它：计数不再是"终身累计"，而是只统计**一个 3 分钟窗口内**的失败 ——
+    /// 窗口内累计到 3 次才锁定，窗口一过前面攒的次数全部作废、重新从 1 数起。
+    /// 于是必须记住"第一次失败发生在什么时候"，这就是那个锚点。
+    ///
+    /// 与 <see cref="LockoutWallAt"/> 是**两套锚点、不可混用**：
+    /// 那一对回答"锁定何时到期"，这一对回答"失败计数何时作废"。
+    /// 锁定期间失败计数与窗口都已被清零（见 ResetFailedAttempts），故两者不会同时有意义。
+    ///
+    /// 兼容性：老数据没有该字段（为 null）⇒ 视为"没有进行中的窗口"，
+    /// 下一次失败直接开一个新窗口，不需要任何回填。
+    /// </summary>
+    [BsonElement("failedWindowWallAt")]
+    [BsonIgnoreIfNull]
+    public DateTime? FailedWindowWallAt { get; set; }
+
+    /// <summary>
+    /// 「失败计数窗口」起始时刻的**系统运行时长**（Environment.TickCount64，毫秒）。
+    ///
+    /// 为什么窗口判定也不能只靠墙钟：窗口过期意味着**计数清零**，也就是"重新拿回
+    /// 3 次尝试机会" —— 这是一个对攻击者**有利**的方向。
+    /// 若按墙钟判，把系统时间往前拨 3 分钟就能让窗口提前作废，从而无限次尝试而永不锁定，
+    /// 比"没有窗口"的现状更糟。所以这里与锁定判定同源：优先用单调线，
+    /// 而单调线只会让窗口**保持有效**（继续累计），即 fail-closed。
+    ///
+    /// 取值与上一个字段配对，单独一个没有意义。
+    /// </summary>
+    [BsonElement("failedWindowUptimeAt")]
+    [BsonIgnoreIfNull]
+    public long? FailedWindowUptimeAt { get; set; }
+
     [BsonElement("createdAt")]
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
 

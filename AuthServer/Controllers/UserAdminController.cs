@@ -108,9 +108,7 @@ public class UserAdminController : AuthControllerBase
         if (user.Status == UserStatus.Locked)
         {
             user.Status = UserStatus.Enabled;
-            user.FailedLoginAttempts = 0;
-            user.LockoutEnd = null;
-            ClearLockoutAnchor(user);
+            ResetFailedAttempts(user);
             await _db.Users.ReplaceOneAsync(u => u.Id == user.Id, user);
 
             var okResp = new ApiResponse<UserResponse>
@@ -150,10 +148,8 @@ public class UserAdminController : AuthControllerBase
             user.Status = UserStatus.Enabled;
             // 冻结期间的"停用起点"清掉：账号已恢复，留着它会让人误以为还有效。
             user.DormantFrozenAt = null;
-            // 顺带清空可能残留的锁定状态，避免"解冻后立刻发现自己被锁着"。
-            user.FailedLoginAttempts = 0;
-            user.LockoutEnd = null;
-            ClearLockoutAnchor(user);
+            // 顺带清空可能残留的锁定与失败计数，避免"解冻后立刻发现自己被锁着"。
+            ResetFailedAttempts(user);
             await _db.Users.ReplaceOneAsync(u => u.Id == user.Id, user);
 
             var restored = new ApiResponse<UserResponse>

@@ -272,9 +272,7 @@ public class AccountController : AuthControllerBase
             if (user.Status == UserStatus.Locked)
             {
                 user.Status = UserStatus.Enabled;
-                user.FailedLoginAttempts = 0;
-                user.LockoutEnd = null;
-                ClearLockoutAnchor(user);
+                ResetFailedAttempts(user);
                 await _db.Users.ReplaceOneAsync(u => u.Id == user.Id, user);
             }
         }
@@ -420,9 +418,7 @@ public class AccountController : AuthControllerBase
 
         // 重置成功：换口令，并一并清掉锁定与失败计数（否则改完密码仍被锁在门外）
         user.PasswordHash = PasswordHasher.Hash(req.NewPassword, _pepper.Pepper);
-        user.FailedLoginAttempts = 0;
-        user.LockoutEnd = null;
-        ClearLockoutAnchor(user);
+        ResetFailedAttempts(user);
         if (user.Status == UserStatus.Locked) user.Status = UserStatus.Enabled;
         await _db.Users.ReplaceOneAsync(u => u.Id == user.Id, user);
 

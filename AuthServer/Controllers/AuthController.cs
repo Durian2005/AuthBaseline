@@ -179,10 +179,9 @@ public class AuthController : AuthControllerBase
                     requestLog, sanitizedUsername, "账号已锁定，请 ", 401);
 
             // 锁定时间已过（按可靠时刻判断），自动恢复为启用状态
+            // 失败计数与窗口锚点一并清掉：解锁后应当从 0 重新数满 3 次。
             user.Status = UserStatus.Enabled;
-            user.FailedLoginAttempts = 0;
-            user.LockoutEnd = null;
-            ClearLockoutAnchor(user);
+            ResetFailedAttempts(user);
             await _db.Users.ReplaceOneAsync(u => u.Id == user.Id, user);
             statusBefore = UserStatus.Enabled.ToString();
         }
@@ -219,26 +218,34 @@ public class AuthController : AuthControllerBase
         var passwordCheck = PasswordHasher.Verify(req.Password, user.PasswordHash, _pepper.Pepper);
         if (!passwordCheck.Valid)
         {
-            user.FailedLoginAttempts++;
+            // 两个时间读数只取一次，供"失败计数窗口的锚点"与"锁定锚点"共用：
+            // 分两次读会拿到两个不同步的"现在"，让本应同起点的锚点对不上。
+            var failWallNow = TimeGuard.WallNow();
+            var failUptimeMs = TimeGuard.UptimeMs();
+
+            // 计一次失败：只有落在同一个窗口（FailureWindow）内的才累加。
+            // 窗口过期时由它把计数归零、本次成为新窗口的第 1 次 ——
+            // 这里刻意不自己判"过期没有"，窗口语义只有基类那一份实现。
+            var thresholdReached = RegisterFailedAttempt(user, failWallNow, failUptimeMs);
+
             string? message;
             string code;
             string reason;
             UserStatus newStatus = user.Status;
             DateTime? lockoutEnd = user.LockoutEnd;
 
-            if (user.FailedLoginAttempts >= MaxFailedAttempts)
+            if (thresholdReached)
             {
                 newStatus = UserStatus.Locked;
                 // 锁定时同时记下**两个**时间锚点：墙钟 + 系统运行时长。
                 // 只记墙钟的话，"现在到了没有"就还得再读一次墙钟，
                 // 而墙钟恰恰是能被拨动的那一个（拨快 3 分钟即可解锁）；
                 // 运行时长不受拨钟影响，两者一对比就知道这段时间真实过去了多久。
-                var lockWallNow = TimeGuard.WallNow();
-                lockoutEnd = lockWallNow.Add(LockoutDuration);
+                lockoutEnd = failWallNow.Add(LockoutDuration);
                 user.Status = newStatus;
                 user.LockoutEnd = lockoutEnd;
-                user.LockoutWallAt = lockWallNow;
-                user.LockoutUptimeAt = TimeGuard.UptimeMs();
+                user.LockoutWallAt = failWallNow;
+                user.LockoutUptimeAt = failUptimeMs;
                 // 新的一轮锁定：把"已就时钟背离告警过"的标记归零，
                 // 否则上一轮留下的 true 会让这一轮的拨钟不再留痕。
                 user.LockoutDriftLogged = false;
@@ -268,13 +275,10 @@ public class AuthController : AuthControllerBase
             return Unauthorized(resp);
         }
 
-        // 登录成功，重置失败计数
+        // 登录成功：失败计数与窗口一起归零（下次要从 0 重新数满 3 次）。
+        // 走统一出口 —— 清零牵动 5 个字段，散着写迟早漏掉一个。
         if (user.FailedLoginAttempts > 0)
-        {
-            user.FailedLoginAttempts = 0;
-            user.LockoutEnd = null;
-            ClearLockoutAnchor(user);
-        }
+            ResetFailedAttempts(user);
 
         // ── 沉睡账号治理：记录最后一次成功登录 ──
         // 为什么记在"登录成功"这一处：它是全系统唯一入口（任何操作都要先拿票据），

@@ -32,6 +32,15 @@ public abstract class AuthControllerBase : ControllerBase
     protected readonly int _dormantThresholdDays;
     protected const int MaxFailedAttempts = 3;
     protected static readonly TimeSpan LockoutDuration = TimeSpan.FromMinutes(3);
+    /// <summary>
+    /// 失败计数的统计窗口：**只统计这么长时间之内**的失败。
+    ///
+    /// 与 <see cref="LockoutDuration"/> 取值相同、语义完全不同 ——
+    /// 那个是"锁上之后关多久"，这个是"多久之内的失败才算数"。
+    /// 刻意写成两个常量而不是复用一个：它们只是巧合同值，
+    /// 将来完全可能分别调整（例如窗口放宽到 5 分钟而锁定时长不动）。
+    /// </summary>
+    protected static readonly TimeSpan FailureWindow = TimeSpan.FromMinutes(3);
 
     protected AuthControllerBase(MongoDbService db, AuditWriter auditWriter,
         SessionService sessions, PepperProvider pepper, IConfiguration configuration)
@@ -152,18 +161,80 @@ public abstract class AuthControllerBase : ControllerBase
     }
 
     /**
-     * 清除锁定时钟锚点。
+     * 清除锁定时钟锚点。**只由 ResetFailedAttempts 调用**，故为 private：
+     * 清零涉及 5 个字段，多一个调用方就多一处漏清的机会。
      *
-     * 与 lockoutEnd 的清除**必须同步**（凡置 null 处都要调一次）：
+     * 与 lockoutEnd 的清除必须同步：
      * 锚点若留在文档里而锁定已结束，下一次锁定虽然会覆盖它们，
      * 但"锁定已解除却仍带着锁定锚点"这个中间状态会让任何按字段排查的人把结论带偏。
      * 让 lockoutEnd 为 null 与三个锚点为 null 保持等价，是最省心的不变式。
      */
-    protected static void ClearLockoutAnchor(User user)
+    private static void ClearLockoutAnchor(User user)
     {
         user.LockoutWallAt = null;
         user.LockoutUptimeAt = null;
         user.LockoutDriftLogged = false;
+    }
+
+    /* ==================== 失败计数窗口的调用侧 ==================== */
+
+    /**
+     * 记一次口令失败，并回答"累计是否已达到锁定阈值"。
+     *
+     * 为什么窗口判定要住在这里、而不是让登录接口自己算：
+     *   "窗口有多长"（FailureWindow）与"窗口过期了没有"（TimeGuard.WindowExpired）
+     *   是同一件事的两半。摊到调用方去写，将来多一个会累计失败的入口
+     *   （例如改密时校验旧口令），就会出现第二份窗口语义，两份迟早会走偏。
+     *
+     * 顺序是本方法的全部要点：**先判窗口过期，再累加**。
+     *   已过期 ⇒ 上一串失败不再算数：计数归零、清掉旧锚点，本次成为新窗口的第 1 次。
+     *   未过期 ⇒ 直接累加，**锚点保持不动**。
+     *     一旦每次失败都把锚点刷成"现在"，窗口就会被无限续期，
+     *     "3 分钟内 3 次"会退化成"只要不停手就永远锁不上"。
+     */
+    protected static bool RegisterFailedAttempt(User user, DateTime wallNow, long uptimeMs)
+    {
+        if (user.FailedLoginAttempts > 0 &&
+            TimeGuard.WindowExpired(user.FailedWindowWallAt, user.FailedWindowUptimeAt,
+                wallNow, uptimeMs, FailureWindow))
+        {
+            user.FailedLoginAttempts = 0;
+            ClearAttemptWindow(user);
+        }
+
+        if (user.FailedLoginAttempts == 0)
+        {
+            user.FailedWindowWallAt = wallNow;
+            user.FailedWindowUptimeAt = uptimeMs;
+        }
+
+        user.FailedLoginAttempts++;
+        return user.FailedLoginAttempts >= MaxFailedAttempts;
+    }
+
+    /** 清除"失败计数窗口"的两个锚点。**只由 ResetFailedAttempts 调用**。 */
+    private static void ClearAttemptWindow(User user)
+    {
+        user.FailedWindowWallAt = null;
+        user.FailedWindowUptimeAt = null;
+    }
+
+    /**
+     * 失败计数 + 锁定状态 + 两套时间锚点的**统一清除出口**。
+     *
+     * 为什么必须收成一个方法：清零原先散在 5 处（登录成功 / 登录时发现锁定已到期 /
+     * 发码时发现锁定已到期 / 重置口令成功 / 管理员解锁的两条分流），每处手写三行。
+     * 引入"失败计数窗口"后，一次清零牵动的字段从 2 个变成 5 个，
+     * 再散着写一定会漏 —— 而漏掉的后果不是"少清一个字段"这么轻：
+     * 计数清了而窗口锚点还挂着，下一次失败会被判成"旧窗口仍在有效期内",
+     * 于是这个用户被提前锁掉。收成一出口后，新增字段只需改这一处。
+     */
+    protected static void ResetFailedAttempts(User user)
+    {
+        user.FailedLoginAttempts = 0;
+        user.LockoutEnd = null;
+        ClearLockoutAnchor(user);
+        ClearAttemptWindow(user);
     }
 
     /* ==================== 会话票据鉴权 ==================== */
