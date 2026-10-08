@@ -46,7 +46,7 @@ python tools/verify_api.py          # 起后端并校验链完整性
 | 口令 | `CHANGE_PASSWORD` / `RESET_PASSWORD` / `SEND_EMAIL_CODE` | |
 | 越权 | `AUTH_DENIED` | **被拒绝的访问同样入链**，这是"看不到"与"记得全"的交汇点 |
 | 审计自省 | `AUDIT_QUERY` / `AUDIT_VERIFY` / `AUDIT_TAMPERED` | 谁看了日志、谁校验过、发现了什么 |
-| 锁定 | `ACCOUNT_LOCKED`（失败 3 次锁定 3 分钟） | 锁定期间正确口令也拒绝，理由码 `ACCOUNT_LOCKED` |
+| 锁定 | `ACCOUNT_LOCKED`（3 分钟窗口内失败 3 次，锁 3 分钟） | 锁定期间正确口令也拒绝，理由码 `ACCOUNT_LOCKED`；窗口过期则计数归零重来 |
 
 每条记录包含：操作者、动作、目标、结果、原因码、前后状态、
 来源 IP、请求摘要、响应摘要、精确时间戳。
