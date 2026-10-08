@@ -256,16 +256,18 @@ export const api = {
   deleteUser: (username) => request('/auth/delete-user', { method: 'POST', body: { username } }),
 
   /**
-   * 管理员创建账号（用户管理员 / 审计管理员）。
+   * 管理员创建账号（普通用户 / 用户管理员 / 审计管理员）。
    *
-   * 与 register 的区别：不绑邮箱、不发验证码、建号即启用。
+   * 与 register 的区别：不发验证码、建号即启用。
+   * email 是**可选**的：留空即只凭口令登录（该账号用不了「忘记密码」）；
+   * 填写则后端登记为已验证，随后即可走找回密码。
    * operatorPassword 是操作者本人的登录口令 —— 后端要求二次确认身份，
    * 仅凭会话票据不足以发起这种高权限操作。
    */
-  createAccount: (username, password, role, operatorPassword) =>
+  createAccount: (username, password, role, operatorPassword, email) =>
     request('/auth/create-account', {
       method: 'POST',
-      body: { username, password, role, operatorPassword }
+      body: { username, password, role, operatorPassword, email }
     }),
 
   /**

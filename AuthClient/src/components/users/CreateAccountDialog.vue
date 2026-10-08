@@ -8,9 +8,12 @@ import { useSessionStore } from '../../stores/session'
 import { useToastStore } from '../../stores/toast'
 
 /**
- * 新建账号弹窗（用户管理员 / 审计管理员）。
+ * 新建账号弹窗（普通用户 / 用户管理员 / 审计管理员）。
  *
- * 与自助注册不同：**不需要邮箱与验证码**，建号即可登录。
+ * 与自助注册不同：**不需要验证码、建号即可登录**。
+ * 邮箱是**可选**的：留空则账号只凭口令登录（代价是用不了「忘记密码」）；
+ * 填写则后端登记为已验证，该账号随后即可走找回密码。
+ *
  * 但后端要求二次校验操作者本人的登录口令 —— 这是特权操作，
  * 仅凭会话票据不足以防冒用，所以这里必须再输一次自己的口令。
  *
@@ -24,7 +27,7 @@ const emit = defineEmits(['update:open'])
 const session = useSessionStore()
 const toast = useToastStore()
 
-const form = ref({ username: '', password: '', role: 'UserAdmin', operatorPassword: '' })
+const form = ref({ username: '', email: '', password: '', role: 'UserAdmin', operatorPassword: '' })
 const error = ref('')
 const creating = ref(false)
 
@@ -33,7 +36,7 @@ watch(
   () => props.open,
   (v) => {
     if (!v) return
-    form.value = { username: '', password: '', role: 'UserAdmin', operatorPassword: '' }
+    form.value = { username: '', email: '', password: '', role: 'UserAdmin', operatorPassword: '' }
     error.value = ''
   }
 )
@@ -55,7 +58,10 @@ async function confirm() {
       f.username.trim(),
       f.password,
       f.role,
-      f.operatorPassword
+      f.operatorPassword,
+      // 邮箱可选，留空即不绑定。格式由后端裁决 —— 与口令复杂度同一条原则：
+      // 前端不做提交门禁，免得两边的校验规则各说各话。
+      f.email.trim()
     )
     toast.success(res?.message || '账号已创建')
     close()
@@ -82,7 +88,8 @@ async function confirm() {
         <AppIcon name="info" :size="15" :stroke-width="2" />
         <span>
           新建账号<strong>无需绑定邮箱</strong>，创建后即可用初始口令登录。
-          这两类账号与管理员账号权限不同，请按职责选择角色。
+          邮箱是<strong>可选项</strong>：留空则只能凭口令登录、用不了「忘记密码」；
+          填写则登记为已验证，该账号随后即可自助找回密码。请按职责选择角色。
         </span>
       </div>
 
@@ -106,9 +113,22 @@ async function confirm() {
       <label class="field">
         <span class="field__label">角色</span>
         <select v-model="form.role" class="input select">
+          <option value="User">普通用户 —— 只能使用自己的账号与口令功能</option>
           <option value="UserAdmin">用户管理员 —— 可管理用户，不能查看审计日志</option>
           <option value="AuditAdmin">审计管理员 —— 只能查看审计日志，不能管理用户</option>
         </select>
+      </label>
+
+      <label class="field">
+        <span class="field__label">邮箱（可选）</span>
+        <input
+          v-model="form.email"
+          class="input"
+          type="email"
+          placeholder="留空即不绑定，该账号只能凭口令登录"
+          autocomplete="off"
+          spellcheck="false"
+        />
       </label>
 
       <PasswordField

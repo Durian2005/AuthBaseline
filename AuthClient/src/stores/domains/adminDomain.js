@@ -147,13 +147,14 @@ export function useAdminDomain(core) {
   }
 
   /**
-   * 管理员创建账号（用户管理员 / 审计管理员）。
+   * 管理员创建账号（普通用户 / 用户管理员 / 审计管理员）。
    *
-   * 与注册不同：不需要邮箱与验证码，但需要操作者（管理员）本人的登录口令
-   * 做二次确认 —— 后端在签发新管理员之前会再验一次。
+   * 与注册不同：**不发验证码**，邮箱是可选参数（留空即只凭口令登录，
+   * 该账号用不了「忘记密码」）。但需要操作者（管理员）本人的登录口令
+   * 做二次确认 —— 后端在建号之前会再验一次，三种角色一视同仁。
    */
-  async function createAccount(username, password, roleValue, operatorPassword) {
-    const res = await api.createAccount(username, password, roleValue, operatorPassword)
+  async function createAccount(username, password, roleValue, operatorPassword, email) {
+    const res = await api.createAccount(username, password, roleValue, operatorPassword, email)
     markOnline()
     await refreshUsers()
     return res
