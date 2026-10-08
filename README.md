@@ -381,7 +381,7 @@ npm run build     # 只出浏览器产物 → ../AuthServer/wwwroot
 | POST | `/api/auth/unlock` | 用户管理员 | 手动解锁被锁定的账号，也用于**解除冻结**（`Disabled → Enabled`） |
 | POST | `/api/auth/freeze-user` | 用户管理员 | 冻结沉睡账号（置 `Disabled`），**可解冻、绝不删除** |
 | POST | `/api/auth/delete-user` | 用户管理员 | 注销普通用户（管理员账号不可被注销） |
-| POST | `/api/auth/create-account` | 管理员 | 管理员直接创建账号，需二次校验操作者口令 |
+| POST | `/api/auth/create-account` | 管理员 | 创建**普通用户 / 用户管理员 / 审计管理员**（不可建 `Admin`）；**邮箱可选**，需二次校验操作者口令 |
 | POST | `/api/auth/set-role` | 管理员 | 任免用户角色（含 AuditAdmin），需二次校验操作者口令 |
 
 ### 4. 审计日志
@@ -411,6 +411,11 @@ npm run build     # 只出浏览器产物 → ../AuthServer/wwwroot
 **职责分离**：`Admin` 能管理用户与分配角色，但**不能读取审计日志**；`AuditAdmin`
 能读取审计日志，但**不能管理用户**。两者权限互斥，任何单一角色都无法同时篡改数据与
 掩盖痕迹。
+
+**账号创建入口**：建号只有 `Admin` 能做（`UserAdmin` 能管账号但**不能造账号**），
+可建 `User` / `UserAdmin` / `AuditAdmin`，**不能建 `Admin`**（不允许管理员自我复制）。
+邮箱在创建时**可选**：留空即只凭口令登录（登录标识是用户名、不是邮箱，所以照样能登），
+代价是该账号用不了「忘记密码」；填写则登记为已验证，随后即可自助找回密码。
 
 ## 十、鲁棒性设计
 

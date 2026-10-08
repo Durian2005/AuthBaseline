@@ -15,7 +15,7 @@
 2. `admin` 可以**创建和管理数个新的管理员账号**
 3. `admin` 可以**指定几位管理员为审计管理员**
 4. **只有审计管理员**可以查看日志
-5. 由 `admin` 创建的管理员账号**不需要绑定邮箱**，只需口令
+5. 由 `admin` 创建的账号**不需要绑定邮箱**，只需口令（邮箱在该接口上是**可选**的）
 
 已确认的四个关键决策：
 
@@ -161,7 +161,7 @@ public enum AccessLevel
 
 | 接口 | 入参 | 行为 |
 |---|---|---|
-| `POST /api/auth/create-account` | `username` `password` `role` `operatorPassword` | 创建 `UserAdmin` 或 `AuditAdmin`。**不绑邮箱**（`Email=null`），状态**直接 `Enabled`** 免审核，口令复杂度沿用现有规则，用户名查重 |
+| `POST /api/auth/create-account` | `username` `password` `role` `operatorPassword` `email`（可选） | 创建 `User` / `UserAdmin` / `AuditAdmin`（**不接受 `Admin`**）。邮箱**可选**：留空即 `Email=null`、只凭口令登录；填写则规范化后绑定并置 `EmailVerified=true`（管理员代填不发码，理由见 `docs/guides/EMAIL-VERIFY-README.md`）。状态**直接 `Enabled`** 免审核，口令复杂度沿用现有规则，**用户名与邮箱都查重** |
 | `POST /api/auth/set-role` | `username` `role` `operatorPassword` | 变更他人角色（`User` / `UserAdmin` / `AuditAdmin` 三选一，**不接受 `Admin`**）。变更后**吊销目标账号全部票据**，强制重新登录 |
 
 > `set-role` 同时覆盖了需求里"指定几位管理员为审计管理员"（`UserAdmin → AuditAdmin`）
@@ -254,8 +254,9 @@ const roleLabel    = computed(() => ROLE_LABELS[role.value])
 
 ### 5.3 用户管理页
 
-- 顶部加「新建账号」入口，弹窗内选角色（用户管理员 / 审计管理员）+ 用户名 + 初始口令
-  + 操作者本人的口令（二次确认），并附带"无需邮箱、创建后即可登录"的说明
+- 顶部加「新建账号」入口，弹窗内选角色（普通用户 / 用户管理员 / 审计管理员）+ 用户名
+  + 初始口令 + 操作者本人的口令（二次确认），并附带"无需绑定邮箱、创建后即可登录"的说明；
+  邮箱一栏标注**（可选）**：留空则只能凭口令登录、用不了「忘记密码」，填写则登记为已验证
 - 账号列表每行加**角色标签**与「变更角色」操作，**仅 `isRoleAdmin` 可见**
 - 操作列按可处置范围显隐：「注销」对 `Admin` 是**除自己外全开**（含审计管理员），
   对 `UserAdmin` 只对普通用户 / 用户管理员显示；自己那一行显示「受保护」且无按钮
