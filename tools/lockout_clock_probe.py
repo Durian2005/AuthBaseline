@@ -44,6 +44,15 @@
     窗口过期后的行为用"把两个锚点一起搬到 4 分钟前"来复现（等价于真实的 3 分钟已过），
     同样不动系统时间。
 
+    拨钟在**未锁定阶段**也要留痕（断言 16）：
+    留痕原先只挂在"账号已锁定、请求被拒"那条分支上 ——
+    而那条分支要求账号已经是 Locked，于是攻击者在 3 次尝试**之内**拨钟，
+    事后翻审计看不到任何记录。现在失败计数判定顺带核对一次锚点，把这段静默期补上。
+
+    注意它**只留痕、不改判定**：拨钟既不加罚（不提前锁定）、也不放过
+    （拿不到额外机会）。取证与裁决分开 —— 能拨钟的人本来就持有管理员权限，
+    给他加罚只会误伤普通人。
+
 用法：
   python tools/lockout_clock_probe.py <exe路径> <端口> [测试库名] [--keep]
 """
@@ -536,6 +545,38 @@ check("管理员解锁后窗口**两个锚点**一并清空（只清计数不清
       u.get("failedWindowWallAt") is None and u.get("failedWindowUptimeAt") is None,
       "wallAt=%s / uptimeAt=%s" % (u.get("failedWindowWallAt"), u.get("failedWindowUptimeAt")))
 
+# ---------- 16. 未锁定状态下拨钟：不加罚，但必须留痕 ----------
+print("\n[16] 窗口：只错 1 次就拨钟（**还没锁定**）—— 不加罚、不放过，但必须留下 CLOCK_ANOMALY")
+restart(None)
+login(VICTIM_PW)                              # 登录成功 → 计数与两个锚点一起清零，干净起点
+login("definitelyWrong9")                     # 窗口内第 1 次：只钉锚点，此刻无锚点可比、不可能判背离
+u = user_doc()
+print("    错 1 次后 failedLoginAttempts=%s / 窗口锚点 wallAt=%s / uptimeAt=%.1f 秒"
+      % (u.get("failedLoginAttempts"), naive(u.get("failedWindowWallAt")),
+         (u.get("failedWindowUptimeAt") or 0) / 1000))
+n_before = audit_count("CLOCK_ANOMALY")
+
+restart(FORWARD_SKEW)                         # 墙钟 +600 秒；窗口锚点保持不动
+st2, b2 = login("definitelyWrong9")           # 第 2 次：仍未到阈值
+u = user_doc()
+check("未锁定状态下拨钟：计数照常 +1、账号**不锁定**（拨钟不构成额外的处罚理由）",
+      st2 == 401 and b2.get("code") == "INVALID_CREDENTIALS"
+      and (u.get("failedLoginAttempts") or 0) == 2
+      and u.get("status") == "Enabled",
+      "HTTP %s / %s / status=%s / failed=%s"
+      % (st2, b2.get("code"), u.get("status"), u.get("failedLoginAttempts")))
+
+win_fwd = latest_audit("CLOCK_ANOMALY")
+win_req = (win_fwd or {}).get("request") or ""
+check("未锁定状态下拨钟同样写入 CLOCK_ANOMALY 并标明来自失败计数窗口"
+      "（旧实现此处完全静默：留痕只挂在「已锁定被拒」那条分支上）",
+      audit_count("CLOCK_ANOMALY") == n_before + 1
+      and (win_fwd or {}).get("reasonCode") == "CLOCK_ROLLED_FORWARD"
+      and "FAILED_ATTEMPT_WINDOW" in win_req,
+      "留痕 %d → %d 条 / reasonCode=%s / request=%s"
+      % (n_before, audit_count("CLOCK_ANOMALY"), (win_fwd or {}).get("reasonCode"),
+         (win_req[:120] + "…") if win_req else "（空）"))
+
 # ---------- 收尾 ----------
 try:
     _proc.kill()
@@ -556,6 +597,7 @@ if FAILED:
         print("    - %s" % f)
 print("  结论：%s" % ("PASS ✅ 拨钟不再能提前结束锁定（且留痕）；"
                      "失败计数只在同一 3 分钟窗口内累计，且窗口过期判定同样不走墙钟；"
+                     "未锁定阶段的拨钟也会留痕（但不因此加罚、也不多给机会）；"
                      "重启电脑 / 直接改库两条边界仍在，已被显式验证"
                      if not FAILED else "FAIL ❌ 有 %d 项未达标" % len(FAILED)))
 print("=" * 70)
