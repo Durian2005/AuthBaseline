@@ -21,13 +21,14 @@ import sys
 import time
 from pathlib import Path
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from _toolchain import find_node  # noqa: E402  （同目录公共模块）
+
 ROOT = Path(__file__).resolve().parents[1]
 APP_DIR = Path(os.environ.get("E2E_APPDIR", os.path.join(os.environ.get("LOCALAPPDATA") or os.path.expanduser("~/AppData/Local"), "AuthBaseline")))
 EXE = APP_DIR / "auth-baseline-desktop.exe"
 PORT = 9333
-NODE = os.environ.get("WB_NODE") or os.path.join(
-    os.path.expanduser("~"), ".workbuddy", "binaries", "node",
-    "versions", "22.22.2-3", "node.exe")
+NODE = find_node()
 
 
 def kill_leftovers():
