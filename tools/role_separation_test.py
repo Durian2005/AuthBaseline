@@ -13,6 +13,10 @@
   UserAdmin（被创建）    能管用户 ✅  能任免角色 ❌  能看审计 ❌
   AuditAdmin（被任命）   能管用户 ❌  能任免角色 ❌  能看审计 ✅
 
+创建账号（仅 Admin）可建**普通用户 / 用户管理员 / 审计管理员**，一律**不可建 Admin**
+（不允许管理员自我复制）。邮箱在该接口上**可选**：留空即只凭口令登录，
+填写则登记为已验证（代填不发码，否则该字段会变成永远用不了的死字段）。
+
 处置（注销 / 变更角色）的目标范围另算，与"能不能管用户"不是一回事：
   Admin      —— 除自己以外任意账号，含审计管理员与其它管理员
   UserAdmin  —— 只有普通用户与用户管理员，够不到上级
@@ -151,6 +155,60 @@ st, b = call("POST", "/api/auth/create-account",
              {"username": "nope01", "password": "Nope12345", "role": "UserAdmin",
               "operatorPassword": "wrongpassword"}, ticket=admin_tk)
 check("操作者口令错误 → 拒绝", st == 401, "HTTP %s / %s" % (st, b.get("code")))
+
+# ---------- 3b. Admin 也能创建「普通用户」，邮箱可选 ----------
+#
+# 这一段覆盖"Admin 可建普通用户 + 邮箱可选"这条需求的两侧：
+#   · 留空 —— 账号只凭口令登录（登录标识是用户名，不是邮箱，所以照样能登）；
+#   · 填写 —— 与自助注册同一条格式校验与唯一性校验，但不发码，直接置已验证，
+#     否则这个字段就是一个"收进来却永远用不了"的死字段（系统里没有补验证的路径）。
+print("\n[3b] Admin 创建「普通用户」：邮箱留空与填写两种都成立")
+st, b = call("POST", "/api/auth/create-account",
+             {"username": "normal01", "password": "Normal12345", "role": "User",
+              "operatorPassword": "Admin123"}, ticket=admin_tk)
+check("创建「普通用户」normal01（邮箱留空）→ 成功", st == 200, "HTTP %s / %s" % (st, b.get("code")))
+check("  返回角色 = User", (b.get("data") or {}).get("role") == "User")
+check("  未绑邮箱（留空即不绑）", not (b.get("data") or {}).get("email"))
+
+nu = probe_db["Users"].find_one({"username": "normal01"}) or {}
+check("normal01 库记录：建号即 Enabled 且无邮箱",
+      nu.get("status") == "Enabled" and not nu.get("email"),
+      "status=%s email=%s" % (nu.get("status"), nu.get("email")))
+
+# 未绑邮箱照样能登录 —— 这正是"不绑邮箱"能成立的结构性理由
+st, normal_tk, normal_info = login("normal01", "Normal12345")
+check("未绑邮箱的普通用户可凭口令直接登录", st == 200 and bool(normal_tk), "HTTP %s" % st)
+check("  登录后 isAdmin = false（不带任何管理能力）", normal_info.get("isAdmin") is False)
+
+# 填邮箱：登记为已绑定 + 视为已验证（这后一半是「忘记密码」能走通的前置条件）
+st, b = call("POST", "/api/auth/create-account",
+             {"username": "normal02", "password": "Normal12345", "role": "User",
+              "email": "Normal02@Example.COM", "operatorPassword": "Admin123"},
+             ticket=admin_tk)
+check("创建「普通用户」normal02（填邮箱）→ 成功", st == 200, "HTTP %s / %s" % (st, b.get("code")))
+check("  响应里的邮箱是**脱敏**的（拿不到完整地址）",
+      (b.get("data") or {}).get("email") == "n*****@example.com",
+      (b.get("data") or {}).get("email"))
+
+nu2 = probe_db["Users"].find_one({"username": "normal02"}) or {}
+check("  库内邮箱已规范化（示例域名统一转小写）",
+      nu2.get("email") == "normal02@example.com", nu2.get("email"))
+check("  库内 emailVerified=True —— 代填即视为已验证，否则「忘记密码」永远走不通",
+      nu2.get("emailVerified") is True, nu2.get("emailVerified"))
+
+# 邮箱格式非法：与自助注册同一套校验，且提示"可留空"（留空是合法用法）
+st, b = call("POST", "/api/auth/create-account",
+             {"username": "badmail01", "password": "Badmail12345", "role": "User",
+              "email": "not-an-email", "operatorPassword": "Admin123"}, ticket=admin_tk)
+check("邮箱格式非法 → 拒绝", st == 400 and b.get("code") == "INVALID_EMAIL",
+      "HTTP %s / %s" % (st, b.get("code")))
+
+# 邮箱唯一：与自助注册同一条规则（共用会让「忘记密码」不知道该把重置码发给谁）
+st, b = call("POST", "/api/auth/create-account",
+             {"username": "dup01", "password": "Dupmail12345", "role": "User",
+              "email": "normal02@example.com", "operatorPassword": "Admin123"}, ticket=admin_tk)
+check("邮箱已被占用 → 拒绝", st == 409 and b.get("code") == "EMAIL_ALREADY_BOUND",
+      "HTTP %s / %s" % (st, b.get("code")))
 
 # ---------- 4. UserAdmin 的能力边界 ----------
 print("\n[4] UserAdmin（ops01）：同样能管用户，但不能任免角色、不能看审计")
@@ -387,15 +445,21 @@ check("注册失败带原因码（本库若未触发注册失败则计 0，不�
           {"action": "REGISTER", "result": "失败", "reasonCode": {"$nin": [None, ""]}})
           for n in cols) >= 0)
 
-# 口令本身绝不能出现在任何日志里
+# 口令本身、以及邮箱的完整地址，都绝不能出现在任何日志里
 leak = 0
+email_leak = 0
 for n in cols:
     for d in probe_db[n].find({}, {"request": 1, "response": 1, "_id": 0}):
         blob = (d.get("request") or "") + (d.get("response") or "")
-        for secret in ("Ops12345", "Ops9x8y7z", "NewPass123", "wrongold1A", "WrongPass1"):
+        for secret in ("Ops12345", "Ops9x8y7z", "NewPass123", "wrongold1A", "WrongPass1",
+                       "Normal12345", "Dupmail12345", "Badmail12345", "Admin123"):
             if secret in blob:
                 leak += 1
+        # 创建账号时可选绑定的邮箱，同样只以脱敏形态入链（本轮新增的入口）
+        if "normal02@example.com" in blob:
+            email_leak += 1
 check("口令明文未进入审计日志（含请求与响应报文）", leak == 0, "命中 %d 处" % leak)
+check("邮箱完整地址未进入审计日志（只留脱敏形态）", email_leak == 0, "命中 %d 处" % email_leak)
 
 # ---------- 9. 角色回填与审计链 ----------
 print("\n[9] 数据与审计链检查")
