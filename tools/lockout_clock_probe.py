@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """实验：账号锁定能否靠"把本机时钟往前拨"解开 —— 以及加固之后还剩哪些边界。
 
-═══ 这个脚本现在要证明两件事 ═══
+═══ 这个脚本现在要证明三件事 ═══
 
 【A】原始结论（仍然成立，保留全部证据链）
     锁定判定式原先为 `LockoutEnd > DateTime.UtcNow`，两个操作数都受墙钟控制：
@@ -30,6 +30,19 @@
       · 重启电脑后运行时长归零 ⇒ 退回墙钟判定 ⇒ 拨钟仍可解锁（断言 11 显式验证）
       · 直接改库把 lockoutEnd 搬到过去 ⇒ 不受本加固影响（场景 B 已验证）
     这两条都不影响"改时钟不再能提前结束锁定"这个结论，但口径必须说清楚。
+
+【C】失败计数窗口（本次新增）
+    计数不再是"终身累计"，而是只统计**一个 3 分钟窗口内**的失败：
+    从第一次失败起算，窗口内累计到 3 次即锁；窗口一过，旧计数作废、重新从 1 数起。
+    于是"慢慢试"试不出锁定，而连续爆破的判定结果不变。
+
+    窗口的"过期了没有"**同样**走单调线（TimeGuard.WindowExpired），这不是洁癖：
+    窗口过期 = 计数清零 = 重新拿回 3 次机会，是对攻击者有利的方向。
+    若按墙钟判，攻击者每次错 2 次就把时钟拨快 3 分钟即可让窗口作废、永不锁定 ——
+    比"没有窗口"的现状更糟。断言 14 就是把这条堵死方式端到端跑一遍。
+
+    窗口过期后的行为用"把两个锚点一起搬到 4 分钟前"来复现（等价于真实的 3 分钟已过），
+    同样不动系统时间。
 
 用法：
   python tools/lockout_clock_probe.py <exe路径> <端口> [测试库名] [--keep]
@@ -321,7 +334,8 @@ print("\n[6] 场景 D：检视锁定状态记录了哪些时间依据")
 u = user_doc()
 keys = sorted(u.keys())
 lock_fields = [k for k in keys if any(t in k.lower() for t in
-                                      ("lock", "attempt", "remain", "expire", "tick", "elapsed", "uptime"))]
+                                      ("lock", "attempt", "remain", "expire", "tick",
+                                       "elapsed", "uptime", "window"))]
 print("    与锁定相关的字段：%s" % lock_fields)
 check("lockoutEnd 为绝对时间戳（而非「还要等多久」的相对量）",
       isinstance(u.get("lockoutEnd"), datetime), "类型 %s" % type(u.get("lockoutEnd")).__name__)
@@ -435,6 +449,93 @@ st, b = login(VICTIM_PW)
 check("锚点失效后退回墙钟判定 ⇒ 此时拨钟**仍可**解锁（已知边界，非疏漏）",
       st == 200, "HTTP %s / %s" % (st, b.get("code")))
 
+# ============================================================
+#  C 组：失败计数窗口 —— "3 分钟内的失败才算数"
+# ============================================================
+
+# ---------- 12. 窗口内连错 3 次，防护不能被削弱 ----------
+print("\n[12] 窗口：墙钟正常，窗口内连错 3 次 → 仍然锁定（新增窗口不得削弱原有防护）")
+_, admin_tk = restart(None)
+b3 = wrong_three_times()
+check("窗口内连续 3 次错 → ACCOUNT_LOCKED", b3.get("code") == "ACCOUNT_LOCKED",
+      "%s / %s" % (b3.get("code"), b3.get("message")))
+u = user_doc()
+check("锁定同时把窗口锚点也钉下来（failedWindowWallAt / failedWindowUptimeAt）",
+      isinstance(u.get("failedWindowWallAt"), datetime)
+      and isinstance(u.get("failedWindowUptimeAt"), (int, float)),
+      "wallAt=%s / uptimeAt=%.1f 秒" % (naive(u.get("failedWindowWallAt")),
+                                        (u.get("failedWindowUptimeAt") or 0) / 1000))
+
+# ---------- 13. 窗口过期 ⇒ 计数归零、不再锁定 ----------
+print("\n[13] 窗口：错 2 次后把窗口锚点搬到 4 分钟前（等价于「3 分钟已经真实过去」），再错 1 次")
+_, admin_tk = restart(None)
+call("POST", "/api/auth/unlock", {"username": VICTIM, "operatorPassword": ADMIN_PW}, ticket=admin_tk)
+
+st1, _ = login("definitelyWrong9")            # 窗口内第 1 次
+st2, b2 = login("definitelyWrong9")           # 窗口内第 2 次
+u = user_doc()
+check("窗口内错 2 次不锁，提示还剩 1 次机会",
+      st1 == 401 and st2 == 401 and b2.get("code") == "INVALID_CREDENTIALS"
+      and "还剩 1 次机会" in (b2.get("message") or ""),
+      "HTTP %s / %s / %s" % (st2, b2.get("code"), b2.get("message")))
+check("库内计数 = 2", (u.get("failedLoginAttempts") or 0) == 2,
+      "failedLoginAttempts=%s" % u.get("failedLoginAttempts"))
+
+# 等价模拟"真实的 3 分钟已经走完"：把两个锚点**一起**搬到 4 分钟前。
+# 只改锚点、不改系统时间 —— 与场景 B 用 lockoutEnd 复现"时钟前移"是同一手法。
+db["Users"].update_one({"username": VICTIM}, {"$set": {
+    "failedWindowWallAt": utc_now() - timedelta(minutes=4),
+    "failedWindowUptimeAt": uptime_ms() - 4 * 60 * 1000,
+}})
+
+st3, b3 = login("definitelyWrong9")           # 越过窗口后的第 1 次
+u = user_doc()
+check("窗口已过期 ⇒ 这次错**不触发锁定**（旧计数作废）",
+      st3 == 401 and b3.get("code") == "INVALID_CREDENTIALS",
+      "HTTP %s / %s / %s" % (st3, b3.get("code"), b3.get("message")))
+check("提示的剩余次数说明它已回到窗口的第 1 次（还剩 2 次）",
+      "还剩 2 次机会" in (b3.get("message") or ""), b3.get("message") or "")
+check("库内计数被重置为 1（而不是累积成 3）",
+      (u.get("failedLoginAttempts") or 0) == 1,
+      "failedLoginAttempts=%s" % u.get("failedLoginAttempts"))
+check("status 仍为 Enabled（没有被过期前的 2 次拖去锁定）",
+      u.get("status") == "Enabled", "status=%s" % u.get("status"))
+
+# ---------- 14. 拨钟不能让窗口提前作废（新加固的关键证据） ----------
+print("\n[14] 窗口：错 2 次后把墙钟**前拨 10 分钟**，看窗口会不会被误判成过期")
+login(VICTIM_PW)                              # 登录成功 → 计数与窗口清零，干净起点
+login("definitelyWrong9")
+login("definitelyWrong9")                     # 窗口内已错 2 次
+u = user_doc()
+win_wall = naive(u.get("failedWindowWallAt"))
+win_up = u.get("failedWindowUptimeAt")
+print("    窗口锚点 wallAt=%s / uptimeAt=%.1f 秒" % (win_wall, (win_up or 0) / 1000))
+
+_, admin_tk = restart(FORWARD_SKEW)           # 墙钟 +600 秒，锚点不变
+seen_now = naive(utc_now()) + timedelta(seconds=FORWARD_SKEW)
+st3, b3 = login("definitelyWrong9")           # 窗口内第 3 次
+check("墙钟前拨 10 分钟后，第 3 次错**仍然锁定**（窗口按单调线判，未被提前作废）",
+      st3 == 401 and b3.get("code") == "ACCOUNT_LOCKED",
+      "HTTP %s / %s / %s" % (st3, b3.get("code"), b3.get("message")))
+check("按墙钟读法此刻窗口早已过期（说明拦住它的不是墙钟，而是单调线锚点）",
+      win_wall is not None and win_wall + timedelta(minutes=LOCK_MINUTES) < seen_now,
+      "窗口起点+%d 分钟=%s < 墙钟现在=%s"
+      % (LOCK_MINUTES, (win_wall + timedelta(minutes=LOCK_MINUTES)) if win_wall else None, seen_now))
+
+# ---------- 15. 清零必须把窗口锚点一起带走 ----------
+print("\n[15] 窗口：解锁/登录成功时，窗口锚点必须与计数一同消失（防「少清一个字段」）")
+_, admin_tk = restart(None)
+u = user_doc()
+check("锁定期内窗口锚点仍在（这一轮锁定正是由它累计出来的）",
+      u.get("failedWindowWallAt") is not None, "failedWindowWallAt=%s" % u.get("failedWindowWallAt"))
+call("POST", "/api/auth/unlock", {"username": VICTIM, "operatorPassword": ADMIN_PW}, ticket=admin_tk)
+u = user_doc()
+check("管理员解锁后失败计数归零", (u.get("failedLoginAttempts") or 0) == 0,
+      "failedLoginAttempts=%s" % u.get("failedLoginAttempts"))
+check("管理员解锁后窗口**两个锚点**一并清空（只清计数不清锚点会让下一个人被提前锁掉）",
+      u.get("failedWindowWallAt") is None and u.get("failedWindowUptimeAt") is None,
+      "wallAt=%s / uptimeAt=%s" % (u.get("failedWindowWallAt"), u.get("failedWindowUptimeAt")))
+
 # ---------- 收尾 ----------
 try:
     _proc.kill()
@@ -454,6 +555,7 @@ if FAILED:
     for f in FAILED:
         print("    - %s" % f)
 print("  结论：%s" % ("PASS ✅ 拨钟不再能提前结束锁定（且留痕）；"
+                     "失败计数只在同一 3 分钟窗口内累计，且窗口过期判定同样不走墙钟；"
                      "重启电脑 / 直接改库两条边界仍在，已被显式验证"
                      if not FAILED else "FAIL ❌ 有 %d 项未达标" % len(FAILED)))
 print("=" * 70)
