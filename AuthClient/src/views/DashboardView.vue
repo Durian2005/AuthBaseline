@@ -246,7 +246,7 @@ defineEmits(['navigate'])
       <section class="stats">
         <StatCard icon="key" label="口令哈希" value="BCrypt" tone="enabled" hint="服务端加盐存储" />
         <StatCard icon="shield" label="账号状态" :value="session.status === 'Enabled' ? '正常' : '受限'" tone="primary" />
-        <StatCard icon="lock" label="失败锁定阈值" value="3 次" tone="locked" hint="锁定 3 分钟" />
+        <StatCard icon="lock" label="失败锁定阈值" value="3 次" tone="locked" hint="3 分钟窗口内 · 锁 3 分钟" />
       </section>
 
       <section class="panel">
