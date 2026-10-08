@@ -88,9 +88,11 @@ public class FreezeUserRequest
 }
 
 /// <summary>
-/// 管理员创建账号（用户管理员 / 审计管理员）。
+/// 管理员创建账号（普通用户 / 用户管理员 / 审计管理员）。
 ///
-/// 与自助注册的区别：**不绑邮箱、不需要验证码、建号即启用**。
+/// 与自助注册的区别：**不发验证码、建号即启用**。
+/// 邮箱是**可选**的：留空即只凭口令登录（代价是无法自助找回密码）；
+/// 填写则登记为已验证 —— 管理员是可信主体，不额外发码（理由见 User.EmailVerified）。
 /// 因此这个接口本身就是一条高权限通道，必须由管理员发起，
 /// 且要求二次校验操作者口令 —— 仅凭会话不足以证明是本人操作。
 /// </summary>
@@ -99,8 +101,18 @@ public class CreateAccountRequest
     public string Username { get; set; } = string.Empty;
     public string Password { get; set; } = string.Empty;
 
-    /// <summary>目标角色：UserAdmin（用户管理员）或 AuditAdmin（审计管理员）。</summary>
+    /// <summary>
+    /// 目标角色：User（普通用户）/ UserAdmin（用户管理员）/ AuditAdmin（审计管理员）。
+    /// 刻意不接受 Admin —— 不允许管理员自我复制。
+    /// </summary>
     public string Role { get; set; } = string.Empty;
+
+    /// <summary>
+    /// 可选绑定邮箱。留空 ⇒ 账号只凭口令登录，且无法自助找回密码。
+    /// 填写 ⇒ 与自助注册用同一套格式校验与唯一性校验，但**不发验证码**，
+    /// 直接置 EmailVerified=true（管理员代填视为已验证）；随后即可用「忘记密码」。
+    /// </summary>
+    public string Email { get; set; } = string.Empty;
 
     /// <summary>操作者（管理员）本人的登录口令，用于二次身份确认。</summary>
     public string OperatorPassword { get; set; } = string.Empty;

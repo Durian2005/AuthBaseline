@@ -14,6 +14,8 @@ namespace AuthServer.Controllers;
  *   · RequireUserAdminAsync（Admin / UserAdmin）—— 审核、解锁、冻结、注销、看清单
  *   · RequireAdminAsync（仅 Admin）      —— 创建账号、变更他人角色
  * 用户管理员能管账号，但不能任免角色；任免角色只属于 Admin。
+ * 「创建账号」可建普通用户 / 用户管理员 / 审计管理员（不可建 Admin）；
+ * 邮箱在该接口上是**可选**的。
  * 路由前缀仍是 api/auth，与拆分前逐一对应。
  */
 [ApiController]
@@ -350,27 +352,34 @@ public class UserAdminController : AuthControllerBase
     /* ==================== 管理员：创建账号 ==================== */
 
     /// <summary>
-    /// 允许被创建的两种角色。
+    /// 允许被创建的三种角色。
     ///
     /// 刻意**不含 Admin**：Admin 是角色任免权的持有者，若能凭空再造一个 Admin，
     /// 就存在"管理员自我复制、稀释责任"的路径。需要有人分担任免权时，
     /// 应当由人来决定并明确留痕，而不是让程序放开这个口子。
+    ///
+    /// 含普通用户（User）：它是最低权限角色、不带任何管理能力，
+    /// 放开它不会扩大上面的自我复制面 —— 而它恰好是"想绕开邮箱验证码那条
+    /// 自助注册链路、又要一个可登录账号"时唯一合适的落点。
     /// </summary>
     private static bool CanBeCreatedRole(UserRole role) =>
-        role is UserRole.UserAdmin or UserRole.AuditAdmin;
+        role is UserRole.User or UserRole.UserAdmin or UserRole.AuditAdmin;
 
     /**
-     * 由管理员创建「用户管理员」或「审计管理员」账号。
+     * 由管理员创建「普通用户」「用户管理员」或「审计管理员」账号。
      *
      * 与自助注册的本质区别：
-     *   - **不绑邮箱、不发验证码**（需求明确要求）；
+     *   - **不发验证码**。邮箱是**可选**的：留空即只凭口令登录（代价是无法自助
+     *     找回密码）；填写则登记为已验证 —— 管理员是可信主体，不额外发码；
      *   - **建号即启用**，不走待审核；
-     *   - 因此这个接口本身就是一条高权限通道 —— 一旦被冒用就能凭空造出管理员，
+     *   - 因此这个接口本身就是一条高权限通道 —— 一旦被冒用就能凭空造出账号，
      *     所以必须**二次校验操作者本人的登录口令**：
      *     仅凭会话票据不足以证明是本人操作，票据被盗时攻击者不该能直接造账号。
+     *     这一条对三种角色一视同仁、**包括普通用户** —— 持票者可借它造出"自己的"
+     *     常驻账号做持久化，并不因为角色低就该免检。
      *
-     * 校验顺序上把口令校验放在"用户名查重"之前：
-     * 查重会回答"这个用户名是否存在"，属于可被利用的信息；
+     * 校验顺序上把口令校验放在"用户名 / 邮箱查重"之前：
+     * 查重会回答"这个用户名或邮箱是否存在"，属于可被利用的信息；
      * 先证明是本人，再去查库。
      */
     [HttpPost("create-account")]
@@ -378,8 +387,16 @@ public class UserAdminController : AuthControllerBase
     {
         const string action = AuditAction.CreateAccount;
         var targetName = Norm(req.Username);
+        // 邮箱可选：规范化后统一比较，脱敏后才入日志（与注册、发码的记法一致）。
+        // EmailBoundBy 一并记下 —— 事后必须能区分"邮箱是管理员代填的"与
+        // "本人走验证码验证过的"，否则会得出"所有账号的邮箱都已验证"这种
+        // 被代填污染的错误结论。它进的是 request 这个 JSON 袋，
+        // 不动 AuditLog 的列结构（列结构是哈希链的输入，不能碰）。
+        var email = EmailUtil.Normalize(req.Email);
+        var emailBound = !string.IsNullOrWhiteSpace(email);
         // 初始口令与操作者口令都不入日志
-        var requestLog = new { req.Username, req.Role };
+        var requestLog = new { req.Username, req.Role, Email = EmailUtil.Mask(req.Email),
+            EmailBoundBy = emailBound ? "operator" : null };
 
         if (string.IsNullOrWhiteSpace(targetName) || string.IsNullOrWhiteSpace(req.Password)
             || string.IsNullOrWhiteSpace(req.Role))
@@ -420,7 +437,23 @@ public class UserAdminController : AuthControllerBase
             return BadRequest(resp);
         }
 
-        // 二次口令：创建管理员是特权变更，仅凭会话不足以证明是本人操作
+        // 邮箱格式只在"填了"的前提下校验 —— 留空是合法用法（该账号只凭口令登录）。
+        // 它属纯入参校验，与口令复杂度同级，所以放在"证明是本人"之前：
+        // 格式写错与"这个人是不是管理员"无关，没必要先验口令再告诉他格式不对。
+        if (emailBound && !EmailUtil.IsValid(email))
+        {
+            var resp = new ApiResponse
+            {
+                Success = false,
+                Code = BusinessCode.InvalidEmail,
+                Message = "邮箱格式不正确；如不需要邮箱请留空"
+            };
+            await _auditWriter.WriteAsync(admin.Id, admin.Username, action, operatorLabel, requestLog, resp, operatorLabel,
+                targetName, AuditResult.Failed, AuditReason.InvalidEmail);
+            return BadRequest(resp);
+        }
+
+        // 二次口令：创建账号是特权变更，仅凭会话不足以证明是本人操作
         if (!PasswordHasher.Verify(req.OperatorPassword, admin.PasswordHash, _pepper.Pepper).Valid)
         {
             var resp = new ApiResponse { Success = false, Code = BusinessCode.InvalidCredentials, Message = "管理员口令校验失败，已拒绝创建" };
@@ -438,15 +471,31 @@ public class UserAdminController : AuthControllerBase
             return Conflict(resp);
         }
 
+        // 邮箱唯一性：与自助注册同一条规则（不能两个账号共用一个邮箱）。
+        // 这不是洁癖 —— 共用会让「忘记密码」无法判断该把重置码发给谁，
+        // 而这种歧义一旦落进库里，事后没有自动分辨的办法。
+        if (emailBound)
+        {
+            var emailTaken = await _db.Users.Find(u => u.Email == email).FirstOrDefaultAsync();
+            if (emailTaken != null)
+            {
+                var resp = new ApiResponse { Success = false, Code = BusinessCode.EmailAlreadyBound, Message = "该邮箱已被其它账号绑定" };
+                await _auditWriter.WriteAsync(admin.Id, admin.Username, action, operatorLabel, requestLog, resp, operatorLabel,
+                    targetName, AuditResult.Failed, AuditReason.EmailAlreadyBound);
+                return Conflict(resp);
+            }
+        }
+
         var user = new User
         {
             Username = targetName,
             PasswordHash = PasswordHasher.Hash(req.Password, _pepper.Pepper),
             Status = UserStatus.Enabled,
             Role = newRole,
-            // 管理员创建的账号一律不绑邮箱，只凭口令登录（需求明确要求）
-            Email = null,
-            EmailVerified = false,
+            // 邮箱可选：填了才绑，并直接视为已验证（管理员代填，理由见 User.EmailVerified）；
+            // 留空即 null，账号只凭口令登录 —— 登录标识是用户名，所以照样能登。
+            Email = emailBound ? email : null,
+            EmailVerified = emailBound,
             FailedLoginAttempts = 0,
             CreatedAt = DateTime.UtcNow
         };
@@ -457,7 +506,9 @@ public class UserAdminController : AuthControllerBase
         {
             Success = true,
             Code = BusinessCode.Ok,
-            Message = $"已创建{UserRoles.Label(newRole)}账号「{user.Username}」，该账号无需邮箱、可直接登录",
+            Message = emailBound
+                ? $"已创建{UserRoles.Label(newRole)}账号「{user.Username}」，可直接登录；邮箱已登记，可用于找回密码"
+                : $"已创建{UserRoles.Label(newRole)}账号「{user.Username}」，该账号未绑邮箱、只凭口令登录，无法自助找回密码",
             Data = ToUserResponse(user)
         };
         await _auditWriter.WriteAsync(admin.Id, admin.Username, action, operatorLabel, requestLog, response,
