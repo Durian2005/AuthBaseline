@@ -139,25 +139,43 @@ public abstract class AuthControllerBase : ControllerBase
     {
         if (verdict.Drift == ClockDrift.None || user.LockoutDriftLogged) return;
 
-        var forward = verdict.Drift == ClockDrift.Forward;
+        await LogClockAnomalyAsync(user, verdict.Drift, verdict.DriftSeconds, verdict.ReliableNow,
+            trigger, target, verdict.RemainingSeconds);
+
+        user.LockoutDriftLogged = true;
+        await _db.Users.UpdateOneAsync(u => u.Id == user.Id,
+            Builders<User>.Update.Set(u => u.LockoutDriftLogged, true));
+    }
+
+    /**
+     * 时钟背离留痕的**底层出口**：锁定判定与失败计数窗口共用同一段写入。
+     *
+     * 为什么再抽一层：两个判定发现的背离，事后必须能在审计里以**同一种形状**出现 ——
+     * 同样的字段名、同样的原因码、同样带 demoSkewSeconds。
+     * 各写一份的后果是"改了一处的字段名、另一处还是旧的"，而审计字段一旦分裂，
+     * 按字段检索就会漏掉一半 —— 这恰恰是审计这种设施最不能出的错。
+     *
+     * remainingSeconds 只有锁定判定能给（窗口判定没有"还剩多少秒解锁"这个概念），
+     * 传 null 表示"这条不是锁定判定产生的"。
+     */
+    private async Task LogClockAnomalyAsync(User user, ClockDrift drift, long driftSeconds,
+        DateTime uptimeImpliedNow, string trigger, string target, int? remainingSeconds)
+    {
+        var forward = drift == ClockDrift.Forward;
         await _auditWriter.WriteAsync(user.Id, user.Username, AuditAction.ClockAnomaly, user.Status.ToString(),
             new
             {
                 Trigger = trigger,
                 WallNow = TimeGuard.WallNow(),
                 // 单调线推算出的"现在"：与墙钟的差就是被拨动的量
-                UptimeImpliedNow = verdict.ReliableNow,
-                DriftSeconds = verdict.DriftSeconds,
+                UptimeImpliedNow = uptimeImpliedNow,
+                DriftSeconds = driftSeconds,
                 // 演示开关若开着，记录里留个痕，事后能区分"演示模拟"与"真实拨钟"
                 DemoSkewSeconds = TimeGuard.DemoSkewActive ? TimeGuard.DemoSkewSeconds : 0
             },
-            new { Code = BusinessCode.ClockAnomaly, Drift = verdict.Drift.ToString(), RemainingSeconds = verdict.RemainingSeconds },
+            new { Code = BusinessCode.ClockAnomaly, Drift = drift.ToString(), RemainingSeconds = remainingSeconds },
             user.Status.ToString(), target, AuditResult.Failed,
             forward ? AuditReason.ClockRolledForward : AuditReason.ClockRolledBackward);
-
-        user.LockoutDriftLogged = true;
-        await _db.Users.UpdateOneAsync(u => u.Id == user.Id,
-            Builders<User>.Update.Set(u => u.LockoutDriftLogged, true));
     }
 
     /**
@@ -186,15 +204,46 @@ public abstract class AuthControllerBase : ControllerBase
      *   是同一件事的两半。摊到调用方去写，将来多一个会累计失败的入口
      *   （例如改密时校验旧口令），就会出现第二份窗口语义，两份迟早会走偏。
      *
-     * 顺序是本方法的全部要点：**先判窗口过期，再累加**。
-     *   已过期 ⇒ 上一串失败不再算数：计数归零、清掉旧锚点，本次成为新窗口的第 1 次。
-     *   未过期 ⇒ 直接累加，**锚点保持不动**。
-     *     一旦每次失败都把锚点刷成"现在"，窗口就会被无限续期，
-     *     "3 分钟内 3 次"会退化成"只要不停手就永远锁不上"。
+     * 顺序是本方法的全部要点，而且有两层：
+     *   1. **先判窗口过期，再累加**。
+     *      已过期 ⇒ 上一串失败不再算数：计数归零、清掉旧锚点，本次成为新窗口的第 1 次。
+     *      未过期 ⇒ 直接累加，**锚点保持不动**。
+     *        一旦每次失败都把锚点刷成"现在"，窗口就会被无限续期，
+     *        "3 分钟内 3 次"会退化成"只要不停手就永远锁不上"。
+     *   2. **背离检测必须排在更前面**（在锚点被改写或清空之前）。
+     *      搬完锚点再算背离，读到的是"锚点与现在一致"，拨钟反而查不出来。
+     *
+     * 它同时是"未锁定状态下拨钟"的**唯一留痕点**：
+     *   锁定之后再拨钟走的是 TimeGuard.Assess 那条路（那里靠 lockoutDriftLogged 收敛），
+     *   而锁定**之前**的拨钟过去完全静默 —— 攻击者在 3 次尝试之内拨钟不留任何痕迹。
+     *   这里刻意不引入新的去重字段：一轮窗口内最多产生 2 条（第 1 次没有锚点可比，
+     *   第 3 次就已经锁定），速率不超过 LOGIN_FAILED 本身，淹没不了审计。
      */
-    protected static bool RegisterFailedAttempt(User user, DateTime wallNow, long uptimeMs)
+    protected async Task<bool> RegisterFailedAttemptAsync(User user, DateTime wallNow, long uptimeMs, string target)
     {
-        if (user.FailedLoginAttempts > 0 &&
+        var hasWindow = user.FailedLoginAttempts > 0;
+
+        // 背离检测放在最前，理由见方法说明第 2 条。
+        //
+        // 两个方向都记（与锁定判定的口径逐字一致）：
+        //   前拨 —— 对攻击者有利的指纹，即"想靠改时间把窗口作废、重新拿回 3 次机会"；
+        //   回拨 —— 对攻击者无利，但典型成因是主板电池耗尽 / 虚拟机快照回滚，
+        //          这类故障本身就该在审计里留一笔。
+        // 只记前拨会让"有人动过时钟"这件事在审计里缺一半。
+        //
+        // 注意拨钟**不改变本次尝试的结果**：既不加罚、也不放过。
+        // 取证与裁决分开 —— 能拨钟的人本来就持有管理员权限，
+        // 给他加罚只是误伤普通人（详见 docs/reports/AUDIT-VERIFY-REPORT.md）。
+        if (hasWindow)
+        {
+            var (drift, driftSeconds, uptimeImpliedNow) = TimeGuard.WindowDrift(
+                user.FailedWindowWallAt, user.FailedWindowUptimeAt, wallNow, uptimeMs);
+            if (drift != ClockDrift.None)
+                await LogClockAnomalyAsync(user, drift, driftSeconds, uptimeImpliedNow,
+                    "FAILED_ATTEMPT_WINDOW", target, null);
+        }
+
+        if (hasWindow &&
             TimeGuard.WindowExpired(user.FailedWindowWallAt, user.FailedWindowUptimeAt,
                 wallNow, uptimeMs, FailureWindow))
         {

@@ -226,7 +226,10 @@ public class AuthController : AuthControllerBase
             // 计一次失败：只有落在同一个窗口（FailureWindow）内的才累加。
             // 窗口过期时由它把计数归零、本次成为新窗口的第 1 次 ——
             // 这里刻意不自己判"过期没有"，窗口语义只有基类那一份实现。
-            var thresholdReached = RegisterFailedAttempt(user, failWallNow, failUptimeMs);
+            // 它同时是"还没锁定就拨钟"的唯一留痕点：拨钟不改变本次尝试的结果
+            // （不加罚、也不放过），只让"有人动过时钟"在审计里留下一条。
+            var thresholdReached = await RegisterFailedAttemptAsync(user, failWallNow, failUptimeMs,
+                sanitizedUsername);
 
             string? message;
             string code;

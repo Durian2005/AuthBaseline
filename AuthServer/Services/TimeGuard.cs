@@ -36,9 +36,11 @@ public readonly record struct LockoutVerdict(
 /// <summary>
 /// 时钟护栏：让"账号锁定"与"失败计数窗口"都不再单纯依赖可被操纵的本机墙钟。
 ///
-/// 本类服务两个判定（两者的加固理由完全相同 —— 墙钟可被拨动，且拨动方向对攻击者有利）：
+/// 本类服务两个判定 + 一处取证（前两者的加固理由完全相同 —— 墙钟可被拨动，且拨动方向对攻击者有利）：
 ///   1. <see cref="Assess"/>：锁定何时到期。拨快时钟 = 提前解锁；
-///   2. <see cref="WindowExpired"/>：失败计数窗口是否作废。拨快时钟 = 计数清零 = 重新拿回尝试机会。
+///   2. <see cref="WindowExpired"/>：失败计数窗口是否作废。拨快时钟 = 计数清零 = 重新拿回尝试机会；
+///   3. <see cref="WindowDrift"/>：窗口锚点与现在的背离量。前两个判定负责"挡住"，
+///      它负责让"有人动过时钟"这件事在**未锁定阶段**也留下记录 —— 纯取证，不参与放行与否。
 ///
 /// 背景（这一点是本类存在的全部理由）：
 ///   加固前判定式为 `LockoutEnd > DateTime.UtcNow`，两个操作数都受墙钟控制 ——
@@ -169,6 +171,39 @@ public static class TimeGuard
             return wallNow - windowWallAt.Value >= window;
 
         return TimeSpan.FromMilliseconds(uptimeMs - windowUptimeAt.Value) >= window;
+    }
+
+    /// <summary>
+    /// 计算"失败计数窗口锚点"两条时间线的背离（纯函数：不读时钟、不碰数据库）。
+    ///
+    /// 存在的理由：窗口与锁定一样会被拨钟试探，而**未锁定状态下的拨钟过去完全不留痕** ——
+    /// 留痕原先只挂在"锁定拒绝"那条分支上，而那条分支要求账号已经是 Locked。
+    /// 于是攻击者在 3 次尝试之内拨钟，事后翻审计看不到任何记录。
+    /// 这个纯函数让窗口判定也能问出"锚点与现在差了多少"，从而补上那一条。
+    ///
+    /// 与 <see cref="WindowExpired"/> 共用同一套锚点、同一套容差：
+    /// 两者对"锚点可不可信"的判断必须逐字一致，否则会出现
+    /// "窗口判定采信锚点、背离检测不采信"这种自相矛盾。
+    ///
+    /// 返回 <see cref="ClockDrift.None"/> 的三种情形：缺锚点、运行时长回退（机器重启）、
+    /// 差值落在 <see cref="DriftToleranceSeconds"/> 之内。
+    /// </summary>
+    /// <returns>背离方向、背离秒数（正 = 墙钟快于单调线）、单调线推算出的"现在"（供审计记录回显）。</returns>
+    public static (ClockDrift Drift, long DriftSeconds, DateTime UptimeImpliedNow) WindowDrift(
+        DateTime? windowWallAt, long? windowUptimeAt, DateTime wallNow, long uptimeMs)
+    {
+        // 与 WindowExpired 同一条退路：没有可信的单调锚点时**不做**背离判断。
+        // 刻意不"退回墙钟算背离" —— 机器一重启，墙钟与运行时长必然对不上，
+        // 那样每台重启过的机器在下次失败时都会报一次假背离。
+        if (windowWallAt is null || windowUptimeAt is null || uptimeMs < windowUptimeAt.Value)
+            return (ClockDrift.None, 0, wallNow);
+
+        var implied = windowWallAt.Value.AddMilliseconds(uptimeMs - windowUptimeAt.Value);
+        var driftSeconds = (long)Math.Round((wallNow - implied).TotalSeconds);
+        if (Math.Abs(driftSeconds) <= DriftToleranceSeconds)
+            return (ClockDrift.None, 0, implied);
+
+        return (driftSeconds > 0 ? ClockDrift.Forward : ClockDrift.Backward, driftSeconds, implied);
     }
 
     /// <summary>无单调证据时的退路：完全按墙钟判定（加固前的行为）。</summary>
