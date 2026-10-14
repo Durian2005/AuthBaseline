@@ -20,7 +20,7 @@
         "minHeight": 680,
         "resizable": true,
         "center": true,
-        "additionalBrowserArgs": "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection --single-process --disable-gpu"
+        "additionalBrowserArgs": "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection --in-process-gpu"
       }
     ],
     "security": {

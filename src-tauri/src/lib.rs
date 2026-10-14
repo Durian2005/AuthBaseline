@@ -4,6 +4,14 @@
 //!   - 应用启动 → 自动拉起后端
 //!   - 窗口关闭 / 应用退出 → 自动终止后端进程，不留残留
 //!   - 后端地址通过 IPC 命令 `get_backend_url` 下发给前端
+//!
+//! ⚠️ 关于 `tauri.conf.json` 的 `additionalBrowserArgs`（踩过的坑，别再改回去）：
+//!   历史上这里带过 `--single-process`，在 WebView2 Runtime **155** 上会直接
+//!   把渲染链路搞崩 —— 窗口出现一两秒（白屏，页面还没渲染完）就被销毁，
+//!   用户看到的现象是「白屏 + 闪退」，且**没有任何错误信息**。
+//!   Chromium 从未支持 `--single-process`（官方明确不推荐），不要因为
+//!   "省内存/少进程"再把它加回来。诊断方法：`EnumWindows` 按 pid 采窗口，
+//!   会看到 `Tauri Window` 在几秒后从列表里消失，而进程还活着。
 
 use std::net::{TcpListener, TcpStream};
 use std::sync::Mutex;
@@ -168,25 +176,51 @@ pub fn run() {
             // 否则整个界面连壳都渲染不出来（白窗口、无任何错误信息）。
             // 证书的签发与信任写入见后端的 CertificateManager ——
             // 产品路径是 NSIS 安装期写 LocalMachine\Root，开发态退化写 CurrentUser\Root。
-            if !wait_for_backend(port, STARTUP_TIMEOUT) {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::TimedOut,
-                    format!("后端启动超时（{}s），请确认 MongoDB 服务已启动。", STARTUP_TIMEOUT.as_secs()),
-                ).into());
-            }
-            println!("[backend] 已就绪：{url}");
-
+            // 先把窗口拿到手：即使后端起不来，也要有窗口能显示原因，
+            // 而不是窗口一闪即没、用户只看到"白屏 + 闪退"。
             let window = app.get_webview_window("main").ok_or_else(|| {
                 std::io::Error::new(std::io::ErrorKind::NotFound, "未找到主窗口")
             })?;
+
+            if !wait_for_backend(port, STARTUP_TIMEOUT) {
+                // 旧实现直接 return Err：setup 失败 → 进程退出、窗口消失，
+                // 用户那边只看到"白屏 + 闪退"，且看不出任何原因。
+                // 现在把原因直接画在窗口里，不再退出。
+                let html = format!(
+                    "<div style=\"font-family:system-ui,'Segoe UI',sans-serif;padding:56px;\
+                     color:#e5e7eb;background:#0f172a;height:100vh;box-sizing:border-box\">\
+                     <h1 style=\"font-size:20px;margin:0 0 14px;font-weight:600\">后端未能在 {} 秒内启动</h1>\
+                     <p style=\"margin:0 0 10px;line-height:1.8\">桌面端已拉起 sidecar，但没有等到它开始监听。<br>\
+                     常见原因：本机 MongoDB 服务未启动。</p>\
+                     <p style=\"margin:0;color:#94a3b8\">后端地址：{}</p></div>",
+                    STARTUP_TIMEOUT.as_secs(),
+                    url
+                );
+                let js = format!(
+                    "document.body.innerHTML = {};",
+                    serde_json::to_string(&html).unwrap_or_else(|_| "\"\"".to_string())
+                );
+                let _ = window.eval(&js);
+                eprintln!("[backend] 启动超时：已在窗口内显示原因（不再直接退出）");
+                return Ok(());
+            }
+            println!("[backend] 已就绪：{url}");
+
+            // 窗口本该自己显示；这里显式 show 一下，免得个别环境下窗口停在隐藏/最小化态，
+            // 用户只看到任务栏图标却以为"闪退"。（幂等操作，无副作用）
+            let _ = window.show();
+            println!("[window] 主窗口存在，开始导航到 {url}");
             window.navigate(url.parse().map_err(|e| {
                 std::io::Error::new(std::io::ErrorKind::InvalidInput, format!("后端地址无效：{e}"))
             })?)?;
+            println!("[window] navigate() 已提交（异步，失败不会在此报错）");
 
             Ok(())
         })
         // 单窗口应用：窗口销毁即代表用户关闭了应用
         .on_window_event(|window, event| {
+            // 排障用：窗口被谁销毁、什么时候销毁，全部留痕
+            println!("[window] 事件：{event:?}");
             if matches!(event, WindowEvent::Destroyed) {
                 kill_backend(window.app_handle());
             }
