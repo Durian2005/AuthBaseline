@@ -38,6 +38,12 @@ public sealed class CvFaceEngine : IFaceEngine, IDisposable
     private readonly object _modelLock = new();
     private readonly object _cameraLock = new();
 
+    /// <summary>
+    /// 预览帧的落点。可为 null（探针会直接 new 一个引擎来量算法，不需要界面）。
+    /// 采集期间由本引擎推帧 —— 那几秒里摄像头归它独占，读到的就是判定用的那一帧。
+    /// </summary>
+    private readonly FacePreviewService? _preview;
+
     private FaceDetectorYN? _detector;
     private Net? _recognizer;
     private VideoCapture? _camera;
@@ -55,9 +61,10 @@ public sealed class CvFaceEngine : IFaceEngine, IDisposable
         new(70.7299f, 92.2041f)
     };
 
-    public CvFaceEngine(FaceOptions opt)
+    public CvFaceEngine(FaceOptions opt, FacePreviewService? preview = null)
     {
         _opt = opt;
+        _preview = preview;
         TryLoadModels();
     }
 
@@ -247,6 +254,43 @@ public sealed class CvFaceEngine : IFaceEngine, IDisposable
         }
     }
 
+    // ────────────────────────────────────────────── 预览
+
+    /**
+     * 取一张带标注的预览 JPEG。**只服务于界面显示，不参与任何判定。**
+     *
+     * 与 RunChallenge 的边界刻意划清：
+     *   · 这里不做活体、不比对模板、不产生特征、不写审计；
+     *   · 失败一律返回 null（含"引擎未就绪"），由调用方翻成"暂无画面"，
+     *     绝不用一张占位图冒充"这是你现在的样子"。
+     *
+     * 摄像头不在这里 Close()：预览是连续取帧，每帧开关一次设备既慢
+     * （DSHOW 打开要几百毫秒）也没有意义。空闲释放由 FacePreviewService
+     * 在"没有有效 token"时统一负责。
+     */
+    public FacePreviewFrame? SnapshotPreview()
+    {
+        if (!_status.Ready) return null;
+
+        var openError = TryOpen();
+        if (openError is not null)
+        {
+            // 引擎就绪但设备打不开（被别的程序占用 / 没有摄像头）：
+            // 给一张写明原因的占位图，比让界面一直空着更容易定位问题。
+            return new FacePreviewFrame(
+                FacePreviewEncoder.Placeholder(_opt.CaptureWidth, _opt.CaptureHeight, "CAMERA UNAVAILABLE"),
+                FacePreviewFrame.StateDown, null, DateTime.UtcNow);
+        }
+
+        using var mat = ReadRaw();
+        if (mat is null) return null;
+
+        var box = DetectLargest(new FaceFrame { Width = mat.Width, Height = mat.Height, Backing = mat });
+        var state = box is null ? FacePreviewFrame.StateNoFace : FacePreviewFrame.StateDetected;
+        return new FacePreviewFrame(FacePreviewEncoder.Annotate(mat, box, state), state,
+            box?.Score, DateTime.UtcNow);
+    }
+
     // ────────────────────────────────────────────── 特征
 
     public double[]? Feature(FaceFrame frame, FaceBox box)
@@ -332,6 +376,35 @@ public sealed class CvFaceEngine : IFaceEngine, IDisposable
             return b.ToString();
         }
 
+        /**
+         * 采集期间把画面推给界面。用的是**判定用的那一帧**（所见即所判），
+         * 但只在副本上画框 —— 在原图上画会把框的像素喂进后面的对齐与特征提取。
+         *
+         * 限流到约 10 帧/秒：采样是 14Hz，逐帧编码 JPEG 只是白烧 CPU，
+         * 而人眼在 640x480 上分不出 10 与 14 的差别。
+         */
+        double lastPreviewAt = -1.0;
+        void PublishPreview(FaceFrame? f, FaceBox? b)
+        {
+            if (_preview is null || f?.Backing is not Mat pm) return;
+            if (sw.Elapsed.TotalSeconds - lastPreviewAt < 0.1) return;
+            lastPreviewAt = sw.Elapsed.TotalSeconds;
+
+            var state = b is null
+                ? FacePreviewFrame.StateNoFace
+                : (actionSeen ? FacePreviewFrame.StateReturned : FacePreviewFrame.StateAction);
+            try
+            {
+                _preview.Publish(new FacePreviewFrame(
+                    FacePreviewEncoder.Annotate(pm, b, state), state, b?.Score, DateTime.UtcNow));
+            }
+            catch (Exception ex)
+            {
+                // 推帧失败不影响判定本身 —— 采集循环必须继续走完
+                Console.WriteLine($"[Face] 采集期推帧失败：{ex.Message}");
+            }
+        }
+
         try
         {
             var openError = TryOpen();
@@ -346,6 +419,7 @@ public sealed class CvFaceEngine : IFaceEngine, IDisposable
 
                 if (box is null)
                 {
+                    PublishPreview(frame, null);
                     if (frame?.Backing is IDisposable d) d.Dispose();
                     miss++;
                     if (miss >= FacePose.MaxMiss)
@@ -383,6 +457,7 @@ public sealed class CvFaceEngine : IFaceEngine, IDisposable
 
                 var (yaw, pitch, _) = FacePose.Metrics(box);
                 samples++;
+                PublishPreview(frame, box);
 
                 if (baseYaw is null)
                 {

@@ -23,11 +23,13 @@ namespace AuthServer.Services.Face;
 public sealed class StubFaceEngine : IFaceEngine
 {
     private readonly FaceOptions _opt;
+    private readonly FacePreviewService? _preview;
     private bool _open;
 
-    public StubFaceEngine(FaceOptions opt)
+    public StubFaceEngine(FaceOptions opt, FacePreviewService? preview = null)
     {
         _opt = opt;
+        _preview = preview;
         Console.WriteLine("[Face] ⚠️ 正在使用**假引擎**（无摄像头/无模型）—— 仅供流程与审计验证");
     }
 
@@ -74,6 +76,28 @@ public sealed class StubFaceEngine : IFaceEngine
 
     public double[]? Feature(FaceFrame frame, FaceBox box) => Derive(_opt.StubIdentity);
 
+    /**
+     * 假引擎的"预览"：一张写明身份的占位图。
+     *
+     * 它让"识别画面"这条路径在**没有摄像头的机器上**也能被完整走到与验证 ——
+     * 回归探针要断言的正是"门禁对不对"，而不是"像素好不好看"。
+     * 这里用 OpenCV 只是为了把一张图编成 JPEG（不加载任何模型、不碰设备），
+     * 假引擎"无摄像头、无模型"的定位不受影响。
+     */
+    public FacePreviewFrame? SnapshotPreview()
+    {
+        if (string.Equals(_opt.StubBehavior, "engine_down", StringComparison.Ordinal))
+        {
+            return new FacePreviewFrame(
+                FacePreviewEncoder.Placeholder(_opt.CaptureWidth, _opt.CaptureHeight, "ENGINE DOWN"),
+                FacePreviewFrame.StateDown, null, DateTime.UtcNow);
+        }
+
+        return new FacePreviewFrame(
+            FacePreviewEncoder.Placeholder(_opt.CaptureWidth, _opt.CaptureHeight, "STUB - NO CAMERA"),
+            FacePreviewFrame.StateDetected, 0.99, DateTime.UtcNow);
+    }
+
     public double Similarity(double[] a, double[] b)
     {
         if (a.Length != b.Length || a.Length == 0) return 0;
@@ -87,6 +111,10 @@ public sealed class StubFaceEngine : IFaceEngine
     {
         var openError = TryOpen();
         if (openError is not null) return ChallengeOutcome.Fail("FACE_ENGINE_UNAVAILABLE", openError);
+
+        // 采集期同样推一帧：形状与真引擎一致，好让"采集进行中画面仍在更新"这条行为
+        // 也能在没有摄像头的环境里被覆盖到。
+        if (_preview is not null && SnapshotPreview() is { } frame) _preview.Publish(frame);
 
         var behavior = _opt.StubBehavior;
         switch (behavior)

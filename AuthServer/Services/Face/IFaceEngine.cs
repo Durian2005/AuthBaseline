@@ -115,4 +115,15 @@ public interface IFaceEngine
 
     /// <summary>跑一次完整的动作挑战：求基线 → 等动作 → 等回正 → 从回正那一帧提特征。</summary>
     ChallengeOutcome RunChallenge(string action);
+
+    /// <summary>
+    /// 取一张**带标注的预览 JPEG**，供登录 / 录入页显示"识别画面"。
+    ///
+    /// 与 <see cref="RunChallenge"/> 的区别是刻意的，两者不能互相代替：
+    ///   · 它**不做任何判定**、不产生特征、不写审计 —— 只是"打开摄像头 → 读一帧 → 画框 → 编码"；
+    ///   · 它的返回值是一张**图像**，不是坐标也不是特征。前端因此拿不到关键点，
+    ///     "把画面/特征上送后端"这条路在接口形状上依然不存在（见类头 ③）。
+    /// 返回 null 表示这一帧拿不到（引擎未就绪 / 摄像头打不开），调用方按"暂无画面"处理。
+    /// </summary>
+    FacePreviewFrame? SnapshotPreview();
 }
