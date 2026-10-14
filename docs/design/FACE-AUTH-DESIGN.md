@@ -1,7 +1,7 @@
 # 人脸认证接入设计（AuthBaseline）
 
 > **状态：D1 已定稿**（"登录第二因子、账号级可选启用"，见 §六 末与 §十三）；D2 / D3 / D4 待拍板。**本文不含任何已实现内容。**
-> 参考资产：`E:\人脸识别测试实验`（仓库 `Durian2005/FaceLogin`）—— 已完成"注册 / 口令登录 / 人脸 1:1 登录 / 动作挑战活体 / 哈希链审计 / 一键启动与 PyInstaller 打包"。
+> 参考资产：本地参考项目 `<参考项目本地目录>`（仓库 `Durian2005/FaceLogin`）—— 已完成"注册 / 口令登录 / 人脸 1:1 登录 / 动作挑战活体 / 哈希链审计 / 一键启动与 PyInstaller 打包"。
 > 本文回答四件事：**能不能接**、**接完长什么样**、**分几步做**、**哪些决定要你拍板**。
 
 ---
@@ -340,7 +340,7 @@
 
 | 阶段 | 产出 | 验证方式 | 是否可交付使用 |
 |---|---|---|---|
-| **Stage 0 · 可行性验证**（不写业务代码） | ① OpenCvSharp 能否跑通 `FaceDetectorYN` + `FaceRecognizerSF`（否则转 B）；② ⚠️ **中文路径下加载 ONNX 是否失败**（FaceLogin 专门写了 `model_paths.py` 做 ASCII 镜像，本机路径 `E:\信息系统安全实验` 同样含中文）；③ 服务端 `VideoCapture` 打开摄像头 + 退出释放；④ 前端能显示后端推的预览帧 | 一次性脚本 + 日志 | 否 |
+| **Stage 0 · 可行性验证**（不写业务代码） | ① OpenCvSharp 能否跑通 `FaceDetectorYN` + `FaceRecognizerSF`（否则转 B）；② ⚠️ **中文路径下加载 ONNX 是否失败**（FaceLogin 专门写了 `model_paths.py` 做 ASCII 镜像，本机路径 `<仓库根目录>` 同样含中文）；③ 服务端 `VideoCapture` 打开摄像头 + 退出释放；④ 前端能显示后端推的预览帧 | 一次性脚本 + 日志 | 否 |
 | **Stage 1 · 骨架** | `FaceTemplate` 模型 + 集合 + 索引；`AuditAction` / `AuditReason` 常量；`FaceService` 接口 + **假引擎**（返回固定相似度） | 用假引擎把审计与流程跑通，**此阶段不碰真模型** | 否 |
 | **Stage 2 · 接入登录** | 挑战 token（内存 + TTL + 一次性）、`/api/auth/face/verify`、失败计数接入 `RegisterFailedAttemptAsync`、`LOGIN_SUCCESS` 的唯一路径不被绕过 | 探针：口令过 / 人脸不过 → 不签票、计数 +1、审计两条 | 是（内部） |
 | **Stage 3 · 自助与管理** | Account 域三条接口 + UsersView 重置 + 前端组件 | UI 检查（CDP）+ 权限探针（UserAdmin 不能重置 Admin） | 是 |

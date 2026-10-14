@@ -6,7 +6,7 @@
 >
 > ⚠️ **本文件已脱敏**（仓库是 public）：原本的本机路径与 Windows 用户名已替换为
 > `<系统 Python 的完整路径>` / `<仓库根目录>` 两个占位符。演示前在命令块里**填一次**即可，
-> 例如 `set PY=C:\Python313\python.exe` 与 `cd /d D:\你的路径\AuthBaseline`。
+> 例如 `set PY=C:\Python313\python.exe` 与 `cd /d <项目目录>\AuthBaseline`。
 >
 > 文中所有 `%PY%` 都指"**装了 `pymongo` / `bcrypt` 的那个系统 Python**" ——
 > 不是 WorkBuddy 自带的托管解释器（它没有这两个包，已实测）。

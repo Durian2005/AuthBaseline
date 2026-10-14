@@ -30,7 +30,7 @@ namespace AuthServer.Services.Face;
  *      如果哪天"顺手"把归一化挪进存储，历史模板会全部失效。
  *
  *   ⑤ **中文路径读不了 YuNet 的 ONNX。** 路径按 ANSI 编组，含中文时变成乱码文件名。
- *      本机项目目录就叫 `E:\信息系统安全实验`，所以必须镜像到 ASCII 目录（见 EnsureAsciiModel）。
+ *      本项目所在的目录名就含中文，所以必须镜像到 ASCII 目录（见 EnsureAsciiModel）。
  */
 public sealed class CvFaceEngine : IFaceEngine, IDisposable
 {
@@ -110,9 +110,9 @@ public sealed class CvFaceEngine : IFaceEngine, IDisposable
     /// <summary>
     /// 把含非 ASCII 字符的模型路径镜像到纯 ASCII 目录，返回可用的路径。
     ///
-    /// OpenCV 的 ONNX 读取把路径按 ANSI 编组，`E:\信息系统安全实验\...` 会被解成
-    /// `E:\淇℃伅绯荤粺瀹夊叏瀹為獙\...` 然后报"文件不存在" —— 报错信息还会把
-    /// 乱码显示出来，极易被误判成"文件真的不在"。
+    /// OpenCV 的 ONNX 读取把路径按 ANSI 编组；路径里只要有一段是中文
+    /// （如 `\某中文目录\model.onnx`），就会被解成一串乱码文件名，
+    /// 然后报"文件不存在" —— 报错信息还会把乱码显示出来，极易被误判成"文件真的不在"。
     /// 本机项目目录名恰好就是中文，所以这个分支在开发机上必然走到。
     /// </summary>
     internal static string EnsureAsciiModel(string path)
