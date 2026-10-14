@@ -24,10 +24,11 @@ public class AccountController : AuthControllerBase
     private readonly EmailOptions _emailOptions;
     private readonly FaceLoginService _face;
     private readonly FaceTemplateStore _faceTemplates;
+    private readonly FacePreviewService _preview;
 
     public AccountController(MongoDbService db, AuditWriter auditWriter, SessionService sessions,
         PepperProvider pepper, VerificationService codes, EmailOptions emailOptions,
-        FaceLoginService face, FaceTemplateStore faceTemplates,
+        FaceLoginService face, FaceTemplateStore faceTemplates, FacePreviewService preview,
         IConfiguration configuration)
         : base(db, auditWriter, sessions, pepper, configuration)
     {
@@ -35,6 +36,7 @@ public class AccountController : AuthControllerBase
         _emailOptions = emailOptions;
         _face = face;
         _faceTemplates = faceTemplates;
+        _preview = preview;
     }
 
     /* ==================== 注册（绑定邮箱） ==================== */
@@ -634,6 +636,11 @@ public class AccountController : AuthControllerBase
         }
 
         var (token, pose) = _face.IssueForEnroll(user.Username);
+
+        // 与登录那条路径同源：录入挑战同样是一张"能换到识别画面"的凭据，
+        // 而它成立的前提是——本人刚刚重新输过当前口令。
+        _preview.Open(token, _face.ChallengeTtlSeconds);
+
         var challenge = new ApiResponse<FaceChallengeResponse>
         {
             Success = true,
@@ -645,7 +652,8 @@ public class AccountController : AuthControllerBase
                 Action = pose,
                 ActionText = FacePose.ActionText(pose),
                 ActionHint = FacePose.ActionHint,
-                ExpiresInSeconds = _face.ChallengeTtlSeconds
+                ExpiresInSeconds = _face.ChallengeTtlSeconds,
+                Threshold = _face.Threshold
             }
         };
         await _auditWriter.WriteAsync(user.Id, user.Username, action, statusBefore, requestLog,
@@ -673,7 +681,20 @@ public class AccountController : AuthControllerBase
         var requestLog = new { user = user!.Username };
         var statusBefore = user.Status.ToString();
 
-        var (challengeUser, outcome, error) = _face.CaptureForEnroll(req.ChallengeToken);
+        // 采集期间画面改由采集循环推，并在这之后收回预览权（见 FacePreviewService.BeginCapture）。
+        (string? challengeUser, ChallengeOutcome? outcome, string? error) captured;
+        using (var _ = _preview.BeginCapture())
+        {
+            try
+            {
+                captured = _face.CaptureForEnroll(req.ChallengeToken);
+            }
+            finally
+            {
+                _preview.Close(req.ChallengeToken);
+            }
+        }
+        var (challengeUser, outcome, error) = captured;
 
         // 挑战无效 / 用途不是 enroll / 属于别人 ⇒ 一律按无主处理，不归属、不计次。
         // "属于别人"这一条虽然靠 token 不可猜已经兜住，但仍显式比一次 ——

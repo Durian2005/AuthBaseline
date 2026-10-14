@@ -29,6 +29,13 @@ public class FaceChallengeResponse
 
     /// <summary>挑战剩余有效秒数。过期的挑战一律作废，不续期。</summary>
     public int ExpiresInSeconds { get; set; }
+
+    /// <summary>
+    /// 本机当前判定阈值（余弦相似度）。随挑战一起下发，是为了让识别画面上能显示
+    /// "本机按 0.50 判定"这类**可核对的数字**，而不是让阈值变成一个只存在于代码里的魔数。
+    /// 它不是秘密：拿到它同样要先通过口令。
+    /// </summary>
+    public double Threshold { get; set; }
 }
 
 /// <summary>登录第二阶段：提交人脸验证。只需挑战 token，画面由服务端自己采。</summary>

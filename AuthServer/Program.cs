@@ -162,10 +162,17 @@ public class Program
         faceOptions.ApplyEnvironmentOverrides();
         builder.Services.AddSingleton(faceOptions);
 
+        // 人脸"识别画面"：帧槽 + 挑战门禁 + 空闲释放摄像头。
+        // 它与引擎是**双向**关系（引擎在采集期推帧 / 帧槽平时读帧并负责关摄像头），
+        // 直接互相注入会让构造函数成环，所以分两步接线：先建帧槽 → 交给引擎 → 再回绑引擎。
+        var facePreview = new AuthServer.Services.Face.FacePreviewService();
+        builder.Services.AddSingleton(facePreview);
+
         AuthServer.Services.Face.IFaceEngine faceEngine = faceOptions.UseStubEngine
-            ? new AuthServer.Services.Face.StubFaceEngine(faceOptions)
-            : new AuthServer.Services.Face.CvFaceEngine(faceOptions);
+            ? new AuthServer.Services.Face.StubFaceEngine(faceOptions, facePreview)
+            : new AuthServer.Services.Face.CvFaceEngine(faceOptions, facePreview);
         builder.Services.AddSingleton(faceEngine);
+        facePreview.Bind(faceEngine);
 
         builder.Services.AddSingleton<AuthServer.Services.Face.FaceTemplateCrypto>();
         builder.Services.AddSingleton<AuthServer.Services.Face.FaceTemplateStore>();
@@ -182,7 +189,11 @@ public class Program
             {
                 policy.AllowAnyOrigin()
                       .AllowAnyHeader()
-                      .AllowAnyMethod();
+                      .AllowAnyMethod()
+                      // 桌面端（tauri://）与后端是**跨源**的，而人脸预览帧的状态
+                      // 只能随响应头一起回来（响应体是 JPEG）。不显式放行的话，
+                      // 浏览器会把这两个头挡在 JS 之外，界面上的检测徽记永远是空的。
+                      .WithExposedHeaders("X-Face-State", "X-Face-Score");
             });
         });
 

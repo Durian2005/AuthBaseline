@@ -21,13 +21,16 @@ public class AuthController : AuthControllerBase
 {
     private readonly TransportInfo _transport;
     private readonly FaceLoginService _face;
+    private readonly FacePreviewService _preview;
 
     public AuthController(MongoDbService db, AuditWriter auditWriter, SessionService sessions,
-        PepperProvider pepper, TransportInfo transport, IConfiguration configuration, FaceLoginService face)
+        PepperProvider pepper, TransportInfo transport, IConfiguration configuration, FaceLoginService face,
+        FacePreviewService preview)
         : base(db, auditWriter, sessions, pepper, configuration)
     {
         _transport = transport;
         _face = face;
+        _preview = preview;
     }
 
     /// <summary>
@@ -322,6 +325,12 @@ public class AuthController : AuthControllerBase
             if (decision.Requirement == FaceLoginService.Requirement.Challenge)
             {
                 var (token, action) = _face.Issue(user.Username);
+
+                // 放行"识别画面"：把这张挑战登记成一段**会自己结束**的预览窗口。
+                // 门禁就绑在挑战上 —— 拿不到挑战（= 没过口令）就拿不到画面，
+                // 而过期/被消费/被取消之后，窗口自动关闭。
+                _preview.Open(token, _face.ChallengeTtlSeconds);
+
                 var challengeResp = new ApiResponse<FaceChallengeResponse>
                 {
                     // Success=true 表示"这一步本身成功":口令这一因子已经通过，
@@ -336,7 +345,8 @@ public class AuthController : AuthControllerBase
                         Action = action,
                         ActionText = FacePose.ActionText(action),
                         ActionHint = FacePose.ActionHint,
-                        ExpiresInSeconds = _face.ChallengeTtlSeconds
+                        ExpiresInSeconds = _face.ChallengeTtlSeconds,
+                        Threshold = _face.Threshold
                     }
                 };
                 await _auditWriter.WriteAsync(user.Id, user.Username, AuditAction.FaceLoginRequired, statusBefore,
@@ -421,7 +431,22 @@ public class AuthController : AuthControllerBase
             return Unauthorized(disabledResp);
         }
 
-        var result = await _face.EvaluateAsync(user, action);
+        // 正式采集开始：这几秒里摄像头归采集循环独占，预览循环主动停手，
+        // 画面改由采集循环自己推（见 FacePreviewService.BeginCapture）。
+        // 用 using + finally 收回预览权，是为了不让任何一条 return 分支
+        // 把"这张挑战还能换到画面"这件事留在身后。
+        FaceLoginService.VerifyResult result;
+        using (var _ = _preview.BeginCapture())
+        {
+            try
+            {
+                result = await _face.EvaluateAsync(user, action);
+            }
+            finally
+            {
+                _preview.Close(req.ChallengeToken);
+            }
+        }
 
         if (result.Passed)
         {
@@ -486,6 +511,66 @@ public class AuthController : AuthControllerBase
             },
             user.Status.ToString(), user.Username, AuditResult.Failed, reason);
         return Unauthorized(failResp);
+    }
+
+    /* ==================== 人脸识别画面（预览） ==================== */
+
+    /**
+     * 取一帧"识别画面"。这是一条**未鉴权**接口 —— 与 login/face 同类，
+     * 此时还没有任何票据可携带。
+     *
+     * 它凭什么安全（这三条必须一起成立，少一条都不能开这个口子）：
+     *   ① **凭据是一张一次性挑战 token**，而挑战只可能来自"口令刚刚验证通过"
+     *      （登录）或"本人重新输了一遍当前口令"（录入）。拿不到 token 的人，
+     *      必须先知对口令 —— 不是"本机任何页面都能来拉摄像头流"。
+     *   ② **窗口会自己结束**：token 过期、被消费、或采集结束，预览立刻失效
+     *      （`FaceChallengeStore` 的 TTL 与这里的 `Close` 各管一头）。
+     *   ③ **双向只出图像**：接口上没有"接收画面或特征"的形状，出去的也只是
+     *      服务端画好框的图，关键点坐标从不下发。
+     *
+     * ⚠️ 与设计期登记的那条威胁一致：它仍然落在未鉴权面上，
+     *    缓解手段依旧只有"仅绑环回" + 挑战门禁。**不要对外宣称这条已被解决。**
+     *
+     * 刻意**不写审计**：预览是界面行为，一次登录可能拉几百帧；若每帧记一条，
+     * 审计链会被无意义地灌满。真正需要留痕的是"谁在什么时候被要求刷脸"
+     * （FACE_LOGIN_REQUIRED，已在签发挑战那一步记过）。
+     */
+    [HttpGet("face/preview")]
+    public IActionResult FacePreview([FromQuery] string? token)
+    {
+        if (!_preview.IsOpen(token))
+        {
+            // 用 404 而不是 401：这里没有"认证失败"的语义，
+            // 只是"这张票不在预览窗口里"，且不该给探测者任何额外信息。
+            return NotFound(new ApiResponse
+            {
+                Success = false,
+                Code = BusinessCode.FaceChallengeInvalid,
+                Message = FaceCodes.MessageFor("FACE_CHALLENGE_INVALID")
+            });
+        }
+
+        var frame = _preview.Latest;
+        if (frame is null)
+        {
+            // 窗口是开的、但还没攒出第一帧（刚放行时必然如此，约一个取帧周期）。
+            // 报 503 而不是 200+空图：让客户端把"暂无画面"和"画面是黑的"区分开。
+            return StatusCode(503, new ApiResponse
+            {
+                Success = false,
+                Code = BusinessCode.FaceEngineUnavailable,
+                Message = "暂时还取不到画面，请稍候"
+            });
+        }
+
+        // 状态只走响应头（响应体是 JPEG）。跨源时这两个头必须由 CORS 显式放行，
+        // 否则浏览器会把它们挡在 JS 之外（见 Program.cs 的 WithExposedHeaders）。
+        Response.Headers["X-Face-State"] = frame.State;
+        Response.Headers["X-Face-Score"] = frame.Score?.ToString("F4",
+            System.Globalization.CultureInfo.InvariantCulture) ?? string.Empty;
+        Response.Headers["Cache-Control"] = "no-store";
+
+        return File(frame.Jpeg, "image/jpeg");
     }
 
     /* ==================== 登录完成的唯一出口 ==================== */
