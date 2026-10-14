@@ -189,6 +189,43 @@ function canDelete(user) {
   return user.role === 'User' || user.role === 'UserAdmin'
 }
 
+/* ---------------- 重置他人人脸 ----------------
+ * 与注销共用同一套范围判定（后端也是同一个出口 CanBeManagedBy）。
+ * 它是一次**降级**：把对方的第二因子直接拿掉，因此走二次确认，
+ * 并且在确认框里说清后果 —— 而不是做成一个点一下就生效的行内按钮。
+ */
+const faceTarget = ref(null)
+const resettingFace = ref(false)
+
+/** 与注销同权限梯度；自己那一行不给入口（本人删除走账号页，需要自己的口令） */
+function canResetFace(user) {
+  return canDelete(user)
+}
+
+const resetFaceDetail = computed(() => {
+  const u = faceTarget.value
+  if (!u) return ''
+  return (
+    `重置后「${u.username}」不再需要刷脸登录，该账号的认证强度退回单因子。` +
+    '本操作会记入审计日志（谁重置了谁）。另一种用法：' +
+    '当本人摄像头损坏、无法完成第二因子时，这是唯一的恢复路径。'
+  )
+})
+
+async function confirmResetFace() {
+  if (!faceTarget.value) return
+  resettingFace.value = true
+  try {
+    const res = await session.resetFace(faceTarget.value.username)
+    toast.success(res?.message || '已重置人脸')
+    faceTarget.value = null
+  } catch (err) {
+    toast.error(err?.message || '重置人脸失败')
+  } finally {
+    resettingFace.value = false
+  }
+}
+
 /* ---------------- 新建账号（用户管理员 / 审计管理员） ----------------
  * 与自助注册不同：**不需要邮箱与验证码**，建号即可登录。
  * 但后端要求二次校验操作者本人的登录口令 —— 这是特权操作，
@@ -436,6 +473,18 @@ onMounted(() => {
                     <AppIcon name="swap" :size="13" />
                     <span>变更角色</span>
                   </button>
+                  <!-- 重置人脸：把对方的第二因子拿掉，是一次降级动作，
+                       因此与"注销"一样走二次确认，不用行内直接生效 -->
+                  <button
+                    v-if="canResetFace(u)"
+                    type="button"
+                    class="btn btn--sm"
+                    :title="`重置「${u.username}」的人脸模板`"
+                    @click="faceTarget = u"
+                  >
+                    <AppIcon name="face" :size="13" />
+                    <span>重置人脸</span>
+                  </button>
                   <button
                     v-if="canDelete(u)"
                     type="button"
@@ -615,6 +664,22 @@ onMounted(() => {
       :loading="deleting"
       @cancel="target = null"
       @confirm="confirmDelete"
+    />
+
+    <!-- 重置人脸的确认框：可逆性上是"可恢复的"（对方可重新录入），
+         但方向上是**降级**，所以用 warn 色调 + 把后果写在 detail 里，
+         而不是像注销那样用 danger —— 避免两者在视觉上被当成同一档操作。 -->
+    <ConfirmDialog
+      :open="!!faceTarget"
+      title="重置人脸模板"
+      icon="face"
+      tone="warn"
+      :message="`确定要重置「${faceTarget?.username}」的人脸吗？`"
+      :detail="resetFaceDetail"
+      confirm-text="重置人脸"
+      :loading="resettingFace"
+      @cancel="faceTarget = null"
+      @confirm="confirmResetFace"
     />
 
     <!-- 冻结确认：可逆操作，用 warn 色调而非 danger，

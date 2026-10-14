@@ -54,7 +54,17 @@ const ACTION_OPTIONS = [
   // 时钟异常（墙钟与运行时长两条时间线背离）。
   // 它记录的是"系统保障被动过"，而不是某个人的一次操作失败 ——
   // 单列一项，审计员才能把"有人拨钟"和"有人输错口令"分开看。
-  'CLOCK_ANOMALY'
+  'CLOCK_ANOMALY',
+  // 人脸（可选第二因子）。四项分开列出，"谁真的刷脸进来过"
+  // 与"谁在第二因子上被判失败"必须能各自一条查询捞出来 ——
+  // 这正是引入独立动作（而不是复用 LOGIN_*）的目的。
+  'FACE_LOGIN_REQUIRED',
+  'FACE_LOGIN_SUCCESS',
+  'FACE_LOGIN_FAILED',
+  'FACE_ENROLL',
+  'FACE_ENROLL_FAILED',
+  'FACE_TEMPLATE_DELETED',
+  'FACE_TEMPLATE_RESET'
 ]
 
 /**

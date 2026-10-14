@@ -1,15 +1,16 @@
 <script setup>
-import { computed, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import AppIcon from '../components/AppIcon.vue'
 import PasswordField from '../components/PasswordField.vue'
 import PasswordRules from '../components/PasswordRules.vue'
 import Spinner from '../components/Spinner.vue'
 import StatusBadge from '../components/StatusBadge.vue'
+import FaceCapturePanel from '../components/face/FaceCapturePanel.vue'
 import { useSessionStore } from '../stores/session'
 import { useToastStore } from '../stores/toast'
 import { ApiError } from '../api/client'
 import { isPasswordStrong } from '../utils/password'
-import { formatDuration } from '../utils/format'
+import { formatDateTime, formatDuration } from '../utils/format'
 
 const session = useSessionStore()
 const toast = useToastStore()
@@ -73,6 +74,105 @@ async function submit() {
   } catch (err) {
     const e = err instanceof ApiError ? err : new ApiError(err.message)
     formError.value = e.message
+  }
+}
+
+/* ==================== 刷脸登录（可选第二因子） ====================
+ *
+ * 交互形状是三个状态的小状态机，而不是一个"点一下就好"的按钮，
+ * 因为这条路**每一步都有安全含义**：
+ *
+ *   idle     ── 展示状态；两个入口都要先输当前口令
+ *   enroll   ── 输口令（服务端验）→ 换一张动作挑战
+ *   capture  ── 按服务端下发的动作做，然后由服务端采集一帧
+ *   delete   ── 输口令 + 二次确认。这是**降级**动作，必须比录入更慎重
+ *
+ * 口令一律交给后端判定，前端不做任何本地校验 ——
+ * 与"改密"那条路径保持同一套口径（本地只提示，裁决权在服务端，
+ * 失败会留下 FACE_WRONG_PASSWORD 审计并可被锁定策略累计）。
+ */
+const faceMode = ref('idle')
+const facePw = ref('')
+const faceError = ref('')
+const faceNotice = ref('')
+
+const faceStatus = computed(() => session.faceStatus)
+
+async function loadFace() {
+  faceError.value = ''
+  try {
+    await session.refreshFaceStatus()
+  } catch (err) {
+    // 拉不到状态不该打断整个账号页：只在人脸卡片里显示一行错误。
+    faceError.value = err instanceof ApiError ? err.message : '加载人脸状态失败'
+  }
+}
+
+onMounted(loadFace)
+
+function startFaceEnroll() {
+  faceMode.value = 'enroll'
+  facePw.value = ''
+  faceError.value = ''
+  faceNotice.value = ''
+}
+
+function startFaceDelete() {
+  faceMode.value = 'delete'
+  facePw.value = ''
+  faceError.value = ''
+  faceNotice.value = ''
+}
+
+function cancelFaceFlow() {
+  if (faceMode.value === 'capture') session.cancelFaceEnroll()
+  faceMode.value = 'idle'
+  facePw.value = ''
+  faceError.value = ''
+}
+
+/** 第一步：用当前口令换一张动作挑战。口令错会被服务端拒绝并计次。 */
+async function submitFacePassword() {
+  faceError.value = ''
+  if (!facePw.value) {
+    faceError.value = '请输入当前登录口令'
+    return
+  }
+
+  if (faceMode.value === 'delete') {
+    try {
+      const res = await session.faceDelete(facePw.value)
+      facePw.value = ''
+      faceMode.value = 'idle'
+      faceNotice.value = res?.message || '已删除人脸模板'
+      toast.success('已删除人脸模板，该账号不再需要刷脸登录')
+    } catch (err) {
+      faceError.value = err instanceof ApiError ? err.message : '删除人脸失败'
+    }
+    return
+  }
+
+  try {
+    await session.faceEnrollStart(facePw.value)
+    facePw.value = ''
+    faceMode.value = 'capture'
+  } catch (err) {
+    faceError.value = err instanceof ApiError ? err.message : '口令校验失败'
+  }
+}
+
+/** 第二步：提交挑战 —— 后端自己开摄像头采集，这里只递一张票。 */
+async function runFaceCapture() {
+  faceError.value = ''
+  try {
+    const res = await session.faceEnrollComplete()
+    faceMode.value = 'idle'
+    faceNotice.value = res?.message || '已录入人脸'
+    toast.success('已录入人脸，下次登录需要刷脸')
+  } catch (err) {
+    faceError.value = err instanceof ApiError ? err.message : '录入失败'
+    // 挑战是一次性的（提交过即作废）⇒ 无论成败都退回 idle 重新来过
+    faceMode.value = 'idle'
   }
 }
 </script>
@@ -184,6 +284,132 @@ async function submit() {
           </ul>
         </div>
       </section>
+
+      <!-- 刷脸登录（可选第二因子） -->
+      <section class="panel">
+        <div class="panel__head">
+          <h3 class="panel__title"><AppIcon name="face" :size="15" /><span>刷脸登录</span></h3>
+          <span class="pill">可选</span>
+        </div>
+
+        <div class="panel__body sec">
+          <div v-if="faceError" class="alert" role="alert">
+            <AppIcon name="alert-triangle" :size="15" :stroke-width="2" />
+            <span class="selectable">{{ faceError }}</span>
+          </div>
+          <div v-else-if="faceNotice" class="notice" role="status">
+            <AppIcon name="check-circle" :size="15" />
+            <span>{{ faceNotice }}</span>
+          </div>
+
+          <!-- 采集进行中：动作由服务端随机下发，客户端无法指定 -->
+          <FaceCapturePanel
+            v-if="faceMode === 'capture'"
+            compact
+            :action="session.faceChallenge?.action"
+            :action-text="session.faceChallenge?.actionText"
+            :action-hint="session.faceChallenge?.actionHint"
+            :busy="session.faceBusy"
+            confirm-text="开始采集"
+            @capture="runFaceCapture"
+            @cancel="cancelFaceFlow"
+          />
+
+          <!-- 二次口令：录入与删除共用同一段，但措辞与按钮色调刻意不同 -->
+          <template v-else-if="faceMode === 'enroll' || faceMode === 'delete'">
+            <p class="hint">
+              <template v-if="faceMode === 'delete'">
+                删除后将退回<strong>只用口令登录</strong>。人脸是第二因子，拿掉它等于降低这个账号的强度，
+                因此需要重新输入当前口令确认。
+              </template>
+              <template v-else>
+                录入前需要重新输入当前口令 —— 这道闸门是必需的：否则拿到一个已登录会话的人，
+                就能把自己的脸加进来，第二因子会被完整绕开。
+              </template>
+            </p>
+            <PasswordField
+              v-model="facePw"
+              label="当前登录口令"
+              placeholder="请输入当前使用的密码"
+              autocomplete="off"
+              autofocus
+              @enter="submitFacePassword"
+            />
+            <div class="actions">
+              <button
+                type="button"
+                class="btn"
+                :class="faceMode === 'delete' ? 'btn--danger' : 'btn--primary'"
+                @click="submitFacePassword"
+              >
+                <AppIcon :name="faceMode === 'delete' ? 'trash' : 'face'" :size="15" />
+                <span>{{ faceMode === 'delete' ? '确认删除' : '验证并开始采集' }}</span>
+              </button>
+              <button type="button" class="btn btn--ghost" @click="cancelFaceFlow">取消</button>
+            </div>
+          </template>
+
+          <!-- 空闲：状态 + 入口 -->
+          <template v-else>
+            <div class="sec__row">
+              <span class="sec__label">刷脸登录</span>
+              <span class="sec__value">
+                <span class="dot" :class="faceStatus?.enrolled ? 'dot--on' : 'dot--off'" />
+                {{ faceStatus?.enrolled ? `已启用 · ${faceStatus.templateCount} 张模板` : '未启用' }}
+              </span>
+            </div>
+            <div class="sec__row">
+              <span class="sec__label">最近录入</span>
+              <span class="sec__value">
+                {{ faceStatus?.enrolledAt ? formatDateTime(faceStatus.enrolledAt) : '—' }}
+              </span>
+            </div>
+            <div class="sec__row">
+              <span class="sec__label">判定阈值</span>
+              <span class="sec__value">
+                余弦相似度 ≥ {{ faceStatus?.threshold != null ? faceStatus.threshold.toFixed(2) : '—' }}
+              </span>
+            </div>
+            <div class="sec__row">
+              <span class="sec__label">本机引擎</span>
+              <span class="sec__value">
+                {{ faceStatus?.engineReady ? '可用' : faceStatus?.engineMessage || '未知' }}
+              </span>
+            </div>
+
+            <hr class="divider" />
+
+            <p class="hint">
+              刷脸是<strong>第二因子</strong>：启用后光有口令还不能登录，必须再通过一次人脸验证。
+              不录入人脸则完全按原来的口令登录，不受任何影响；管理类账号默认都不启用。
+            </p>
+
+            <div class="actions">
+              <button
+                v-if="faceStatus?.engineReady"
+                type="button"
+                class="btn btn--primary"
+                @click="startFaceEnroll"
+              >
+                <AppIcon name="face" :size="15" />
+                <span>{{ faceStatus?.enrolled ? '追加人脸' : '录入人脸' }}</span>
+              </button>
+              <button
+                v-if="faceStatus?.enrolled"
+                type="button"
+                class="btn btn--danger"
+                @click="startFaceDelete"
+              >
+                <AppIcon name="trash" :size="15" />
+                <span>删除人脸</span>
+              </button>
+              <span v-if="faceStatus && !faceStatus.engineReady" class="hint hint--inline">
+                本机没有可用摄像头 / 模型，暂时无法录入
+              </span>
+            </div>
+          </template>
+        </div>
+      </section>
     </div>
   </div>
 </template>
@@ -286,5 +512,69 @@ async function submit() {
   flex-shrink: 0;
   margin-top: 2px;
   color: var(--st-enabled-fg);
+}
+
+/* ---------- 刷脸登录卡片 ---------- */
+
+/* 「可选」徽记：这三个字是这块卡片最重要的口径 ——
+   刷脸不是强制的（不录入完全不影响登录），界面必须自己说清楚，
+   否则很容易被读成"系统启用了双因子认证"。 */
+.pill {
+  padding: 1px var(--sp-2);
+  border: 1px solid var(--c-border-strong);
+  border-radius: var(--r-full);
+  background: var(--c-surface-2);
+  color: var(--c-text-muted);
+  font-size: var(--fs-xs);
+  line-height: 1.6;
+}
+
+.hint {
+  font-size: var(--fs-sm);
+  line-height: 1.6;
+  color: var(--c-text-muted);
+}
+.hint strong {
+  color: var(--c-text);
+  font-weight: 600;
+}
+.hint--inline {
+  color: var(--c-text-subtle);
+}
+
+.notice {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--sp-2);
+  padding: var(--sp-2) var(--sp-3);
+  border-radius: var(--r-md);
+  border: 1px solid color-mix(in srgb, var(--st-enabled-fg) 30%, transparent);
+  background: var(--st-enabled-bg);
+  color: var(--c-text);
+  font-size: var(--fs-sm);
+  line-height: 1.5;
+}
+.notice > svg {
+  flex-shrink: 0;
+  margin-top: 2px;
+  color: var(--st-enabled-fg);
+}
+
+/* 状态圆点：与 StatusBadge 不同，这里只是一行文字里的轻量提示，
+   不做成徽章，免得跟"账号状态"那个徽章抢注意力。 */
+.dot {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  margin-right: var(--sp-2);
+  border-radius: var(--r-full);
+  vertical-align: middle;
+}
+.dot--on {
+  background: var(--st-enabled-fg);
+}
+.dot--off {
+  background: var(--c-text-subtle);
+  opacity: 0.7;
 }
 </style>

@@ -100,7 +100,23 @@ export const ACTION_META = {
   // 它描述的**不是用户做了什么**，而是系统在登录时顺手完成的一次存储加固，
   // 因此用中性色 info，不与成功/失败类事件混色 —— 否则审计员会把它
   // 误读成"某人发起了一次升级操作"。
-  PASSWORD_HASH_UPGRADED: { label: '口令存储升级', tone: 'info' }
+  PASSWORD_HASH_UPGRADED: { label: '口令存储升级', tone: 'info' },
+
+  // ---- 人脸（可选第二因子）----
+  // 四个动作刻意分开，因为它们回答的是四个不同的问题：
+  //   FACE_LOGIN_REQUIRED —— "这次登录有没有走到第二因子"（系统行为，中性色）
+  //   FACE_LOGIN_SUCCESS  —— "有没有人真的刷脸进来过"（成功，绿色）
+  //   FACE_LOGIN_FAILED   —— "谁在第二因子上被判失败"（失败，红色）
+  //   FACE_ENROLL*        —— "谁给账号加了/试图加第二因子"（录入是收紧，用 info/warn 区分）
+  FACE_LOGIN_REQUIRED: { label: '需人脸验证', tone: 'primary' },
+  FACE_LOGIN_SUCCESS: { label: '人脸验证通过', tone: 'enabled' },
+  FACE_LOGIN_FAILED: { label: '人脸验证失败', tone: 'locked' },
+  FACE_ENROLL: { label: '录入人脸', tone: 'info' },
+  FACE_ENROLL_FAILED: { label: '录入人脸失败', tone: 'warn' },
+  // 删除/重置人脸是**降级**动作（把第二因子拿掉），所以用与"注销"同档的醒目色：
+  // 它们不是普通字段修改，而是"这个账号从此退回单因子"。
+  FACE_TEMPLATE_DELETED: { label: '本人删除人脸', tone: 'warn' },
+  FACE_TEMPLATE_RESET: { label: '管理员重置人脸', tone: 'warn' }
 }
 
 export function actionMeta(action) {
@@ -162,7 +178,22 @@ export const REASON_META = {
   // 回拨通常是**事故**（主板电池耗尽、虚拟机快照回滚）。
   // 界面上若都写"时钟异常"，审计员就分不出该找人还是该修机器。
   CLOCK_ROLLED_FORWARD: '系统时钟被前拨（可能试图提前解锁）',
-  CLOCK_ROLLED_BACKWARD: '系统时钟被回拨（可能是时钟故障）'
+  CLOCK_ROLLED_BACKWARD: '系统时钟被回拨（可能是时钟故障）',
+  // 人脸（可选第二因子）。
+  // A / B 两组在这里必须**看得出区别**：A 组（相似度不足、活体未过、挑战无效）
+  // 会计入 3 分钟失败窗口，B 组（没检测到人脸、画面质量不足、动作后没回正）
+  // 不计次。若都写成"人脸验证失败"，审计员看到一个人连续几条就会误判成
+  // "有人在暴力尝试"，而实际上很可能只是他没坐正、光线太暗。
+  FACE_MISMATCH: '人脸相似度不足（计次）',
+  FACE_LIVENESS_FAILED: '活体动作未通过（计次）',
+  FACE_CHALLENGE_INVALID: '人脸挑战无效或已过期（计次）',
+  FACE_WRONG_PASSWORD: '二次口令错误（计次）',
+  FACE_NO_FACE: '画面中未检测到人脸（不计次）',
+  FACE_LOW_QUALITY: '画面质量不足（不计次）',
+  FACE_NOT_RETURNED: '动作后未回正对镜头（不计次）',
+  FACE_ENROLL_REJECTED: '录入未通过，未写入模板',
+  FACE_NO_TEMPLATE: '该账号未录入人脸',
+  FACE_ENGINE_UNAVAILABLE: '本机人脸引擎不可用'
 }
 
 export function reasonLabel(code) {

@@ -147,6 +147,21 @@ export function useAdminDomain(core) {
   }
 
   /**
+   * 重置他人的人脸模板（换人 / 换设备 / 疑似泄露后作废）。
+   *
+   * 与注销同属**处置**类操作，因此后端走的是同一个权限出口
+   * （`UserRoles.CanBeManagedBy`）—— 用户管理员够不到上级账号。
+   * 界面上把它做第二次确认：它会把对方的第二因子直接拿掉，
+   * 是一次"降级"，与删除一个普通字段的手感完全不同。
+   */
+  async function resetFace(username) {
+    const res = await api.resetFace(username)
+    markOnline()
+    await refreshUsers()
+    return res
+  }
+
+  /**
    * 管理员创建账号（普通用户 / 用户管理员 / 审计管理员）。
    *
    * 与注册不同：**不发验证码**，邮箱是可选参数（留空即只凭口令登录，
@@ -234,6 +249,7 @@ export function useAdminDomain(core) {
     unlock,
     freezeUser,
     deleteUser,
+    resetFace,
     createAccount,
     setRole,
     reset,

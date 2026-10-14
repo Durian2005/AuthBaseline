@@ -6,6 +6,7 @@ import { useToastStore } from './toast'
 import { ROLES, ROLE_LABELS } from './roles'
 import { useAdminDomain } from './domains/adminDomain'
 import { useAuditDomain } from './domains/auditDomain'
+import { useFaceDomain } from './domains/faceDomain'
 
 // 角色常量对外仍从本模块导出（历史引用点不变），定义在 ./roles.js。
 export { ROLES, ROLE_LABELS }
@@ -153,6 +154,18 @@ export const useSessionStore = defineStore('session', () => {
   // 这样"谁能改会话状态"从参数列表就看得出来，不必通读全文。
   const admin = useAdminDomain({ currentUser, persist, isAdmin, markOnline, fail })
   const audit = useAuditDomain({ isAuditAdmin, markOnline, fail })
+  // 人脸域不需要 currentUser / persist：后端用**票据**判定"本人是谁"，
+  // 前端连用户名都不用传（请求体里根本没有这个字段）。
+  const face = useFaceDomain({ markOnline, fail })
+
+  /**
+   * 登录第二因子（人脸）的**待完成挑战**。非 null 表示"口令已通过、还差人脸"。
+   *
+   * 此刻**没有任何票据**：后端在口令通过但人脸未完成时只发挑战、不发票据。
+   * 所以它不是"半个登录" —— 拿不到票据就等于进不了主界面，
+   * 也不会有任何业务请求能成功。
+   */
+  const pendingFace = ref(null)
 
   /**
    * 统计卡数据。**刻意留在根 store**：它跨用户域（users）与审计域（logs），
@@ -215,41 +228,78 @@ export const useSessionStore = defineStore('session', () => {
     }
   }
 
+  /**
+   * 把一次**成功**的登录落地成本地会话（票据 + 身份 + 数据预热 + 轮询）。
+   *
+   * 为什么单独抽出来：登录现在可能是"一步"（未录人脸）也可能是"两步"
+   * （口令 + 人脸），两条路径的终点必须**逐字一致** ——
+   * 否则迟早出现"口令路径预热了数据、人脸路径忘了"，表现为
+   * "刷脸登录后要等一个轮询周期界面才有数据"这种很难归因的差异。
+   *
+   * ⚠️ 没有票据就抛错：宁可失败，也不要建立一个"看起来登录了"的空会话。
+   *    后端契约是"只有真正登录成功才带票据"，缺了它就说明契约被破坏。
+   */
+  function establishSession(data) {
+    if (!data?.ticket) {
+      throw new ApiError('登录响应缺少票据', { code: 'NO_TICKET', kind: 'api' })
+    }
+    // 先落票据再改状态：后续刷新用户/日志都依赖它，
+    // 顺序反了会在管理员登录后立刻打出 401 请求。
+    setTicket(data.ticket)
+    currentUser.value = {
+      username: data.username,
+      status: data.status,
+      role: data.role ?? ROLES.USER,
+      lockoutEnd: null
+    }
+    persist()
+    markOnline()
+    // 按角色分别预热一次数据，避免"登录后最长一个轮询周期内界面全空"。
+    //
+    // 关键：**两条数据链路彻底分开**。改造前管理员一登录就把
+    // users / logs / shards / stats 全拉一遍；角色分离后管理员无权看审计，
+    // 那样做会立刻撞 403，还会在审计链里灌进自己制造的拒绝记录。
+    if (role.value === ROLES.AUDIT_ADMIN) {
+      audit.refreshAuditData().catch(() => {
+        /* 首次加载失败由轮询兜底，不弹错 */
+      })
+    } else if (isAdmin.value) {
+      admin.refreshAdminData().catch(() => {
+        /* 同上 */
+      })
+    }
+    admin.startAdminPolling()
+    audit.startAuditPolling()
+    // 完整性巡检与越权巡检都只在审计管理员身份下启动 ——
+    // 它们读的是审计接口，其他角色跑起来只会产生 403 噪声。
+    audit.startIntegrityPolling()
+    audit.startIntrusionPolling()
+  }
+
+  /**
+   * 口令登录。
+   *
+   * 两种可能的结局：
+   *   · 该账号**没有**录入人脸（或人脸模块关闭）⇒ 直接签发票据，一步完成；
+   *   · 该账号**已录入**人脸 ⇒ 后端返回 `FACE_REQUIRED` + 一张动作挑战，
+   *     **不带任何票据**。此时必须走 <see cref="loginFace"> 才能建立会话。
+   *
+   * 也就是说"要不要刷脸"由服务端按库里的模板决定，前端不做判断 ——
+   * 前端一旦自己判断，就会出现"界面以为不用刷、后端却拒绝"的不一致。
+   */
   async function login(username, password) {
     submitting.value = true
+    pendingFace.value = null
     try {
       const res = await api.login(username, password)
-      // 先落票据再改状态：后续刷新用户/日志都依赖它，
-      // 顺序反了会在管理员登录后立刻打出 401 请求。
-      if (res.data?.ticket) setTicket(res.data.ticket)
-      currentUser.value = {
-        username: res.data.username,
-        status: res.data.status,
-        role: res.data.role ?? ROLES.USER,
-        lockoutEnd: null
+
+      if (res?.code === 'FACE_REQUIRED') {
+        pendingFace.value = res.data ?? null
+        markOnline()
+        return res
       }
-      persist()
-      markOnline()
-      // 按角色分别预热一次数据，避免"登录后最长一个轮询周期内界面全空"。
-      //
-      // 关键：**两条数据链路彻底分开**。改造前管理员一登录就把
-      // users / logs / shards / stats 全拉一遍；角色分离后管理员无权看审计，
-      // 那样做会立刻撞 403，还会在审计链里灌进自己制造的拒绝记录。
-      if (role.value === ROLES.AUDIT_ADMIN) {
-        audit.refreshAuditData().catch(() => {
-          /* 首次加载失败由轮询兜底，不弹错 */
-        })
-      } else if (isAdmin.value) {
-        admin.refreshAdminData().catch(() => {
-          /* 同上 */
-        })
-      }
-      admin.startAdminPolling()
-      audit.startAuditPolling()
-      // 完整性巡检与越权巡检都只在审计管理员身份下启动 ——
-      // 它们读的是审计接口，其他角色跑起来只会产生 403 噪声。
-      audit.startIntegrityPolling()
-      audit.startIntrusionPolling()
+
+      establishSession(res.data)
       return res
     } catch (err) {
       // 注意：登录失败绝不写入 currentUser。
@@ -259,6 +309,33 @@ export const useSessionStore = defineStore('session', () => {
     } finally {
       submitting.value = false
     }
+  }
+
+  /**
+   * 登录第二阶段：提交人脸验证挑战。**只有它成功才真正建立会话。**
+   *
+   * 无论成败都清掉本地那张挑战：服务端是"先取出再校验"，
+   * 提交过一次之后那张票就不存在了。留着它只会让界面拿一张死票反复重试，
+   * 而用户看到的永远是"挑战无效"——现象与原因完全对不上。
+   */
+  async function loginFace(challengeToken) {
+    submitting.value = true
+    try {
+      const res = await api.loginFace(challengeToken)
+      pendingFace.value = null
+      establishSession(res.data)
+      return res
+    } catch (err) {
+      pendingFace.value = null
+      throw fail(err, '人脸验证失败')
+    } finally {
+      submitting.value = false
+    }
+  }
+
+  /** 放弃人脸验证，回到第一步。服务端那张挑战由有效期兜底作废。 */
+  function cancelFaceLogin() {
+    pendingFace.value = null
   }
 
   /**
@@ -280,8 +357,10 @@ export const useSessionStore = defineStore('session', () => {
     }
     setTicket(null)
     currentUser.value = null
+    pendingFace.value = null
     admin.reset()
     audit.reset()
+    face.reset()
     persist()
     if (!silent) toast.info('已安全退出')
   }
@@ -352,6 +431,12 @@ export const useSessionStore = defineStore('session', () => {
     logout,
     changePassword,
 
+    // ---------------- 登录第二因子（人脸） ----------------
+    // pendingFace 非 null = 口令已过、还差人脸；此刻**没有任何票据**。
+    pendingFace,
+    loginFace,
+    cancelFaceLogin,
+
     // ---------------- 用户管理域（Admin / UserAdmin） ----------------
     users: admin.users,
     loadingUsers: admin.loadingUsers,
@@ -372,10 +457,22 @@ export const useSessionStore = defineStore('session', () => {
     unlock: admin.unlock,
     freezeUser: admin.freezeUser,
     deleteUser: admin.deleteUser,
+    resetFace: admin.resetFace,
     createAccount: admin.createAccount,
     setRole: admin.setRole,
     startAdminPolling: admin.startAdminPolling,
     stopAdminPolling: admin.stopAdminPolling,
+
+    // ---------------- 人脸自助域（本人，任何角色） ----------------
+    faceStatus: face.status,
+    faceLoading: face.loading,
+    faceBusy: face.busy,
+    faceChallenge: face.challenge,
+    refreshFaceStatus: face.refreshStatus,
+    faceEnrollStart: face.startEnroll,
+    faceEnrollComplete: face.completeEnroll,
+    faceDelete: face.remove,
+    cancelFaceEnroll: face.cancelEnroll,
 
     // ---------------- 审计域（仅 AuditAdmin） ----------------
     logs: audit.logs,

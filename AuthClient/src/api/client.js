@@ -133,10 +133,19 @@ async function request(path, { method = 'GET', body, signal } = {}) {
   }
 
   if (!res.ok) {
-    // 票据失效（过期 / 被吊销 / 权限被收回）时立即清掉本地副本，
+    // 票据失效（过期 / 被吊销 / 未携带）时清掉本地副本，
     // 否则界面会一直拿着废票据重试，用户看到的只是"无管理员权限"而不知为何。
+    //
+    // ⚠️ 判据必须是**具体的原因码**，不能是"凡是 401 就清"：
+    //   401 在本系统里至少有两种完全不同的含义 ——
+    //     · 会话层面的失败（NO_TICKET / SESSION_*）⇒ 票据确实废了，该清；
+    //     · 凭据层面的失败（INVALID_CREDENTIALS：改口令时旧口令错、
+    //       删人脸/录入人脸时二次口令错）⇒ 票据**好着呢**，是这一次校验没过。
+    //   若按"401 一律清"，用户只是把二次口令输错一次，就会被悄悄登出，
+    //   而界面上只看到"口令错误"——原因与现象对不上，极难归因。
     const code = payload?.code || `HTTP_${res.status}`
-    if (res.status === 401 || code === 'SESSION_INVALID' || code === 'SESSION_EXPIRED' || code === 'SESSION_REVOKED') {
+    const SESSION_GONE = ['NO_TICKET', 'SESSION_INVALID', 'SESSION_EXPIRED', 'SESSION_REVOKED']
+    if (SESSION_GONE.includes(code)) {
       setTicket(null)
     }
     throw new ApiError(payload?.message || `服务器返回 HTTP ${res.status}`, {
@@ -305,7 +314,44 @@ export const api = {
   verifyAudit: (signal) => request('/audit/verify', { signal }),
 
   /** 审计概览统计 */
-  getAuditStats: (signal) => request('/audit/stats', { signal })
+  getAuditStats: (signal) => request('/audit/stats', { signal }),
+
+  /* ---------------- 人脸（可选第二因子） ----------------
+   * 两个刻意的共同点：
+   *   · 请求体里**从不出现特征或画面** —— 采集、检测、特征提取全在服务端进程内完成。
+   *     这一条是这条功能的立身之本：一旦允许前端上送特征，
+   *     攻击者就能不碰摄像头、直接 POST 一个向量，活体挑战形同虚设。
+   *   · 挑战 token ≠ 会话票据。前者只代表"口令那一因子刚过"，
+   *     拿它去访问任何业务接口都应当失败。
+   */
+
+  /**
+   * 登录第二阶段：提交一次性挑战（`FACE_REQUIRED` 里返回的那张）。
+   * 成功后返回的对象与 login 完全同构 —— 里面才有真正的票据。
+   */
+  loginFace: (challengeToken) =>
+    request('/auth/login/face', { method: 'POST', body: { challengeToken } }),
+
+  /** 本人人脸状态：是否已录、几张、最近一次录入时刻、本机引擎是否可用 */
+  faceStatus: (signal) => request('/auth/face', { signal }),
+
+  /** 录入第一步：验当前口令 → 换一张动作挑战（动作由服务端随机决定） */
+  faceEnrollStart: (password) =>
+    request('/auth/face/enroll', { method: 'POST', body: { password } }),
+
+  /** 录入第二步：提交挑战，服务端采集一帧并写入模板 */
+  faceEnrollComplete: (challengeToken) =>
+    request('/auth/face/enroll/complete', { method: 'POST', body: { challengeToken } }),
+
+  /** 删除本人全部人脸模板。需当前口令 —— 这是"降级通道"上唯一的闸门 */
+  faceDelete: (password) => request('/auth/face/delete', { method: 'POST', body: { password } }),
+
+  /**
+   * 管理员重置他人人脸（处置类，与注销同一个权限出口）。
+   * 用途：换人 / 换设备 / 疑似泄露后作废，以及"录入者摄像头损坏、
+   * 第二因子无法完成"时**唯一**的恢复路径。
+   */
+  resetFace: (username) => request('/auth/reset-face', { method: 'POST', body: { username } })
 }
 
 export { API_ROOT }

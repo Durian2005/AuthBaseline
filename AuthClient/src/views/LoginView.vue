@@ -5,6 +5,7 @@ import PasswordField from '../components/PasswordField.vue'
 import Spinner from '../components/Spinner.vue'
 import RegisterForm from '../components/auth/RegisterForm.vue'
 import ResetPasswordForm from '../components/auth/ResetPasswordForm.vue'
+import FaceCapturePanel from '../components/face/FaceCapturePanel.vue'
 import { useSessionStore } from '../stores/session'
 import { useToastStore } from '../stores/toast'
 import { ApiError } from '../api/client'
@@ -51,6 +52,16 @@ async function submitLogin() {
   lockNotice.value = null
   try {
     const res = await session.login(loginForm.value.username.trim(), loginForm.value.password)
+
+    // 该账号已录入人脸 ⇒ 后端只发挑战、**不发票据**，流程停在第二阶段。
+    // 此时不做"登录成功"的提示：登录并没有成功，票据还没出现。
+    if (res?.code === 'FACE_REQUIRED') {
+      // 口令已经用掉了，从界面上清掉；用户名留着，取消时不必重打。
+      loginForm.value = { username: loginForm.value.username, password: '' }
+      loginTouched.value = false
+      return
+    }
+
     toast.success(res?.message || '登录成功')
     loginForm.value = { username: '', password: '' }
     loginTouched.value = false
@@ -64,6 +75,36 @@ async function submitLogin() {
       lockNotice.value = { lockoutEnd: e.data.lockoutEnd }
     }
   }
+}
+
+/* ---------------- 登录第二阶段：人脸验证 ----------------
+ * 面板展示的动作与指令都由**服务端**下发（动作随机，客户端无法指定）。
+ * 这里只做一件事：把这张一次性挑战交回去，由后端自己开摄像头采集。
+ */
+async function captureFace() {
+  formError.value = ''
+  const token = session.pendingFace?.challengeToken
+  if (!token) return
+
+  try {
+    const res = await session.loginFace(token)
+    toast.success(res?.message || '登录成功')
+    loginForm.value = { username: '', password: '' }
+    loginTouched.value = false
+  } catch (err) {
+    const e = err instanceof ApiError ? err : new ApiError(err.message)
+    formError.value = e.message
+    // 挑战已被消费（服务端"先取出再校验"），失败后只能回到第一步重新口令登录，
+    // 所以这里不保留任何中间态；锁定信息照旧交给倒计时展示。
+    if (e.data?.lockoutEnd) lockNotice.value = { lockoutEnd: e.data.lockoutEnd }
+  }
+}
+
+/** 放弃人脸验证，回到口令那一步（服务端那张挑战由有效期兜底作废）。 */
+function cancelFace() {
+  session.cancelFaceLogin()
+  formError.value = ''
+  loginTouched.value = false
 }
 
 /* ---------------- 子表单 → 页面级反馈 ----------------
@@ -229,7 +270,17 @@ function switchTab(next) {
     <!-- 表单区 -->
     <section class="form">
       <div class="form__inner">
-        <div v-if="tab !== 'reset'" class="tabs" role="tablist" aria-label="认证方式">
+        <!-- 第二因子：口令已通过，等一张人脸。此时没有任何票据 -->
+        <div v-if="session.pendingFace" class="head">
+          <button type="button" class="linkbtn" @click="cancelFace">
+            <AppIcon name="arrow-left" :size="13" />
+            <span>返回登录</span>
+          </button>
+          <h2 class="head__title">人脸验证</h2>
+          <p class="head__desc">口令已通过，请按提示完成动作以完成登录</p>
+        </div>
+
+        <div v-else-if="tab !== 'reset'" class="tabs" role="tablist" aria-label="认证方式">
           <button
             type="button"
             class="tab"
@@ -275,8 +326,20 @@ function switchTab(next) {
           <span>{{ tab === 'reset' ? '账号已锁定，暂不能找回密码' : '账号已锁定' }}，请在 {{ formatDuration(lockRemaining) }}后重试</span>
         </div>
 
+        <!-- 人脸验证（登录第二阶段）：动作由服务端随机下发 -->
+        <FaceCapturePanel
+          v-if="session.pendingFace"
+          :action="session.pendingFace.action"
+          :action-text="session.pendingFace.actionText"
+          :action-hint="session.pendingFace.actionHint"
+          :busy="session.submitting"
+          confirm-text="开始刷脸"
+          @capture="captureFace"
+          @cancel="cancelFace"
+        />
+
         <!-- 登录 -->
-        <form v-if="tab === 'login'" class="stack" novalidate @submit.prevent="submitLogin">
+        <form v-else-if="tab === 'login'" class="stack" novalidate @submit.prevent="submitLogin">
           <div class="field">
             <label class="field__label" for="login-username">用户名</label>
             <input
