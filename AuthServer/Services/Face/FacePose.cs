@@ -20,17 +20,20 @@ public static class FacePose
     // ── 动作定义 ──────────────────────────────────────────────
     public const string Left = "left";
     public const string Right = "right";
-    public const string Up = "up";
-    public const string Down = "down";
 
-    public static readonly string[] Actions = { Left, Right, Up, Down };
+    /// <summary>
+    /// 挑战动作池。2026-10-14 起只保留左右转头，去掉抬头/低头：
+    /// pitch 代理值在真实摄像头上判定不稳（坐姿高低、眼镜、摄像头俯仰角都会整体
+    /// 搬移基线，阈值卡在边缘就误判），实测里 yaw（左右转头）的稳定性高一个量级。
+    /// 代价：活体动作种类由 4 减为 2 —— 防静态照片与普通视频重放仍然有效，
+    /// 但对"预先录好左右两方向视频"这类攻击的抵抗力变弱，对外口径不能说满。
+    /// </summary>
+    public static readonly string[] Actions = { Left, Right };
 
     public static string ActionText(string action) => action switch
     {
         Left => "把头转向你的左侧",
         Right => "把头转向你的右侧",
-        Up => "把头略微抬起（向上看）",
-        Down => "把头略微低下（向下看）",
         _ => "请正对摄像头"
     };
 
@@ -48,9 +51,8 @@ public static class FacePose
     public const int MinSamples = 6;                    // 判定所需的最少有效帧
 
     public const double YawTurn = 0.13;                 // "明显转头"的 yaw 偏移阈值
-    public const double PitchTilt = 0.10;               // "明显抬头/低头"的 pitch 偏移阈值
     public const double NeutralYaw = 0.07;              // 视为已回正的 yaw 容差
-    public const double NeutralPitch = 0.05;            // 视为已回正的 pitch 容差
+    public const double NeutralPitch = 0.05;            // 视为已回正的 pitch 容差（抬头/低头动作已下线，回正判定仍看 pitch）
 
     /// <summary>由 5 个关键点算 (yaw, pitch, iod)。iod 是瞳距像素值，可用于判断离镜头过远。</summary>
     public static (double Yaw, double Pitch, double Iod) Metrics(FaceBox box)
@@ -75,8 +77,8 @@ public static class FacePose
     {
         Left => dy >= YawTurn,
         Right => dy <= -YawTurn,
-        Up => dp <= -PitchTilt,
-        _ => dp >= PitchTilt      // down
+        // 未知动作一律不满足：绝不让一个认不出的动作名"蒙过"判定。
+        _ => false
     };
 
     /// <summary>是否已回到"正对镜头"。</summary>

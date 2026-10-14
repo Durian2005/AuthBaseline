@@ -24,7 +24,7 @@ import FacePreview from './FacePreview.vue'
  * 没有 token 时（还没走到采集、或已放弃）退回到纯符号取景框。
  */
 const props = defineProps({
-  /** 'left' | 'right' | 'up' | 'down' */
+  /** 'left' | 'right' */
   action: { type: String, default: '' },
   actionText: { type: String, default: '' },
   actionHint: { type: String, default: '' },
@@ -44,7 +44,7 @@ defineEmits(['capture', 'cancel'])
 
 /** 箭头朝向：以"指右"为基准旋转 */
 const arrowAngle = computed(
-  () => ({ right: 0, down: 90, left: 180, up: 270 })[props.action] ?? 0
+  () => ({ right: 0, left: 180 })[props.action] ?? 0
 )
 </script>
 

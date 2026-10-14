@@ -270,7 +270,7 @@ def main():
         d = r.get("data") or {}
         enroll_token = d.get("challengeToken", "")
         check("录入第一步：口令对 ⇒ 下发动作挑战",
-              st == 200 and bool(enroll_token) and d.get("action") in ("left", "right", "up", "down"),
+              st == 200 and bool(enroll_token) and d.get("action") in ("left", "right"),
               "action=%s" % d.get("action"))
         check("挑战带中文动作指令与提示",
               bool(d.get("actionText")) and bool(d.get("actionHint")),
