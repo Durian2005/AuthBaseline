@@ -14,9 +14,10 @@
 import subprocess
 import os
 
-GIT = os.environ.get("WB_GIT") or os.path.join(
-    os.path.expanduser("~"), ".workbuddy", "binaries", "PortableGit",
-    "versions", "1.2.0", "cmd", "git.exe")
+from _toolchain import find_git
+
+# git 定位走 _toolchain（原先写死 PortableGit 1.2.0，环境升到 1.3.0 后会 FileNotFoundError）
+GIT = find_git()
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 

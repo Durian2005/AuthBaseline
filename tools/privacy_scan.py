@@ -33,9 +33,12 @@ import subprocess
 import sys
 import collections
 
-GIT = os.environ.get("WB_GIT") or os.path.join(
-    os.path.expanduser("~"), ".workbuddy", "binaries", "PortableGit",
-    "versions", "1.2.0", "cmd", "git.exe")
+from _toolchain import find_git
+
+# ⚠️ git 定位走 _toolchain：原先这里写死 PortableGit `1.2.0`，
+#    环境升到 `1.3.0` 后本脚本直接 FileNotFoundError，而报错只说
+#    "系统找不到指定的文件"，完全看不出是版本目录漂移（本项目踩过）。
+GIT = find_git()
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 # 文本才逐行扫；这些是二进制或无需扫描的扩展名

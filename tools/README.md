@@ -43,7 +43,18 @@
 | `race_storm_test.py` | 并发「写审计」与「完整性校验」风暴的竞态复现/回归 | — | — |
 | `password_event_probe.py` | admin 改密失败（弱口令）有没有进审计日志 | — | ✓ 只读 + 只走失败分支 |
 | `verify_chain_independent.py` | 独立复算哈希链：用 Python 从零重算，**不依赖后端代码** | — | 只读 |
+| `face_second_factor_probe.py` | 人脸第二因子十组：骨架（未录人脸行为不变）/ 两步式录入与挑战绑定 / 口令后只发挑战 / 降级闸门 / 处置（重置 + 注销连带）/ fail-closed 503 / B 组不计次 / A 组计次触发锁定 / 模板密文与审计无特征（**77 项**）。**自带假引擎环境变量，无需摄像头** | ✓ | — |
 | `poller_test.mjs` | 前端轮询器语义单元回归（**15 项**，`node` 直跑，不启后端） | — | — |
+
+### A2. 装机产物校验（**Release / 单文件 / NSIS 布局**）
+
+Debug 构建与发布链路隔着 Publish 与 NSIS 两层，行为**不保证一致**（已踩：单文件打包器
+把 YuNet 的 `.onnx` 吞进 exe 并从发布目录删掉 ⇒ 装机后已录人脸账号全部 fail closed）。
+这一类的脚本**必须先跑过 `publish:backend` + `sync:sidecar`**。
+
+| 文件 | 作用 | 公共层 | 真实库 |
+|---|---|---|---|
+| `face_release_probe.py` | 按 NSIS 的 `File /oname=` 布局镜像一份装机产物，再验证：① 真引擎（`=cv`）能从**镜像里的 face-models** 加载；② 把 `face_second_factor_probe.py` 的 **77 项**断言打到镜像 exe 上（共 **7 项 + 内嵌 77 项**） | ✓ | — |
 
 ### B. 端到端 / 验收
 
