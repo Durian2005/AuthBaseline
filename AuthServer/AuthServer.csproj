@@ -24,6 +24,34 @@
     <!-- DPAPI（ProtectedData）：.NET Core 起被移出 BCL，须显式引用。
          仅 Windows 可用 —— 本项目发布目标即 win-x64，无跨平台顾虑。 -->
     <PackageReference Include="System.Security.Cryptography.ProtectedData" Version="8.0.0" />
+
+    <!-- 人脸模块（可选第二因子）：检测用 OpenCvSharp 内置的 FaceDetectorYN（YuNet），
+         特征用 CvDnn 直跑 SFace 的 ONNX（主包没有 FaceRecognizerSF 的绑定，
+         这一点与阈值一起在 docs/design/FACE-AUTH-DESIGN.md 的 Stage 0 结论里记着）。 -->
+    <PackageReference Include="OpenCvSharp4" Version="4.13.0.20260627" />
+    <PackageReference Include="OpenCvSharp4.runtime.win" Version="4.13.0.20260627" />
+  </ItemGroup>
+
+  <!-- 人脸模型随产物一起走：不能指望"运行的那台机器上恰好有这两个文件"。
+       runtime.win 这个包已经带了 OpenCvSharpExtern.dll，所以只差模型。
+       ⚠️ 目录名刻意叫 face-models 而**不是** models：Windows 下 `AuthServer/models`
+          与既有的 C# 源码目录 `AuthServer/Models` 是**同一个目录**（大小写不敏感），
+          而且 MSBuild 的通配符同样大小写不敏感 —— 叫 models 会把 Models/*.cs 一起复制进产物。
+       ⚠️ ExcludeFromSingleFile="true" 必须留着，而且理由不是"省体积"：
+          本项目发布用 `PublishSingleFile + IncludeNativeLibrariesForSelfExtract`，
+          而打包器**会**把 face-models 里的部分文件（实测是 YuNet 那个）
+          塞进单文件 exe 并从发布目录里**删掉**，SFace 那个又不动 —— 行为不一致、不可依赖。
+          而 FaceOptions.Resolve() 是从 `AppContext.BaseDirectory`（exe 同级目录）读模型的，
+          文件不在磁盘上 ⇒ 引擎加载失败 ⇒ 已录人脸的账号全部 fail closed 登不进去
+          （症状离原因很远：界面只显示"本机人脸引擎不可用"）。
+          所以模型必须**永远留在磁盘上**：显式排除出打包范围。 -->
+  <ItemGroup>
+    <Content Remove="face-models\**" />
+    <None Remove="face-models\**" />
+    <None Include="face-models\**"
+          CopyToOutputDirectory="PreserveNewest"
+          CopyToPublishDirectory="PreserveNewest"
+          ExcludeFromSingleFile="true" />
   </ItemGroup>
 
 </Project>

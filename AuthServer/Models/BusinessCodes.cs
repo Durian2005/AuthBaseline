@@ -72,4 +72,47 @@ public static class BusinessCode
     // ── 时间源加固 ──────────────────────────────────────────────
     /// <summary>检测到墙钟被拨动。</summary>
     public const string ClockAnomaly = "CLOCK_ANOMALY";
+
+    // ── 人脸（可选第二因子） ─────────────────────────────────────
+    // 与 AuditReason.Face* 是**两套码**（见本类顶部说明），只是偶尔字面量相近：
+    // 这里的码决定前端显示什么话术，那边的码决定审计怎么归类。
+    // 例如"人脸没对上"在界面上要说人话（"人脸与录入时不匹配，请正对摄像头"），
+    // 而审计里要的是可检索的事实（FACE_MISMATCH）。
+
+    /// <summary>
+    /// 口令已通过，但该账号启用了人脸，**尚未签发任何票据**。
+    ///
+    /// 这不是错误，而是登录流程的中间态 —— 前端收到它应该切到人脸步骤，
+    /// 而不是弹一条"登录失败"。用 200 + Success=false + 本码表达，
+    /// 刻意**不用 401**：401 在前端会被当作"账号或口令不对"，
+    /// 那会让用户以为自己口令输了。
+    /// </summary>
+    public const string FaceRequired = "FACE_REQUIRED";
+
+    /// <summary>人脸未达阈值。</summary>
+    public const string FaceMismatch = "FACE_MISMATCH";
+
+    /// <summary>活体动作挑战未通过。</summary>
+    public const string FaceLivenessFailed = "FACE_LIVENESS_FAILED";
+
+    /// <summary>挑战无效：过期 / 已使用 / 不属于本次尝试。</summary>
+    public const string FaceChallengeInvalid = "FACE_CHALLENGE_INVALID";
+
+    /// <summary>画面里没有人脸。</summary>
+    public const string FaceNoFace = "FACE_NO_FACE";
+
+    /// <summary>人脸质量不达标（太远 / 太暗 / 侧脸过大）。</summary>
+    public const string FaceLowQuality = "FACE_LOW_QUALITY";
+
+    /// <summary>动作做完了但没回正，缺少可比较的一帧。</summary>
+    public const string FaceNotReturned = "FACE_NOT_RETURNED";
+
+    /// <summary>录入过程未通过（活体或质量原因），模板没有被写入。</summary>
+    public const string FaceEnrollFailed = "FACE_ENROLL_FAILED";
+
+    /// <summary>本机没有人脸模板。</summary>
+    public const string FaceNotEnrolled = "FACE_NOT_ENROLLED";
+
+    /// <summary>人脸引擎不可用（模型缺失 / 摄像头打不开）。</summary>
+    public const string FaceEngineUnavailable = "FACE_ENGINE_UNAVAILABLE";
 }

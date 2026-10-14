@@ -153,6 +153,28 @@ public class Program
         // 审计写入的统一出口：自动补齐来源 IP / User-Agent，控制器只描述"发生了什么"。
         builder.Services.AddSingleton<AuditWriter>();
 
+        // ---- 人脸（可选第二因子） ----
+        // 与 pepper / 证书不同，人脸**缺什么都不拒绝启动**：它是可选因子，
+        // 而"这台机器没摄像头"不该把整个认证系统拖下线。代价由调用方承担 ——
+        // 引擎不可用时必须显式降级并留痕（AuditReason.FaceEngineUnavailable），不许静默跳过。
+        var faceOptions = new AuthServer.Services.Face.FaceOptions();
+        builder.Configuration.GetSection(AuthServer.Services.Face.FaceOptions.SectionName).Bind(faceOptions);
+        faceOptions.ApplyEnvironmentOverrides();
+        builder.Services.AddSingleton(faceOptions);
+
+        AuthServer.Services.Face.IFaceEngine faceEngine = faceOptions.UseStubEngine
+            ? new AuthServer.Services.Face.StubFaceEngine(faceOptions)
+            : new AuthServer.Services.Face.CvFaceEngine(faceOptions);
+        builder.Services.AddSingleton(faceEngine);
+
+        builder.Services.AddSingleton<AuthServer.Services.Face.FaceTemplateCrypto>();
+        builder.Services.AddSingleton<AuthServer.Services.Face.FaceTemplateStore>();
+        builder.Services.AddSingleton<AuthServer.Services.Face.FaceChallengeStore>();
+
+        // 登录第二因子的决策层：控制器只负责"记什么、锁不锁、发不发票"，
+        // "要不要人脸、这轮算不算失败"全部收在这一处（见 FaceLoginService 注释）。
+        builder.Services.AddSingleton<AuthServer.Services.Face.FaceLoginService>();
+
         // 允许前端跨域访问
         builder.Services.AddCors(options =>
         {
@@ -179,6 +201,24 @@ public class Program
         {
             Console.WriteLine("[Email] 发件通道：控制台（验证码打印在日志中，未真实投递）。");
             Console.WriteLine("[Email] 如需真实发信：在 appsettings.json 的 Email 节填好 Account 与 Password（授权码），或设置环境变量 AUTHBASELINE_EMAIL_PASSWORD。");
+        }
+
+        // 人脸：把"当前处在什么档位"讲清楚，避免"以为启用了双因子、其实一堆账号没录人脸"
+        if (!faceOptions.Enabled)
+        {
+            Console.WriteLine("[Face] 人脸模块已关闭（Face:Enabled=false），登录不做第二因子。");
+        }
+        else if (!string.Equals(faceOptions.Enforcement, "optional", StringComparison.OrdinalIgnoreCase))
+        {
+            Console.WriteLine($"[Face] ⚠️ Face:Enforcement={faceOptions.Enforcement} 目前**未实现**，实际按 optional 运行"
+                + "（已注册用户可选添加、新注册可选导入、管理员不强制）。");
+        }
+        else
+        {
+            var st = faceEngine.Status;
+            Console.WriteLine(st.Ready
+                ? $"[Face] 第二因子已就绪（账号级可选启用）· 阈值 {faceOptions.Threshold:F2} · 每人上限 {faceOptions.MaxTemplates} 张"
+                : $"[Face] 引擎不可用，第二因子将整体降级：{st.Message}");
         }
 
         // Configure the HTTP request pipeline.

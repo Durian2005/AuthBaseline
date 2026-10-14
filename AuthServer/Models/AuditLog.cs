@@ -199,6 +199,48 @@ public static class AuditAction
 
     /// <summary>解除冻结（Disabled → Enabled），账号恢复可登录。</summary>
     public const string DormantRestore = "DORMANT_RESTORE";
+
+    /* ==================== 人脸（可选第二因子） ==================== */
+    // 为什么人脸要占这么多独立动作码、而不是塞进 LOGIN_* 里：
+    // 人脸是**可选**启用的，于是"一个账号有没有这道防线"本身就是可以变化的事实。
+    // 审计员必须能用一条查询捞出"哪些账号刚把这道防线加上 / 拿掉"——
+    // 若与普通登录事件混在一起，"某账号在 3 分钟前被删掉了人脸"就会被淹没。
+    //
+    // ⚠️ 这些常量只出现在 AuditLog.Action 的**取值**里，
+    //    没有给 AuditLog 加任何字段 —— 哈希链的输入字段是锁死的（见 AuditService.ComputeHash），
+    //    人脸的所有细节走 request / response 的 JSON 袋。
+
+    /// <summary>本人录入人脸模板成功（首次录入或更换）。</summary>
+    public const string FaceEnroll = "FACE_ENROLL";
+
+    /// <summary>录入被拒（活体未过 / 质量问题 / 引擎不可用）。</summary>
+    public const string FaceEnrollFailed = "FACE_ENROLL_FAILED";
+
+    /// <summary>
+    /// 口令已通过、按策略要求第二因子，但**尚未签发任何票据**。
+    ///
+    /// 这条记录是"半程登录"的留痕点：它证明口令那一因子确实过了。
+    /// 有了它，"口令对了但人脸一直不过"这种形态才可能在审计里被数出来 ——
+    /// 否则这段过程在库里完全隐形（既没有 LOGIN_SUCCESS 也没有 LOGIN_FAILED）。
+    /// </summary>
+    public const string FaceLoginRequired = "FACE_LOGIN_REQUIRED";
+
+    /// <summary>人脸通过，登录完成（与 LOGIN_SUCCESS 同时产生，两条各记一次）。</summary>
+    public const string FaceLoginSuccess = "FACE_LOGIN_SUCCESS";
+
+    /// <summary>人脸未通过，登录失败。</summary>
+    public const string FaceLoginFailed = "FACE_LOGIN_FAILED";
+
+    /// <summary>
+    /// 本人删除自己的人脸模板。
+    ///
+    /// 独立成码而不是并入注销/改密：删除模板等于**主动把自己降级成单因子**。
+    /// 这条流水单独可查，才能回答"某个账号的防护强度是什么时候被削弱的"。
+    /// </summary>
+    public const string FaceTemplateDeleted = "FACE_TEMPLATE_DELETED";
+
+    /// <summary>管理员重置他人人脸模板（处置类操作，与注销同权限出口）。</summary>
+    public const string FaceTemplateReset = "FACE_TEMPLATE_RESET";
 }
 
 /// <summary>
@@ -330,4 +372,74 @@ public static class AuditReason
     /// 混在一个码里，审计员无法区分"有人在攻击"和"有台机器坏了"。
     /// </summary>
     public const string ClockRolledBackward = "CLOCK_ROLLED_BACKWARD";
+
+    /* ==================== 人脸：原因码按"是否计失败"分成两组 ====================
+     *
+     * 为什么必须分组，而不是笼统给一个 FACE_FAILED：
+     *
+     * 录了人脸的账号，在"口令对 + 人脸不过"时会走和口令错误同一条失败计数路径。
+     * 于是人脸天生的**质量问题**（离得太远、背光、动作没做完就凑上去）会被
+     * 当成攻击来罚 —— 正常人被自己的摄像头误伤到锁号，是这类功能最常见的翻车方式。
+     *
+     * 所以两组码从**语义**上就分开，而不是靠调用方各自记得"这次要不要计数"：
+     *   · A 组（欺骗信号 / 明确的绕过尝试）→ **计入 3 分钟失败窗口**
+     *   · B 组（质量问题 / 交互没配合好）  → **不计**
+     * 把这条规则写在码的分组上，任何新加的判定只要选了 A 组就自动获得计数语义，
+     * 不必再去改计数逻辑。
+     */
+
+    // ---- A 组：计入失败窗口 ----
+
+    /// <summary>相似度低于阈值：人脸对不上。（A 组 · 计次）</summary>
+    public const string FaceMismatch = "FACE_MISMATCH";
+
+    /// <summary>
+    /// 动作挑战未通过 / 采样期间人脸发生明显跳变。
+    /// 这是"拿照片或预录视频来糊弄"的直接指纹。（A 组 · 计次）
+    /// </summary>
+    public const string FaceLivenessFailed = "FACE_LIVENESS_FAILED";
+
+    /// <summary>
+    /// 挑战 token 无效：过期、已被消费、或不属于本次登录尝试。
+    ///
+    /// 单独成码的理由：这三种情况的共同点是"绕过正常交互去用这张票"，
+    /// 是主动构造出来的请求，不是手滑。（A 组 · 计次）
+    /// </summary>
+    public const string FaceChallengeInvalid = "FACE_CHALLENGE_INVALID";
+
+    // ---- B 组：**不计入**失败窗口 ----
+
+    /// <summary>画面里没检测到人脸（人还没坐好）。（B 组 · 不计）</summary>
+    public const string FaceNoFace = "FACE_NO_FACE";
+
+    /// <summary>人脸质量不达标：离镜头太远、光照不足、侧脸过大。（B 组 · 不计）</summary>
+    public const string FaceLowQuality = "FACE_LOW_QUALITY";
+
+    /// <summary>动作做完了但没有回正对镜头，拿不到可比较的那一帧。（B 组 · 不计）</summary>
+    public const string FaceNotReturned = "FACE_NOT_RETURNED";
+
+    // ---- 与失败计数无关的两条 ----
+
+    /// <summary>
+    /// 账号本身没有模板，却被要求过人脸 —— 说明流程判断出了问题，
+    /// 不是用户的行为，所以既不算失败也不该出现。
+    /// </summary>
+    public const string FaceNoTemplate = "FACE_NO_TEMPLATE";
+
+    /// <summary>人脸引擎不可用（模型加载失败 / 摄像头打不开）。属于本机环境问题，不是攻击。</summary>
+    public const string FaceEngineUnavailable = "FACE_ENGINE_UNAVAILABLE";
+
+    /// <summary>删除 / 更换人脸时二次口令不符。（A 组 · 计次 —— 它本身就是对本人口令的一次猜测）</summary>
+    public const string FaceWrongPassword = "FACE_WRONG_PASSWORD";
+
+    /// <summary>
+    /// 录入过程未通过（活体或质量原因），模板没有被写入。（B 组 · 不计）
+    ///
+    /// 为什么单独占一个码、而不是复用 FaceLivenessFailed / FaceNoFace：
+    ///   录入发生在**已登录之后**。这里的失败与"登录被判失败"是完全不同的处境 ——
+    ///   用户手里已经有会话了，一次录不上人脸没有任何安全含义，
+    ///   也不该出现在"本账号被连续判失败"的统计里。
+    ///   给它一个独立码，"过程失败"与"认证失败"就不会在审计里混成一类。
+    /// </summary>
+    public const string FaceEnrollRejected = "FACE_ENROLL_REJECTED";
 }

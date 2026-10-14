@@ -12,6 +12,7 @@ public class MongoDbService
     private readonly IMongoCollection<EmailCode> _emailCodes;
     private readonly IMongoCollection<Session> _sessions;
     private readonly IMongoCollection<AuditChainHead> _auditChainHeads;
+    private readonly IMongoCollection<FaceTemplate> _faceTemplates;
     private readonly PepperProvider _pepper;
 
     public MongoDbService(IConfiguration configuration, PepperProvider pepper)
@@ -30,6 +31,7 @@ public class MongoDbService
         _emailCodes = _database.GetCollection<EmailCode>("EmailCodes");
         _sessions = _database.GetCollection<Session>("Sessions");
         _auditChainHeads = _database.GetCollection<AuditChainHead>("AuditChainHeads");
+        _faceTemplates = _database.GetCollection<FaceTemplate>("FaceTemplates");
 
         EnsureIndexes();
 
@@ -123,6 +125,22 @@ public class MongoDbService
         catch (Exception ex)
         {
             Console.WriteLine($"[Mongo] 会话索引创建失败（不影响主流程）: {ex.Message}");
+        }
+
+        try
+        {
+            // 人脸模板按 userId 查（登录验证、状态查询、删除都走这一个入口）。
+            // 不建唯一索引：一个人**可以有多张**模板（见 FaceTemplateStore.AddAsync）。
+            var faceKeys = Builders<FaceTemplate>.IndexKeys.Ascending(t => t.UserId);
+            _faceTemplates.Indexes.CreateOne(new CreateIndexModel<FaceTemplate>(faceKeys));
+
+            // 注销账号时按用户名清理（那条路径手里只有用户名，见 FaceTemplateStore.DeleteByUsernameAsync）
+            var faceNameKeys = Builders<FaceTemplate>.IndexKeys.Ascending(t => t.Username);
+            _faceTemplates.Indexes.CreateOne(new CreateIndexModel<FaceTemplate>(faceNameKeys));
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[Mongo] 人脸模板索引创建失败（人脸功能将不可用）: {ex.Message}");
         }
     }
 
@@ -320,4 +338,7 @@ public class MongoDbService
     public IMongoCollection<EmailCode> EmailCodes => _emailCodes;
     public IMongoCollection<Session> Sessions => _sessions;
     public IMongoCollection<AuditChainHead> AuditChainHeads => _auditChainHeads;
+
+    /// <summary>人脸特征模板。**不参与审计哈希链**，是独立集合。</summary>
+    public IMongoCollection<FaceTemplate> FaceTemplates => _faceTemplates;
 }
