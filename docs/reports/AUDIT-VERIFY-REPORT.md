@@ -227,6 +227,12 @@ python tools/desktop_e2e.py tools/x.png "login:admin:Admin123,wait:6,shot:x.png"
 > 两者容易混淆：渲染问题让**画面出不来**（有色块/全黑），
 > 资源问题让**页面本身 404**。排查时先确认后端 `/` 是否返回 200 + HTML。
 
+> **后续更新（2026-10-14）**：WebView2 Runtime 升到 `155.0.4283.45` 之后，
+> `--single-process` 会让窗口在启动约 3 秒后**被销毁**（进程仍存活），
+> 用户侧看到的就是「白屏 + 闪退」。现改用 **`--in-process-gpu`**
+> （只把 GPU 并回主进程、不动渲染进程），152 与 155 两个版本都能正常渲染。
+> 判据与排查方法见 `src-tauri/src/lib.rs` 顶部注释。
+
 #### 问题三：管理员登录后 20 秒内界面全为 0
 
 `login()` 只调用了 `startAdminPolling()`，而它内部是 `setInterval`，

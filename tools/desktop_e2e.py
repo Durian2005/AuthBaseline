@@ -3,11 +3,16 @@ r"""桌面端界面级验证：启动安装版 → 登录 → 截图 → 可选�
 为什么必须在同一进程里完成：调用方 shell 退出后子进程会被回收，
 分步执行拿不到窗口。
 
-为什么加 `--single-process --disable-gpu`：
-本机 WebView2（152.0.4191.66）的多进程 + GPU 合成路径**渲染不出画面**
-（窗口全白，随后转全黑，前端与后端其实都正常）。
-实测加上这两个参数后界面完整渲染（同一张图颜色数从 ~330 跳到 ~5700）。
-这一对参数已经写进 src-tauri/tauri.conf.json 的 additionalBrowserArgs，
+为什么加 `--in-process-gpu`：
+本机 WebView2 的**独立 GPU 子进程**起不来，会导致整个 WebView 初始化失败 ——
+既渲染不出画面（全黑），也**一条导航请求都不发**（窗口停在 about:blank，
+后端 Kestrel 收不到任何请求）。把 GPU 并回主进程即可解决。
+
+历史上这里用的是 `--single-process --disable-gpu`（WebView2 152 时代能跑通），
+但 WebView2 Runtime 升到 **155** 后 `--single-process` 会让窗口在启动几秒后
+**被销毁**（进程还在），用户看到的就是「白屏 + 闪退」，故已弃用，不要改回去。
+
+这一组参数已经写进 src-tauri/tauri.conf.json 的 additionalBrowserArgs，
 所以正式安装版不依赖外部环境变量；这里设置只是为了让未重装的旧包也能验证。
 
 用法：
@@ -55,8 +60,9 @@ TITLE_KEY = "基线系统"
 #: 两处各写一遍字面量，迟早会出现"门禁查 A 库、写入 B 库"的错位。
 TAMPER_DB_NAME = os.environ.get("E2E_DB", "AuthBaselineDb")
 # 与 tauri.conf.json 保持一致，保证未重装的旧包也能正常渲染
-BROWSER_ARGS = ("--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection "
-                "--single-process --disable-gpu")
+BROWSER_ARGS = os.environ.get(
+    "E2E_BROWSER_ARGS",
+    "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection --in-process-gpu")
 
 user32 = ctypes.windll.user32
 gdi32 = ctypes.windll.gdi32
@@ -427,9 +433,15 @@ def main():
                 time.sleep(float(step.split(":", 1)[1]))
             elif step.startswith("login:"):
                 _, user, pwd = step.split(":", 2)
+                # ⚠️ 坐标随前端布局漂移，改前端后必须复核（窗口 1942x1286 @150% DPI）。
+                # 登录页有「登录 / 注册」两个 tab，且当前停在哪个 tab 是持久化的 ——
+                # 不先切回「登录」，下面这一串就会打进注册表单，表现为
+                # "已提交登录" 但审计里没有任何 LOGIN_SUCCESS。
+                real_click(hwnd, 1106, 509)      # 「登录」标签页
+                time.sleep(0.5)
                 # 坐标点击容易受 DPI/布局影响，改成先点表单区域拿焦点，
                 # 再用 Tab 在"用户名 → 密码"之间切换，最后 Enter 提交。
-                real_click(hwnd, 1223, 614)      # 用户名输入框
+                real_click(hwnd, 1104, 624)      # 用户名输入框
                 time.sleep(0.4)
                 type_text(user)
                 press(0x09)                       # Tab -> 密码
