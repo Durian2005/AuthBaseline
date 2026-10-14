@@ -43,7 +43,7 @@
 | `race_storm_test.py` | 并发「写审计」与「完整性校验」风暴的竞态复现/回归 | — | — |
 | `password_event_probe.py` | admin 改密失败（弱口令）有没有进审计日志 | — | ✓ 只读 + 只走失败分支 |
 | `verify_chain_independent.py` | 独立复算哈希链：用 Python 从零重算，**不依赖后端代码** | — | 只读 |
-| `face_second_factor_probe.py` | 人脸第二因子十组：骨架（未录人脸行为不变）/ 两步式录入与挑战绑定 / 口令后只发挑战 / 降级闸门 / 处置（重置 + 注销连带）/ fail-closed 503 / B 组不计次 / A 组计次触发锁定 / 模板密文与审计无特征（**77 项**）。**自带假引擎环境变量，无需摄像头** | ✓ | — |
+| `face_second_factor_probe.py` | 人脸第二因子十一组：骨架（未录人脸行为不变）/ 两步式录入与挑战绑定 / 口令后只发挑战 / 降级闸门 / 处置（重置 + 注销连带）/ **识别画面（预览门禁：无票 404、票据不能当预览凭据、采集结束即失效、拉帧不写审计）** / fail-closed 503 / B 组不计次 / A 组计次触发锁定 / 模板密文与审计无特征（**93 项**）。**自带假引擎环境变量，无需摄像头** | ✓ | — |
 | `poller_test.mjs` | 前端轮询器语义单元回归（**15 项**，`node` 直跑，不启后端） | — | — |
 
 ### A2. 装机产物校验（**Release / 单文件 / NSIS 布局**）
@@ -62,7 +62,7 @@ Debug 构建与发布链路隔着 Publish 与 NSIS 两层，行为**不保证一
 
 | 文件 | 作用 | 公共层 | 真实库 |
 |---|---|---|---|
-| `face_release_probe.py` | 装机产物校验：① 布局（face-models 5 文件 / exe **非空** / exe 内**未**内嵌 onnx）；② 真引擎（`=cv`）能从目标目录的 `face-models` 加载；③ 把 `face_second_factor_probe.py` 的全部断言打到目标 exe 上（共 **14 项 + 内嵌 77 项**） | ✓ | — |
+| `face_release_probe.py` | 装机产物校验：① 布局（face-models 5 文件 / exe **非空** / exe 内**未**内嵌 onnx）；② 真引擎（`=cv`）能从目标目录的 `face-models` 加载；③ 把 `face_second_factor_probe.py` 的全部断言打到目标 exe 上（共 **14 项 + 内嵌 93 项**） | ✓ | — |
 
 ### B. 端到端 / 验收
 

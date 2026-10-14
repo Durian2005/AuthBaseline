@@ -35,6 +35,7 @@
 ⚠️ 本工具只**读**产物（镜像或装机目录）、只**写** `.workbuddy/tmp/`，不碰真实库。
 """
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -212,7 +213,15 @@ def step2_full_probe(port, db_name):
     for ln in tail:
         print("        " + ln.strip())
     if proc.returncode == 0:
-        ok("目标 exe 上 77 项断言全部通过")
+        # 断言条数**从子探针的结论行里读**，不要在这里写死：
+        # 写死过一次（77），加了预览门禁那组之后标签就与事实对不上了 ——
+        # 而"数字对不上"恰恰是这类校验工具最不该出现的问题。
+        n = "?"
+        for ln in tail:
+            m = re.search(r"(\d+)\s*项断言全部通过", ln)
+            if m:
+                n = m.group(1)
+        ok("目标 exe 上 %s 项断言全部通过" % n)
     else:
         bad("目标 exe 上探针未通过（exit=%s）" % proc.returncode)
         line = [ln for ln in text.splitlines() if "[FAIL]" in ln]

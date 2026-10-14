@@ -4,13 +4,14 @@
 全部对着**独立测试库**打真实 HTTP + 直连数据库断言，用**假引擎**跑，
 因此**不需要摄像头**也能覆盖最难的几条分支（A/B 组分流、引擎不可用降级）。
 
-验证十组：
+验证十一组：
   A. 骨架      —— 未录人脸的账号登录行为与改造前逐字一致（这是「可选」的前提）
   B. 录入      —— 两步式录入（先口令换挑战、再采集）；交叉用途与跨账号不可挪用
   C. 第二因子  —— 已录人脸 ⇒ 口令后只发挑战、不发票据；挑战一次性；人脸过后才签票
   D. 降级闸门  —— 自助删除需二次口令；口令错按 A 组计次；口令错不连坐票据
   E. 处置      —— 管理员重置他人人脸走 CanBeManagedBy；注销账号**连带清理**模板
   F. 复录      —— 为后续「引擎不可用 / A 组计次」重新备好前置（USER 有模板）
+  K. 识别画面  —— 预览只在**有效挑战的窗口期**内可取；票据不能当预览凭据；拉帧不写审计
   G. fail-close—— 已录人脸但引擎不可用 ⇒ 拒绝登录（不是静默退回单因子）
   H. B 组不计次—— 质量问题（画面无人脸）不累加失败计数
   I. A 组计次  —— 欺骗信号（活体未过）累加并触发 3 次锁定
@@ -27,6 +28,9 @@ import contextlib
 import json
 import sys
 import time
+import urllib.error
+import urllib.parse
+import urllib.request
 
 from _probe_common import (
     ProbeDb,
@@ -78,6 +82,38 @@ def enroll_face(user, pw, ticket):
         return False, "第一步未下发挑战：%s %s" % (st, r.get("code"))
     st, r = call("POST", api("/face/enroll/complete"), {"challengeToken": token}, ticket)
     return (st == 200 and r.get("code") == "OK"), "%s %s" % (st, r.get("code"))
+
+
+# 预览端点是**图片**接口：http_call 会把响应体当文本解，既拿不到原始字节
+# 也拿不到响应头（而检测状态恰恰只在响应头里）。所以单独写一个取原始响应的。
+# ProxyHandler({}) 与 _probe_common 同款：本机环境变量里的代理已失效，继承会连不上。
+_preview_opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
+
+def fetch_preview(token=None, timeout=15):
+    """打一次预览端点。返回 (status, headers_lower, body_bytes)。"""
+    url = BASE + api("/face/preview")
+    if token is not None:
+        url += "?token=" + urllib.parse.quote(str(token))
+    req = urllib.request.Request(url, method="GET")
+    try:
+        with _preview_opener.open(req, timeout=timeout) as r:
+            return r.status, {k.lower(): v for k, v in r.headers.items()}, r.read()
+    except urllib.error.HTTPError as e:
+        return e.code, {k.lower(): v for k, v in e.headers.items()}, e.read()
+    except Exception as e:  # noqa: BLE001 —— "连不上"也是可断言的返回
+        return 0, {}, str(e).encode()
+
+
+def wait_preview(token, tries=24):
+    """预览窗口刚开时还没攒出第一帧（后台取帧有一个周期），给它一点时间。"""
+    status, headers, body = 0, {}, b""
+    for _ in range(tries):
+        status, headers, body = fetch_preview(token)
+        if status == 200:
+            break
+        time.sleep(0.15)
+    return status, headers, body
 
 
 def face_login(user, pw):
@@ -388,6 +424,74 @@ def main():
         check("库中模板数 = 1",
               probe_db["FaceTemplates"].count_documents({"username": USER}) == 1,
               str(probe_db["FaceTemplates"].count_documents({"username": USER})))
+
+    # =====================================================================
+    # K：识别画面（预览门禁）
+    # =====================================================================
+    print("\n[K] 识别画面：预览只在有效挑战的窗口期内可取（服务端出图，前端不碰摄像头）")
+    with backend("ok", "k"):
+        st, r = login(USER, USER_PW)
+        d = r.get("data") or {}
+        token = d.get("challengeToken", "")
+        check("（准备）已录人脸 ⇒ 拿到登录挑战", st == 200 and bool(token),
+              "%s %s" % (st, r.get("code")))
+        check("挑战随包下发判定阈值（界面上要显示可核对的数字，不是魔数）",
+              d.get("threshold") == 0.5, str(d.get("threshold")))
+
+        # ① 没有任何凭据
+        code, _, _ = fetch_preview(None)
+        check("不带 token ⇒ 拒绝取画面", code == 404, "status=%s" % code)
+
+        # ② 伪造凭据
+        code, _, _ = fetch_preview("not-a-real-token")
+        check("伪造 token ⇒ 拒绝取画面", code == 404, "status=%s" % code)
+
+        # ③ 会话票据 ≠ 预览凭据（两套东西不可互换，与"挑战 ≠ 票据"同一条原则）
+        st, r = login("admin", ADMIN_PW)
+        admin_ticket = (r.get("data") or {}).get("ticket", "")
+        code, _, _ = fetch_preview(admin_ticket)
+        check("票据不能当预览凭据（挑战 ≠ 票据）", code == 404, "status=%s" % code)
+
+        # ④ 窗口期内正常取帧，并且**不产生任何审计**
+        before = len(audit_docs())
+        status, headers, body = wait_preview(token)
+        check("有效挑战期内 ⇒ 200 image/jpeg",
+              status == 200 and headers.get("content-type", "").startswith("image/jpeg"),
+              "status=%s ct=%s" % (status, headers.get("content-type")))
+        check("画面是真正的 JPEG 字节（不是空图）",
+              len(body) > 1000 and body[:2] == b"\xff\xd8",
+              "%d 字节 magic=%s" % (len(body), body[:2]))
+        check("随帧下发检测状态（界面靠它显示徽记）",
+              headers.get("x-face-state") in ("detected", "no-face", "action", "returned", "down"),
+              str(headers.get("x-face-state")))
+        check("画面禁用缓存（no-store）",
+              headers.get("cache-control") == "no-store", str(headers.get("cache-control")))
+        for _ in range(5):
+            fetch_preview(token)
+        check("拉预览**不写审计**（界面行为不该把审计链灌满）",
+              len(audit_docs()) == before, "%d -> %d" % (before, len(audit_docs())))
+
+        # ⑤ 挑战被消费 ⇒ 预览立刻失效（窗口会自己结束，不是常开的摄像头流）
+        st, r = call("POST", api("/login/face"), {"challengeToken": token})
+        check("（准备）提交挑战完成刷脸", st == 200 and r.get("code") == "OK",
+              "%s %s" % (st, r.get("code")))
+        code, _, _ = fetch_preview(token)
+        check("采集结束后同一张 token 再也取不到画面", code == 404, "status=%s" % code)
+
+        # ⑥ 录入挑战同样能取画面：门禁绑的是"挑战"，不是"哪个接口签发的"
+        ticket = (r.get("data") or {}).get("ticket", "")
+        st, r = call("POST", api("/face/enroll"), {"password": USER_PW}, ticket)
+        etok = (r.get("data") or {}).get("challengeToken", "")
+        check("（准备）拿到录入挑战", bool(etok), "%s %s" % (st, r.get("code")))
+        estatus, _, ebody = wait_preview(etok)
+        check("录入挑战同样放行画面（与登录挑战同一套门禁）",
+              estatus == 200 and len(ebody) > 1000, "status=%s %d 字节" % (estatus, len(ebody)))
+
+        st, r = call("POST", api("/face/enroll/complete"), {"challengeToken": etok}, ticket)
+        check("（收尾）录入挑战被正常消费", st == 200 and r.get("code") == "OK",
+              "%s %s" % (st, r.get("code")))
+        code, _, _ = fetch_preview(etok)
+        check("录入挑战消费后同样取不到画面", code == 404, "status=%s" % code)
 
     # =====================================================================
     # G：fail closed
