@@ -47,6 +47,10 @@ SKIP_EXT = {
     ".woff", ".woff2", ".ttf", ".eot", ".otf",
     ".dll", ".exe", ".lib", ".rlib", ".pdb", ".rmeta", ".d",
     ".zip", ".7z", ".gz", ".pdf", ".so", ".node",
+    # 模型文件也是二进制。当文本扫会命中一堆随机字节：
+    # 实测 SFace 那个 38 MB 的 .onnx 贡献 6 处假邮箱 + 13 处假盘符路径
+    # （10-14 加"盘符 + 中文目录"规则后才暴露）。`.gitattributes` 本就把它标为 binary。
+    ".onnx",
 }
 
 # 这些文件名/路径本身就是"数据泄漏"，不靠关键字判定
@@ -83,8 +87,11 @@ PATTERNS = [
     ("口令字段赋值",   re.compile(r'(?i)\b(password|passwd|pwd|secret|token|api[_-]?key)\b\s*[:=]\s*["\']([^"\']{6,})["\']'), True),
     ("私钥/平台令牌",  re.compile(r"(-----BEGIN [A-Z ]*PRIVATE KEY|ghp_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|sk-[A-Za-z0-9]{20,})"), False),
     ("带凭据连接串",   re.compile(r"(mongodb(\+srv)?|mysql|postgres(ql)?|redis)://[^\s\"':@]+:[^\s\"'@]+@"), False),
-    # 泛化成"任意盘符 + \Users\<登录名>"，不再依赖某台机器的用户名
-    ("本机绝对路径",   re.compile(r"[A-Za-z]:[\\/]+Users[\\/]+[^\\/\s\"'<>|]+"), False),
+    # ① 任意盘符 + \Users\<登录名>：不依赖某台机器的用户名
+    # ② 任意盘符 + 紧跟中文目录名：本机项目目录常是中文，只写 ① 会漏掉
+    #    「盘符 + 中文目录」这一类（10-14 实测就这么漏了 5 处真实路径）
+    ("本机绝对路径",   re.compile(r"[A-Za-z]:[\\/]+Users[\\/]+[^\\/\s\"'<>|]+"
+                                 r"|[A-Za-z]:[\\/]+[\u4e00-\u9fff][^\\/\s\"'<>|]*"), False),
     # 真实姓名没法用通用规则识别，改从环境变量读：
     #   set PRIVACY_NAMES=张某某,李某某   （不设则该条永不命中）
     ("真实姓名",      re.compile("|".join(re.escape(x) for x in _PRIVACY_NAMES)
@@ -204,11 +211,15 @@ def main():
         # 符合邮箱格式的字面量，扫描自己时命中自己，报告里就多一条噪声。
         probe = collections.defaultdict(list)
         probe_mail = "probe" + chr(64) + "example.org"
+        # 盘符路径同样拼出来 —— 源码里若留一个字面量，扫自己时会命中自己。
+        probe_path = "E" + ":" + chr(92) + "某" + "目录" + chr(92) + "model.onnx"
         scan_text('{"ticket":"' + "A" * 43 + '","email":"' + probe_mail + '"}',
                   probe, "自检")
-        if not probe or "邮箱地址" not in probe or "会话 ticket" not in probe:
-            raise RuntimeError("自检未覆盖到预期模式，结果不可信")
-        print("  自检通过：邮箱与会话 ticket 模式均可正常命中")
+        scan_text("参考资产：`" + probe_path + "`", probe, "自检")
+        missing = [n for n in ("邮箱地址", "会话 ticket", "本机绝对路径") if n not in probe]
+        if missing:
+            raise RuntimeError("自检未覆盖到预期模式 %s，结果不可信" % missing)
+        print("  自检通过：邮箱 / 会话 ticket / 本机绝对路径（含中文目录）均可正常命中")
 
     # ---- 报告 ----
     print("\n" + "=" * 74)
