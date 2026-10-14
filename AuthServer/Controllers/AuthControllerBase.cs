@@ -269,6 +269,45 @@ public abstract class AuthControllerBase : ControllerBase
     }
 
     /**
+     * 记一次**应当计次**的验证失败（口令错 / 人脸判错 / 二次口令错），
+     * 并处理由此可能触发的锁定。返回值：未触发锁定为 null，触发则为给用户看的锁定话术。
+     *
+     * 为什么把这段抽出来：登录第二因子与"删除/更换人脸时的二次口令"是两条独立路径，
+     * 但"累加 → 达到阈值就锁定 → 落库"这三步必须逐字一致。
+     * 各写一份的后果是两条路径的锁定锚点写法可能不同，
+     * 而锚点一旦不同，"锁定到底什么时候到期"就会出现两套答案。
+     *
+     * ⚠️ 只接受**已经判定为计次**的失败。计次与否由调用方按
+     * <c>FaceCodes.IsCounted</c> / 口令校验结果决定，本方法不做二次判断 ——
+     * 判断只应有一个出口，否则"到底谁说了算"迟早会变成两处不一致。
+     */
+    protected async Task<string?> ApplyCountedFailureAsync(User user)
+    {
+        // 两个时间读数只取一次：分两次读会拿到两个不同步的"现在"，
+        // 让本该同起点的"窗口锚点"与"锁定锚点"对不上。
+        var failWallNow = TimeGuard.WallNow();
+        var failUptimeMs = TimeGuard.UptimeMs();
+
+        var thresholdReached = await RegisterFailedAttemptAsync(user, failWallNow, failUptimeMs, user.Username);
+
+        string? lockMessage = null;
+        if (thresholdReached)
+        {
+            user.Status = UserStatus.Locked;
+            // 锁定时同时记下两个锚点：墙钟 + 系统运行时长（理由见 Login 里的同类注释）。
+            user.LockoutEnd = failWallNow.Add(LockoutDuration);
+            user.LockoutWallAt = failWallNow;
+            user.LockoutUptimeAt = failUptimeMs;
+            // 新一轮锁定：把"已就时钟背离告警过"的标记归零。
+            user.LockoutDriftLogged = false;
+            lockMessage = $"连续输错 {MaxFailedAttempts} 次，账号已锁定 {LockoutDuration.TotalMinutes} 分钟";
+        }
+
+        await _db.Users.ReplaceOneAsync(u => u.Id == user.Id, user);
+        return lockMessage;
+    }
+
+    /**
      * 失败计数 + 锁定状态 + 两套时间锚点的**统一清除出口**。
      *
      * 为什么必须收成一个方法：清零原先散在 5 处（登录成功 / 登录时发现锁定已到期 /
@@ -313,6 +352,18 @@ public abstract class AuthControllerBase : ControllerBase
      * 鉴权失败时**本身也要留下审计记录** —— 这是实验二「02 看不到」的关键证据：
      * 光有拒绝响应不够，必须证明系统把这次越权尝试也记下来了。
      */
+
+    /// <summary>
+    /// 需要"已登录"即可（账号自助：查询 / 录入 / 删除自己的人脸）。
+    ///
+    /// 为什么这些自助接口也要票据，而不是像改口令那样"报用户名 + 验旧口令"：
+    ///   人脸自助操作的对象是**票据所代表的那个人**，而"我是谁"这件事
+    ///   只能由票据回答。若改成从请求体里读用户名，就必须再额外证明
+    ///   "你就是那个用户" —— 而人脸录入本来就没有旧口令可验（首次录入时还没有），
+    ///   等于把这条通道的入口敞开。走票据则天然闭合。
+    /// </summary>
+    protected Task<(User? User, IActionResult? Deny)> RequireAuthenticatedAsync(string action, string target = "")
+        => RequireAsync(AccessLevel.Authenticated, action, target);
 
     /// <summary>需要用户管理能力（Admin / UserAdmin）：审核、解锁、删除普通用户。</summary>
     protected Task<(User? Admin, IActionResult? Deny)> RequireUserAdminAsync(string action, string target = "")
