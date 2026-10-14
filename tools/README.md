@@ -50,11 +50,19 @@
 
 Debug 构建与发布链路隔着 Publish 与 NSIS 两层，行为**不保证一致**（已踩：单文件打包器
 把 YuNet 的 `.onnx` 吞进 exe 并从发布目录删掉 ⇒ 装机后已录人脸账号全部 fail closed）。
-这一类的脚本**必须先跑过 `publish:backend` + `sync:sidecar`**。
+
+两种模式，判据相同、证据强度不同：
+
+- **自建镜像**（默认）—— 按 NSIS 的 `File /oname=` 布局镜像一份产物到
+  `.workbuddy/tmp/install_mirror/`。**必须先跑过 `publish:backend` + `sync:sidecar`**。
+  改完 publish 就能跑，不必真的安装。
+- **真实装机目录**——`--install-dir <%LOCALAPPDATA%>\AuthBaseline`，装完 NSIS 之后跑。
+  多验一层：装机 exe 的 md5 应与 `publish` 一致、`uninstall.exe` 已写出（安装完成判据）。
+  ⚠️ 空目录/半成品目录会被拦（exe 为 0 字节 ⇒ 安装被中断）。
 
 | 文件 | 作用 | 公共层 | 真实库 |
 |---|---|---|---|
-| `face_release_probe.py` | 按 NSIS 的 `File /oname=` 布局镜像一份装机产物，再验证：① 真引擎（`=cv`）能从**镜像里的 face-models** 加载；② 把 `face_second_factor_probe.py` 的 **77 项**断言打到镜像 exe 上（共 **7 项 + 内嵌 77 项**） | ✓ | — |
+| `face_release_probe.py` | 装机产物校验：① 布局（face-models 5 文件 / exe **非空** / exe 内**未**内嵌 onnx）；② 真引擎（`=cv`）能从目标目录的 `face-models` 加载；③ 把 `face_second_factor_probe.py` 的全部断言打到目标 exe 上（共 **14 项 + 内嵌 77 项**） | ✓ | — |
 
 ### B. 端到端 / 验收
 

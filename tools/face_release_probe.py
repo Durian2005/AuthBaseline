@@ -23,12 +23,16 @@
 
 ## 用法
 
+    # 模式一：自建镜像（不需要真的安装；改完 publish/sidecar 就能跑）
     C:/Users/<你>/python.exe tools/face_release_probe.py 5700
     C:/Users/<你>/python.exe tools/face_release_probe.py 5700 --db AuthBaselineFaceReleaseProbe
 
+    # 模式二：打**真实装机目录**（装完 NSIS 之后跑，证据最强）
+    C:/Users/<你>/python.exe tools/face_release_probe.py 5710 --install-dir "%LOCALAPPDATA%\\AuthBaseline"
+
 ⚠️ 必须用**系统 Python**（带 pymongo）；⚠️ 库名必须含 `Probe`（`_guard()` 硬拒真实库）。
-⚠️ 前置：先跑过 `npm run publish:backend` 与 `npm run sync:sidecar`，否则镜像源缺文件。
-⚠️ 本工具只**读**源产物、只**写** `.workbuddy/tmp/install_mirror/`，不碰真实库。
+⚠️ 模式一前置：先跑过 `npm run publish:backend` 与 `npm run sync:sidecar`，否则镜像源缺文件。
+⚠️ 本工具只**读**产物（镜像或装机目录）、只**写** `.workbuddy/tmp/`，不碰真实库。
 """
 import os
 import shutil
@@ -46,6 +50,8 @@ from _probe_common import (  # noqa: E402
 )
 
 MIRROR = os.path.join(ROOT, ".workbuddy", "tmp", "install_mirror")
+# 实际被校验的目录（镜像 或 真实装机目录），由 main() 决定
+TARGET = MIRROR
 
 # NSIS 脚本里 File /oname= 的镜像（少一个就是打包漏了）
 SIDECAR_SRC = os.path.join(ROOT, "src-tauri", "binaries",
@@ -107,10 +113,54 @@ def build_mirror():
     return MIRROR
 
 
+def use_install_dir(path):
+    """模式二：直接校验**真实装机目录**（NSIS 装完之后跑）。
+
+    比镜像更硬的地方：镜像只复现了「文件布局」，而真实装机目录还带上了
+    NSIS 解压出来的 exe 本身（md5 应与 publish 一致）与注册表/快捷方式。
+    """
+    if not os.path.isdir(path):
+        bad("装机目录不存在：%s" % path)
+        return None
+    exe = os.path.join(path, "authserver.exe")
+    if not os.path.exists(exe):
+        bad("装机目录里没有 authserver.exe：%s" % path)
+        return None
+    size = os.path.getsize(exe)
+    (ok if size > 0 else bad)("装机 authserver.exe 非空（%d 字节）" % size)
+    if size == 0:
+        # 只轮询文件出现、不同进程 wait 安装器时，就是这个下场
+        bad("exe 为 0 字节 ⇒ 安装被中断（安装器必须同进程 wait 到退出）")
+        return None
+    print("[装机目录] %s" % path)
+    return path
+
+
+def check_target_layout(target):
+    """装机目录/镜像的文件布局（不启动进程，纯静态判定）。"""
+    print("\n[步骤零] 目标目录文件布局")
+    got = set(os.listdir(os.path.join(target, "face-models"))) \
+        if os.path.isdir(os.path.join(target, "face-models")) else set()
+    missing = REQUIRED_FACE_MODELS - got
+    (ok if not missing else bad)(
+        "face-models 含全部 5 个文件" if not missing
+        else "face-models 缺：%s" % ", ".join(sorted(missing)))
+    for rel in ["wwwroot/index.html", "appsettings.json",
+                "appsettings.Local.json", "authserver.exe"]:
+        p = os.path.join(target, *rel.split("/"))
+        (ok if os.path.exists(p) else bad)("存在 %s" % rel)
+    # ⚠️ 单文件打包器若把 .onnx 吞进 exe，磁盘上就没有它了；这条同时反向兜住
+    data = open(os.path.join(target, "authserver.exe"), "rb").read()
+    for name in ["face_detection_yunet_2023mar", "face_recognition_sface_2021dec"]:
+        cnt = data.count(name.encode())
+        (ok if cnt == 0 else bad)(
+            "exe 内**未**内嵌 %s（打包器没吞模型）" % name)
+
+
 def step1_real_engine(port, db_name):
-    """真引擎能否从镜像里的 face-models 加载。"""
-    print("\n[步骤一] 真引擎从**镜像里的 face-models** 加载")
-    exe = os.path.join(MIRROR, "authserver.exe")
+    """真引擎能否从**目标目录里的 face-models** 加载。"""
+    print("\n[步骤一] 真引擎从**目标目录里的 face-models** 加载")
+    exe = os.path.join(TARGET, "authserver.exe")
     log = os.path.join(ROOT, ".workbuddy", "tmp", "mirror_cv_engine.log")
 
     proc = start_backend(exe, port, db_name, log_dir=os.path.dirname(log),
@@ -121,9 +171,9 @@ def step1_real_engine(port, db_name):
     try:
         base = "http://127.0.0.1:%d" % port
         if not wait_backend_ready(base, proc, timeout_s=120):
-            bad("镜像 exe 未能就绪")
+            bad("目标 exe 未能就绪")
             return
-        ok("镜像 exe（authserver.exe + face-models 同级）能启动并就绪")
+        ok("目标 exe（authserver.exe 与 face-models 同级）能启动并就绪")
 
         st, r = http_call(base, "POST", "/api/auth/login",
                           body={"username": "admin", "password": "Admin123"})
@@ -148,10 +198,10 @@ def step1_real_engine(port, db_name):
 
 
 def step2_full_probe(port, db_name):
-    """把 face_second_factor_probe 的全部断言打到镜像 exe 上。"""
-    print("\n[步骤二] 全量断言打到镜像 exe（Debug 探针覆盖不到的那条链路）")
+    """把 face_second_factor_probe 的全部断言打到目标 exe 上。"""
+    print("\n[步骤二] 全量断言打到目标 exe（Debug 探针覆盖不到的那条链路）")
     probe = os.path.join(TOOLS_DIR, "face_second_factor_probe.py")
-    exe = os.path.join(MIRROR, "authserver.exe")
+    exe = os.path.join(TARGET, "authserver.exe")
     cmd = [sys.executable, probe, exe, str(port), "--db", db_name]
     print("        " + " ".join(cmd))
     proc = subprocess.Popen(cmd, cwd=ROOT, stdout=subprocess.PIPE,
@@ -162,34 +212,57 @@ def step2_full_probe(port, db_name):
     for ln in tail:
         print("        " + ln.strip())
     if proc.returncode == 0:
-        ok("镜像 exe 上 77 项断言全部通过")
+        ok("目标 exe 上 77 项断言全部通过")
     else:
-        bad("镜像 exe 上探针未通过（exit=%s）" % proc.returncode)
+        bad("目标 exe 上探针未通过（exit=%s）" % proc.returncode)
         line = [ln for ln in text.splitlines() if "[FAIL]" in ln]
         for ln in line[:10]:
             print("        " + ln.strip())
 
 
 def main():
+    global TARGET
     argv = sys.argv[1:]
-    ports = [a for a in argv if a.isdigit()]
+
+    # 模式二：--install-dir <真实装机目录>
+    # ⚠️ 必须先把它从 argv 里摘掉再交给 resolve_probe_db：后者的第 2 条规则会把
+    #    「首个非 -- 开头的位置参数」当库名，那个路径过不了 `_guard()`（不含 Probe）
+    #    就会直接把脚本 SystemExit 掉。
+    install_dir = None
+    rest = []
+    i = 0
+    while i < len(argv):
+        a = argv[i]
+        if a == "--install-dir" and i + 1 < len(argv):
+            install_dir = os.path.expandvars(argv[i + 1])
+            i += 2
+            continue
+        if a.startswith("--install-dir="):
+            install_dir = os.path.expandvars(a.split("=", 1)[1])
+            i += 1
+            continue
+        rest.append(a)
+        i += 1
+
+    ports = [a for a in rest if a.isdigit()]
     port = int(ports[0]) if ports else 5700
-    db_name = resolve_probe_db("AuthBaselineFaceReleaseProbe", argv)
+    db_name = resolve_probe_db("AuthBaselineFaceReleaseProbe", rest)
 
     print("=" * 70)
     print("  人脸模块 · 装机产物校验（Release / 单文件 / NSIS 布局）")
-    print("  镜像: %s" % MIRROR)
+    print("  模式: %s" % ("真实装机目录" if install_dir else "自建镜像"))
+    print("  目标: %s" % (install_dir or MIRROR))
     print("  库:   %s（须含 Probe）" % db_name)
     print("=" * 70)
 
-    if build_mirror() is None:
+    if install_dir:
+        TARGET = use_install_dir(install_dir)
+    else:
+        TARGET = build_mirror()
+    if TARGET is None:
         return 1
 
-    got = set(os.listdir(os.path.join(MIRROR, "face-models")))
-    missing = REQUIRED_FACE_MODELS - got
-    (ok if not missing else bad)(
-        "镜像 face-models 含全部 5 个文件" if not missing
-        else "镜像 face-models 缺：%s" % ", ".join(sorted(missing)))
+    check_target_layout(TARGET)
 
     db = ProbeDb(db_name)
     db.drop_if_exists()
