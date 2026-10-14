@@ -162,8 +162,16 @@ public sealed class FacePreviewService : IDisposable
         {
             Prune();
 
-            // 没人在看 / 正在正式采集 ⇒ 一次帧都不取，并且把摄像头还回去
-            if (_open.IsEmpty || Volatile.Read(ref _capturing) > 0)
+            // 正在正式采集 ⇒ 摄像头归采集循环独占：既不停手，更**不许释放**。
+            // （2026-10-14 实测事故：这里曾把 "_capturing > 0" 与 "_open 为空" 合在一起
+            //   走进 ReleaseIfIdle，采集开始约一个 Pump 周期（110ms）后摄像头就被关掉，
+            //   之后每一帧都读到 null。审计症状是"第一帧有脸（samples 1 / faceW ~200）、
+            //   紧接着连续 10 帧无人脸（miss 10）、1.1s 判 FACE_NO_FACE"，
+            //   用户端只看到"没有检测到人脸，请正对摄像头再试一次"，极易误判成坐姿问题。）
+            if (Volatile.Read(ref _capturing) > 0) return;
+
+            // 没人在看 ⇒ 一次帧都不取，并且把摄像头还回去
+            if (_open.IsEmpty)
             {
                 ReleaseIfIdle();
                 return;
@@ -205,6 +213,8 @@ public sealed class FacePreviewService : IDisposable
      */
     private void ReleaseIfIdle()
     {
+        // 采集期间摄像头归采集循环所有 —— 任何路径都不许在这里把它关掉（原因见 Pump 注释）
+        if (Volatile.Read(ref _capturing) > 0) return;
         if (!_active) return;
         _active = false;
         _latest = null;

@@ -369,7 +369,7 @@ public sealed class CvFaceEngine : IFaceEngine, IDisposable
         string Diag()
         {
             var b = new StringBuilder();
-            b.Append($"elapsed {sw.Elapsed.TotalSeconds:F1}s samples {samples} miss {miss} jumps {jumps}");
+            b.Append($"elapsed {sw.Elapsed.TotalSeconds:F1}s samples {samples} frames {framesRead} miss {miss} jumps {jumps}");
             b.Append($" yaw {minDy:+0.00;-0.00}..{maxDy:+0.00;-0.00} pitch {minDp:+0.00;-0.00}..{maxDp:+0.00;-0.00}");
             b.Append(baseYaw is null ? " base n/a" : $" base {baseYaw:+0.00;-0.00}/{basePitch:+0.00;-0.00}");
             b.Append($" faceW {faceWidth:F0} actionSeen {actionSeen}");
