@@ -43,7 +43,8 @@
     "resources": {
       "../AuthClient/dist": "wwwroot",
       "../AuthServer/appsettings.json": "appsettings.json",
-      "../AuthServer/appsettings.Local.json": "appsettings.Local.json"
+      "../AuthServer/appsettings.Local.json": "appsettings.Local.json",
+      "../AuthServer/face-models": "face-models"
     },
     "icon": [
       "icons/32x32.png",

@@ -33,6 +33,12 @@
 *.gz binary
 *.pdf binary
 
+# 人脸模型（OpenCV Zoo 的 ONNX，共约 39 MB）。
+# 虽然 `text=auto` 也能探测出它们是二进制，但显式声明后行为才不依赖启发式 ——
+# 而且这两个文件是本项目**唯一**的大二进制资产，一旦被当成文本转换就彻底损坏
+# （损坏后果不是"构建失败"而是"引擎加载失败 ⇒ 已录人脸的账号全部 fail closed 登不进去"）。
+*.onnx binary
+
 # macOS 图标（虽然本仓库只出 Windows 安装包，但 Tauri 的 icons/ 目录里带着它）。
 # 它虽然能被 git 的自动探测判为二进制，但显式声明后行为才不依赖启发式。
 *.icns binary
