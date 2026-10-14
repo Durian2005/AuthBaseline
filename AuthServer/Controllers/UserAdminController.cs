@@ -1,5 +1,6 @@
 using AuthServer.Models;
 using AuthServer.Services;
+using AuthServer.Services.Face;
 using Microsoft.AspNetCore.Mvc;
 using MongoDB.Driver;
 using System.Text.Json;
@@ -8,10 +9,10 @@ using System.Text.RegularExpressions;
 namespace AuthServer.Controllers;
 
 /**
- * 用户管理接口：审核、解锁/解冻、冻结、注销、创建账号、变更角色、用户与沉睡清单。
+ * 用户管理接口：审核、解锁/解冻、冻结、注销、创建账号、变更角色、用户与沉睡清单、重置他人人脸。
  *
  * 全部依赖票据鉴权，且**两个级别刻意分开**：
- *   · RequireUserAdminAsync（Admin / UserAdmin）—— 审核、解锁、冻结、注销、看清单
+ *   · RequireUserAdminAsync（Admin / UserAdmin）—— 审核、解锁、冻结、注销、看清单、重置人脸
  *   · RequireAdminAsync（仅 Admin）      —— 创建账号、变更他人角色
  * 用户管理员能管账号，但不能任免角色；任免角色只属于 Admin。
  * 「创建账号」可建普通用户 / 用户管理员 / 审计管理员（不可建 Admin）；
@@ -22,10 +23,13 @@ namespace AuthServer.Controllers;
 [Route("api/auth")]
 public class UserAdminController : AuthControllerBase
 {
+    private readonly FaceTemplateStore _faceTemplates;
+
     public UserAdminController(MongoDbService db, AuditWriter auditWriter, SessionService sessions,
-        PepperProvider pepper, IConfiguration configuration)
+        PepperProvider pepper, IConfiguration configuration, FaceTemplateStore faceTemplates)
         : base(db, auditWriter, sessions, pepper, configuration)
     {
+        _faceTemplates = faceTemplates;
     }
 
     /* ==================== 管理员：审核 ==================== */
@@ -331,6 +335,23 @@ public class UserAdminController : AuthControllerBase
             return BadRequest(denied);
         }
 
+        // ── 同动作清理人脸模板（刻意排在删除账号之前）──
+        //
+        // 账号都不存在了还留着生物特征向量，是纯粹的残留暴露面 ——
+        // 口令改了可以撤销，脸改不了，所以这类数据"能不留就不留"。
+        //
+        // 为什么排在删除账号**之前**：这样"模板清理失败"会让整个请求失败、
+        // 账号**不被删除**，从而保证不变式"不会有账号已注销但模板还留着"（不留孤儿）。
+        // 反过来（先删账号再清模板）一旦清理失败就永久留下孤立向量，
+        // 而且再没有任何东西指向它，事后想清理都无从下手。
+        // 反方向的残余代价只是"模板先没了、账号还在"（该账号暂时退回单因子），
+        // 管理员重试一次即可自愈 —— 两种残余里这一种可恢复。
+        //
+        // 按用户名而不是 userId 删：模板表冗余存了 username 正是为了这条路径少一次查询，
+        // 而"漏删模板"是这段代码最不能接受的失败。
+        // 不用 try/catch：本机 Mongo 的失败本就该让请求失败，吞掉它才是真的危险。
+        await _faceTemplates.DeleteByUsernameAsync(user.Username);
+
         await _db.Users.DeleteOneAsync(u => u.Id == user.Id);
 
         // 账号已被注销，其名下所有票据必须立即失效 ——
@@ -346,6 +367,77 @@ public class UserAdminController : AuthControllerBase
         };
         await _auditWriter.WriteAsync(admin!.Id, admin.Username, AuditAction.DeleteUser, statusBefore, requestLog, response, "Deleted",
             user.Username, AuditResult.Success);
+        return Ok(response);
+    }
+
+    /* ==================== 管理员：重置他人人脸 ==================== */
+
+    /**
+     * 重置某账号的人脸模板（换人 / 换设备 / 疑似泄露后作废，
+     * 以及"录入者的摄像头损坏、第二因子无法完成时"的**指定恢复路径**）。
+     *
+     * 与注销、冻结同属**处置**类操作，因此走同一个权限出口
+     * <c>UserRoles.CanBeManagedBy</c> —— 不新增任何规则，用户管理员够不到上级。
+     *
+     * 审计动作单独一条（FACE_TEMPLATE_RESET）：把别人的第二因子拿掉是本系统里
+     * "管理员可对他人实施的降级"之一，必须能被一条查询单独捞出来复核。
+     * 它的性质与已经承认的"SoD 可被 Admin 绕过"相同 ——
+     * **可追溯，但不宣称已阻止**（详见设计文档 §九）。
+     *
+     * 为什么不像 create-account 那样要求操作者二次口令：
+     *   与 delete-user / freeze-user 保持一致 —— 那两者也不要求。
+     *   若只在这里加严，就会出现"注销账号比拿掉人脸更松"这种自相矛盾的权限阶梯。
+     */
+    [HttpPost("reset-face")]
+    public async Task<IActionResult> ResetFace([FromBody] ResetFaceRequest req)
+    {
+        const string action = AuditAction.FaceTemplateReset;
+        var (admin, deny) = await RequireUserAdminAsync(action, Norm(req.Username));
+        if (deny != null) return deny;
+        var requestLog = new { req.Username };
+
+        var username = Norm(req.Username);
+        var user = await _db.Users.Find(u => u.Username == username).FirstOrDefaultAsync();
+        if (user == null)
+        {
+            var missing = new ApiResponse { Success = false, Code = BusinessCode.NotFound, Message = "用户不存在" };
+            await _auditWriter.WriteAsync(admin!.Id, admin.Username, action, "N/A", requestLog, missing, "N/A",
+                username, AuditResult.Failed, AuditReason.NotFound);
+            return NotFound(missing);
+        }
+
+        var statusBefore = user.Status.ToString();
+
+        if (!UserRoles.CanBeManagedBy(admin!, user))
+        {
+            var isSelf = UserRoles.IsSameAccount(admin!, user);
+            var denied = new ApiResponse
+            {
+                Success = false,
+                Code = BusinessCode.ForbiddenTarget,
+                Message = isSelf
+                    ? "不能重置自己的人脸模板。请到账号设置里自助删除（需输入当前口令）。"
+                    : $"当前身份「{UserRoles.Label(admin!.Role)}」不能重置"
+                        + $"「{UserRoles.Label(user.Role)}」账号的人脸。"
+            };
+            await _auditWriter.WriteAsync(admin!.Id, admin.Username, action, statusBefore, requestLog, denied,
+                statusBefore, user.Username, AuditResult.Failed, AuditReason.ForbiddenTarget);
+            return BadRequest(denied);
+        }
+
+        var removed = await _faceTemplates.DeleteByUserIdAsync(user.Id);
+
+        var response = new ApiResponse
+        {
+            Success = true,
+            Code = BusinessCode.Ok,
+            Message = removed > 0
+                ? $"已重置「{user.Username}」的人脸模板（删除 {removed} 张），该账号不再需要刷脸登录"
+                : $"「{user.Username}」原本就没有录入人脸",
+            Data = new { Username = user.Username, Removed = removed }
+        };
+        await _auditWriter.WriteAsync(admin!.Id, admin.Username, action, statusBefore, requestLog, response,
+            statusBefore, user.Username, AuditResult.Success);
         return Ok(response);
     }
 

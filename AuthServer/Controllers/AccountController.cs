@@ -1,5 +1,6 @@
 using AuthServer.Models;
 using AuthServer.Services;
+using AuthServer.Services.Face;
 using Microsoft.AspNetCore.Mvc;
 using MongoDB.Driver;
 using System.Text.Json;
@@ -8,11 +9,11 @@ using System.Text.RegularExpressions;
 namespace AuthServer.Controllers;
 
 /**
- * 账号自助接口：注册、邮箱验证码、忘记口令（重置）、修改口令。
+ * 账号自助接口：注册、邮箱验证码、忘记口令（重置）、修改口令、人脸模板自助。
  *
  * 共同点：操作者**处理的是自己的账号**，或尚未成为账号的注册申请。
- * 因此这里没有 RequireXxxAsync 守卫 —— 身份由"知道旧口令 / 收到邮箱验证码"证明，
- * 而不是由角色票据授予。角色相关的操作全在 UserAdminController。
+ * 因此这里没有"角色"守卫 —— 身份由"知道旧口令 / 收到邮箱验证码"证明，
+ * 或由票据代表的"本人"确定。角色相关的操作全在 UserAdminController。
  * 路由前缀仍是 api/auth，与拆分前逐一对应。
  */
 [ApiController]
@@ -21,14 +22,19 @@ public class AccountController : AuthControllerBase
 {
     private readonly VerificationService _codes;
     private readonly EmailOptions _emailOptions;
+    private readonly FaceLoginService _face;
+    private readonly FaceTemplateStore _faceTemplates;
 
     public AccountController(MongoDbService db, AuditWriter auditWriter, SessionService sessions,
         PepperProvider pepper, VerificationService codes, EmailOptions emailOptions,
+        FaceLoginService face, FaceTemplateStore faceTemplates,
         IConfiguration configuration)
         : base(db, auditWriter, sessions, pepper, configuration)
     {
         _codes = codes;
         _emailOptions = emailOptions;
+        _face = face;
+        _faceTemplates = faceTemplates;
     }
 
     /* ==================== 注册（绑定邮箱） ==================== */
@@ -524,6 +530,260 @@ public class AccountController : AuthControllerBase
         };
         await _auditWriter.WriteAsync(user.Id, user.Username, okAction, statusBefore, requestLog, response, user.Status.ToString(),
             sanitizedUsername, AuditResult.Success);
+        return Ok(response);
+    }
+
+    /* ==================== 人脸模板自助（可选第二因子） ==================== */
+
+    /**
+     * 本人的人脸状态：有没有录、录了几张、什么时候录的、本机引擎是否可用。
+     *
+     * 为什么走票据而不是"报用户名"：人头上的模板属于**本人**，
+     * 而"我是谁"只能由票据回答（见 AuthControllerBase.RequireAuthenticatedAsync）。
+     *
+     * 为什么**不写审计**：账号页每次打开都会拉一次，逐次留痕只会把审计链刷成噪声
+     * —— 与 /dormant-users 同一条理由。需要留痕的是"录入 / 删除"这类**改变状态**的动作。
+     */
+    [HttpGet("face")]
+    public async Task<IActionResult> FaceStatus()
+    {
+        var (user, deny) = await RequireAuthenticatedAsync(AuditAction.AuditAccessDenied, "self-face");
+        if (deny != null) return deny;
+
+        return Ok(new ApiResponse<FaceStatusResponse>
+        {
+            Success = true,
+            Code = BusinessCode.Ok,
+            Message = "查询成功",
+            Data = await BuildFaceStatusAsync(user!)
+        });
+    }
+
+    private async Task<FaceStatusResponse> BuildFaceStatusAsync(User user)
+    {
+        var engine = _face.EngineStatus;
+        return new FaceStatusResponse
+        {
+            Enrolled = await _faceTemplates.HasAnyAsync(user.Id),
+            TemplateCount = (int)await _faceTemplates.CountAsync(user.Id),
+            EnrolledAt = await _faceTemplates.LastEnrolledAtAsync(user.Id),
+            // 阈值与引擎状态一并下发：界面上要能显示"本机当前按 0.50 判定"、
+            // "本机检测不到摄像头"，而不是让用户对着一个沉默的按钮猜。
+            Threshold = _face.Threshold,
+            EngineReady = engine.Ready,
+            EngineMessage = engine.Ready ? string.Empty : engine.Message
+        };
+    }
+
+    /**
+     * 录入 / 更换人脸 · 第一步：验口令、下发动作挑战。
+     *
+     * 为什么必须拆成两步：动作由**服务端随机决定**（让客户端指定等于把活体挑战作废），
+     * 而用户必须知道要做什么才能做 —— 所以动作必须先送到客户端，
+     * 客户端准备好后再回来采一帧。两步之间靠一张一次性 token 连接，并绑定用途（enroll）。
+     *
+     * 口令校验放在这一步、而不是采集之后：免得用户对着镜头把动作做完，
+     * 才被告知"口令不对"——那既浪费一次采集，也让失败原因变得含糊。
+     */
+    [HttpPost("face/enroll")]
+    public async Task<IActionResult> FaceEnrollStart([FromBody] FaceEnrollRequest req)
+    {
+        const string action = AuditAction.FaceEnroll;
+        var (user, deny) = await RequireAuthenticatedAsync(action, "self-face");
+        if (deny != null) return deny;
+        var requestLog = new { user = user!.Username };
+        var statusBefore = user.Status.ToString();
+
+        // 模块关闭 / 引擎不可用 ⇒ 明确拒绝并留痕，而不是给一个"看起来能用"的按钮
+        if (!_face.Enabled || !_face.EngineStatus.Ready)
+        {
+            var message = !_face.Enabled ? "本系统的人脸模块当前未启用" : $"本机人脸引擎不可用：{_face.EngineStatus.Message}";
+            var resp = new ApiResponse { Success = false, Code = BusinessCode.FaceEngineUnavailable, Message = message };
+            await _auditWriter.WriteAsync(user.Id, user.Username, AuditAction.FaceEnrollFailed, statusBefore,
+                requestLog, resp, statusBefore, user.Username, AuditResult.Failed, AuditReason.FaceEngineUnavailable);
+            return StatusCode(503, resp);
+        }
+
+        if (string.IsNullOrWhiteSpace(req.Password))
+        {
+            var resp = new ApiResponse { Success = false, Code = BusinessCode.EmptyFields, Message = "请先输入当前登录口令" };
+            await _auditWriter.WriteAsync(user.Id, user.Username, AuditAction.FaceEnrollFailed, statusBefore,
+                requestLog, resp, statusBefore, user.Username, AuditResult.Failed, AuditReason.EmptyFields);
+            return BadRequest(resp);
+        }
+
+        if (!PasswordHasher.Verify(req.Password, user.PasswordHash, _pepper.Pepper).Valid)
+        {
+            // 这次失败的语义就是"有人在猜这个账号的口令"，与登录时的口令错误同类，
+            // 因此**计次**（走 A 组语义，见 FaceCodes.IsCounted）。
+            // 它与 create-account 的二次口令不同：那里的操作者本身就是管理员、
+            // 且目标是他人的账号；这里猜的是**自己的**登录口令，
+            // 而这条路径若不计次就是一条无节流的在线口令猜测通道。
+            var lockMessage = await ApplyCountedFailureAsync(user);
+            var resp = new ApiResponse
+            {
+                Success = false,
+                Code = lockMessage is null ? BusinessCode.InvalidCredentials : BusinessCode.AccountLocked,
+                Message = lockMessage ?? "口令校验失败，已拒绝录入",
+                Data = new { FailedAttempts = user.FailedLoginAttempts, LockoutEnd = user.LockoutEnd }
+            };
+            await _auditWriter.WriteAsync(user.Id, user.Username, AuditAction.FaceEnrollFailed, statusBefore,
+                requestLog, resp, user.Status.ToString(), user.Username, AuditResult.Failed,
+                lockMessage is null ? AuditReason.FaceWrongPassword : AuditReason.AccountLocked);
+            return Unauthorized(resp);
+        }
+
+        var (token, pose) = _face.IssueForEnroll(user.Username);
+        var challenge = new ApiResponse<FaceChallengeResponse>
+        {
+            Success = true,
+            Code = BusinessCode.Ok,
+            Message = "口令已验证，请按提示完成动作",
+            Data = new FaceChallengeResponse
+            {
+                ChallengeToken = token,
+                Action = pose,
+                ActionText = FacePose.ActionText(pose),
+                ActionHint = FacePose.ActionHint,
+                ExpiresInSeconds = _face.ChallengeTtlSeconds
+            }
+        };
+        await _auditWriter.WriteAsync(user.Id, user.Username, action, statusBefore, requestLog,
+            new { user.Username, Step = "ENROLL_CHALLENGE", Action = pose }, statusBefore, user.Username,
+            AuditResult.Success);
+        return Ok(challenge);
+    }
+
+    /**
+     * 录入 / 更换人脸 · 第二步：提交挑战，由服务端采集一帧并写入模板。
+     *
+     * 采集、检测、特征提取全部在服务端进程内完成 —— 请求体里只有 token，
+     * 没有任何画面或特征（理由同登录第二因子）。
+     *
+     * 录入失败**不计次**：用户已经登录，一次录不上人脸没有任何安全含义，
+     * 不该混进"本账号被连续判失败"的统计（见 AuditReason.FaceEnrollRejected）。
+     */
+    [HttpPost("face/enroll/complete")]
+    public async Task<IActionResult> FaceEnrollComplete([FromBody] FaceEnrollCompleteRequest req)
+    {
+        const string action = AuditAction.FaceEnroll;
+        const string failAction = AuditAction.FaceEnrollFailed;
+        var (user, deny) = await RequireAuthenticatedAsync(action, "self-face");
+        if (deny != null) return deny;
+        var requestLog = new { user = user!.Username };
+        var statusBefore = user.Status.ToString();
+
+        var (challengeUser, outcome, error) = _face.CaptureForEnroll(req.ChallengeToken);
+
+        // 挑战无效 / 用途不是 enroll / 属于别人 ⇒ 一律按无主处理，不归属、不计次。
+        // "属于别人"这一条虽然靠 token 不可猜已经兜住，但仍显式比一次 ——
+        // 让"随机不可猜"成为纵深手段而不是唯一防线。
+        if (error is not null || outcome is null || challengeUser is null
+            || !string.Equals(challengeUser, user.Username, StringComparison.Ordinal))
+        {
+            var resp = new ApiResponse
+            {
+                Success = false,
+                Code = BusinessCode.FaceChallengeInvalid,
+                Message = FaceCodes.MessageFor("FACE_CHALLENGE_INVALID")
+            };
+            await _auditWriter.WriteAsync(user.Id, user.Username, failAction, statusBefore,
+                new { user.Username, ChallengePresent = !string.IsNullOrWhiteSpace(req.ChallengeToken) },
+                resp, statusBefore, user.Username, AuditResult.Failed, AuditReason.FaceChallengeInvalid);
+            return BadRequest(resp);
+        }
+
+        if (!outcome.Passed || outcome.Feature is null)
+        {
+            // 引擎问题（环境）与"没通过"（配合/质量）在审计里分开：
+            // 前者不是用户的问题，后者才是。
+            var reason = string.Equals(outcome.BusinessCode, "FACE_ENGINE_UNAVAILABLE", StringComparison.Ordinal)
+                ? AuditReason.FaceEngineUnavailable
+                : AuditReason.FaceEnrollRejected;
+            var resp = new ApiResponse
+            {
+                Success = false,
+                Code = outcome.BusinessCode,
+                Message = FaceCodes.MessageFor(outcome.BusinessCode),
+                // 诊断量只入审计（下面），不进响应体：它是排障用的，对用户没有意义
+            };
+            await _auditWriter.WriteAsync(user.Id, user.Username, failAction, statusBefore, requestLog,
+                new { user.Username, BusinessCode = outcome.BusinessCode, Diagnostic = outcome.Diagnostic },
+                statusBefore, user.Username, AuditResult.Failed, reason);
+            return BadRequest(resp);
+        }
+
+        var count = await _faceTemplates.AddAsync(user.Id, user.Username, outcome.Feature);
+        var response = new ApiResponse
+        {
+            Success = true,
+            Code = BusinessCode.Ok,
+            Message = count > 1
+                ? $"已录入第 {count} 张人脸模板（上限 {_face.MaxTemplates} 张，超出后自动淘汰最早的）"
+                : "已录入人脸模板，该账号登录时需要刷脸",
+            Data = new { TemplateCount = count, EnrolledAt = DateTime.UtcNow, Threshold = _face.Threshold }
+        };
+        await _auditWriter.WriteAsync(user.Id, user.Username, action, statusBefore, requestLog,
+            new { user.Username, TemplateCount = count, Diagnostic = outcome.Diagnostic },
+            statusBefore, user.Username, AuditResult.Success);
+        return Ok(response);
+    }
+
+    /**
+     * 删除本人的全部人脸模板。**必须重新输入口令**。
+     *
+     * 这是"可选启用"这条设计自带的**降级通道**上唯一的闸门：
+     * 拿到一个有效会话的人，若能顺手把模板删掉，该账号就永久退回单因子 ——
+     * 而脸不像口令那样"改了就能撤销"，删掉之后攻击者留下的唯一凭据就是口令。
+     * 所以这一步的门槛刻意与"修改口令"同级（都要当前口令）。
+     *
+     * 口令错误按 A 组计次（同 face/enroll）。
+     */
+    [HttpPost("face/delete")]
+    public async Task<IActionResult> FaceDelete([FromBody] FaceDeleteRequest req)
+    {
+        const string action = AuditAction.FaceTemplateDeleted;
+        var (user, deny) = await RequireAuthenticatedAsync(action, "self-face");
+        if (deny != null) return deny;
+        var requestLog = new { user = user!.Username };
+        var statusBefore = user.Status.ToString();
+
+        if (string.IsNullOrWhiteSpace(req.Password))
+        {
+            var resp = new ApiResponse { Success = false, Code = BusinessCode.EmptyFields, Message = "删除人脸需要重新输入当前口令" };
+            await _auditWriter.WriteAsync(user.Id, user.Username, action, statusBefore, requestLog, resp, statusBefore,
+                user.Username, AuditResult.Failed, AuditReason.EmptyFields);
+            return BadRequest(resp);
+        }
+
+        if (!PasswordHasher.Verify(req.Password, user.PasswordHash, _pepper.Pepper).Valid)
+        {
+            var lockMessage = await ApplyCountedFailureAsync(user);
+            var resp = new ApiResponse
+            {
+                Success = false,
+                Code = lockMessage is null ? BusinessCode.InvalidCredentials : BusinessCode.AccountLocked,
+                Message = lockMessage ?? "口令校验失败，已拒绝删除人脸",
+                Data = new { FailedAttempts = user.FailedLoginAttempts, LockoutEnd = user.LockoutEnd }
+            };
+            await _auditWriter.WriteAsync(user.Id, user.Username, action, statusBefore, requestLog, resp,
+                user.Status.ToString(), user.Username, AuditResult.Failed,
+                lockMessage is null ? AuditReason.FaceWrongPassword : AuditReason.AccountLocked);
+            return Unauthorized(resp);
+        }
+
+        var removed = await _faceTemplates.DeleteByUserIdAsync(user.Id);
+        var response = new ApiResponse
+        {
+            Success = true,
+            Code = BusinessCode.Ok,
+            Message = removed > 0
+                ? $"已删除 {removed} 张人脸模板，该账号不再需要刷脸登录"
+                : "该账号原本就没有录入人脸",
+            Data = new { Removed = removed, Enrolled = false }
+        };
+        await _auditWriter.WriteAsync(user.Id, user.Username, action, statusBefore, requestLog, response,
+            statusBefore, user.Username, AuditResult.Success);
         return Ok(response);
     }
 }
