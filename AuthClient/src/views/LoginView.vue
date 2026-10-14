@@ -334,6 +334,8 @@ function switchTab(next) {
           :action-hint="session.pendingFace.actionHint"
           :busy="session.submitting"
           confirm-text="开始刷脸"
+          :preview-token="session.pendingFace?.challengeToken || ''"
+          :threshold="session.pendingFace?.threshold ?? null"
           @capture="captureFace"
           @cancel="cancelFace"
         />

@@ -2,6 +2,7 @@
 import { computed } from 'vue'
 import AppIcon from '../AppIcon.vue'
 import Spinner from '../Spinner.vue'
+import FacePreview from './FacePreview.vue'
 
 /**
  * 活体动作挑战面板 —— 登录第二因子与"录入人脸"两步共用的中间态。
@@ -11,14 +12,16 @@ import Spinner from '../Spinner.vue'
  * 各写一份必然分叉，而"动作提示的判定口径"一旦分叉，
  * 用户照着一个版本的提示做动作、却被另一个版本的口径拒绝，就非常难解释。
  *
- * ⚠️ 这里**刻意没有摄像头取景框画面**，不是没做，是做不了也不该做：
- *   · 采集发生在**服务端进程**内（见设计文档 §四：采集端必须留在服务端，
- *     否则攻击者可以不碰摄像头直接提交一个特征向量）；
- *   · 前端若自己去开一路摄像头做预览，就会与后端抢同一个设备
- *     （Windows DSHOW 下第二次打开通常直接失败），把真正的采集挤掉；
- *   · 后端若把画面推给前端，就等于开了一个**未鉴权**的摄像头画面流 ——
- *     本机任何页面都能来拉。
- *   所以取景框只作为"摄像头语境"的符号，并明确写出画面为何不显示。
+ * ── 取景画面从哪来 ──────────────────────────────────────────────
+ * 有挑战 token 时显示 `FacePreview`：画面由**服务端**采集、检测、画框之后
+ * 逐帧下发，前端不接触摄像头设备，也不上送任何画面或特征。
+ * 关键区别在于"谁采集"而不是"谁显示"：
+ *   · 采集端留在服务端 ⇒ 攻击者无法不碰摄像头直接提交一个特征向量；
+ *   · 前端自己开摄像头 ⇒ 会与后端抢同一个设备（Windows DSHOW 下第二次打开
+ *     通常直接失败），把真正的采集挤掉，功能反而坏掉；
+ *   · 画面只在**一张有效挑战 token 的窗口期内**可取，且接口只出图像
+ *     （关键点坐标不下发），不是一条谁都能拉的常开摄像头流。
+ * 没有 token 时（还没走到采集、或已放弃）退回到纯符号取景框。
  */
 const props = defineProps({
   /** 'left' | 'right' | 'up' | 'down' */
@@ -30,7 +33,11 @@ const props = defineProps({
   /** 主按钮文案 */
   confirmText: { type: String, default: '开始采集' },
   /** 紧凑模式：嵌在既有面板里时用（去掉外边框与阴影） */
-  compact: { type: Boolean, default: false }
+  compact: { type: Boolean, default: false },
+  /** 一次性挑战 token：非空才取景（它同时也是取画面的凭据） */
+  previewToken: { type: String, default: '' },
+  /** 本机判定阈值，仅用于显示 */
+  threshold: { type: Number, default: null }
 })
 
 defineEmits(['capture', 'cancel'])
@@ -43,8 +50,17 @@ const arrowAngle = computed(
 
 <template>
   <div class="fcp" :class="{ 'fcp--compact': compact }">
-    <!-- 取景框：四角 + 方向箭头。画面不显示（原因见组件说明） -->
-    <div class="fcp__frame" :class="{ 'is-busy': busy }">
+    <!-- 识别画面：服务端逐帧下发的 JPEG（前端不接触摄像头，原因见组件说明） -->
+    <FacePreview
+      v-if="previewToken"
+      :token="previewToken"
+      :action-text="actionText"
+      :threshold="threshold"
+      :busy="busy"
+    />
+
+    <!-- 没有取景权时：只用四角 + 方向箭头表示"摄像头语境" -->
+    <div v-else class="fcp__frame" :class="{ 'is-busy': busy }">
       <svg class="fcp__brackets" viewBox="0 0 120 120" aria-hidden="true">
         <path d="M12 38V22a10 10 0 0 1 10-10h16" />
         <path d="M82 12h16a10 10 0 0 1 10 10v16" />
@@ -65,12 +81,13 @@ const arrowAngle = computed(
       <AppIcon v-else name="face" :size="30" class="fcp__glyph" />
     </div>
 
-    <p v-if="actionText" class="fcp__action">{{ actionText }}</p>
+    <!-- 有画面时动作贴在画面左下角，这里就不再重复一遍指令 -->
+    <p v-if="actionText && !previewToken" class="fcp__action">{{ actionText }}</p>
     <p v-if="actionHint" class="fcp__hint">{{ actionHint }}</p>
 
     <p class="fcp__note">
       <AppIcon name="info" :size="12" />
-      <span>画面由本机后端直接采集，界面不显示取景画面</span>
+      <span>画面由本机后端采集并逐帧下发，前端不接触摄像头</span>
     </p>
 
     <div class="fcp__actions">

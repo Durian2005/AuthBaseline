@@ -335,6 +335,20 @@ export const api = {
   /** 本人人脸状态：是否已录、几张、最近一次录入时刻、本机引擎是否可用 */
   faceStatus: (signal) => request('/auth/face', { signal }),
 
+  /**
+   * 识别画面的地址（**注意：这不是一次 request()**，返回体是 image/jpeg）。
+   *
+   * 由 FacePreview 组件用 fetch + canvas 逐帧拉取渲染。之所以不走 <img src>：
+   * 桌面壳的 CSP 只给 img-src 放行了 'self' / asset: / data:，既不含后端源
+   * 也不含 blob:；而 connect-src 是放行后端的 —— 走 fetch 就**不必为这个功能
+   * 给 CSP 开任何新的口子**，顺带还能读到随帧下发的检测状态响应头。
+   *
+   * 携带的是**一次性挑战 token**，不是会话票据；token 过期 / 被消费 / 采集结束，
+   * 这个地址立刻失效（服务端门禁绑在挑战上，见 FacePreviewService）。
+   */
+  facePreviewUrl: (challengeToken) =>
+    `${API_ROOT}/auth/face/preview?token=${encodeURIComponent(challengeToken)}`,
+
   /** 录入第一步：验当前口令 → 换一张动作挑战（动作由服务端随机决定） */
   faceEnrollStart: (password) =>
     request('/auth/face/enroll', { method: 'POST', body: { password } }),

@@ -311,6 +311,8 @@ async function runFaceCapture() {
             :action-hint="session.faceChallenge?.actionHint"
             :busy="session.faceBusy"
             confirm-text="开始采集"
+            :preview-token="session.faceChallenge?.challengeToken || ''"
+            :threshold="session.faceChallenge?.threshold ?? faceStatus?.threshold ?? null"
             @capture="runFaceCapture"
             @cancel="cancelFaceFlow"
           />
