@@ -27,6 +27,7 @@ AuthBaseline 是一套完整的口令认证参考实现，覆盖认证系统的�
 | [`docs/design/AUDIT-UPGRADE-DESIGN.md`](docs/design/AUDIT-UPGRADE-DESIGN.md) | 审计追责设计：让所有安全事件可追溯 |
 | [`docs/design/TRANSPORT-STORAGE-SECURITY-DESIGN.md`](docs/design/TRANSPORT-STORAGE-SECURITY-DESIGN.md) | 传输与存储安全设计：TLS、票据哈希化、口令 pepper |
 | [`docs/design/ZOMBIE-ACCOUNT-GOVERNANCE-DESIGN.md`](docs/design/ZOMBIE-ACCOUNT-GOVERNANCE-DESIGN.md) | 沉睡账号治理：90 天自动冻结，可解冻、绝不删除 |
+| [`docs/design/FACE-AUTH-DESIGN.md`](docs/design/FACE-AUTH-DESIGN.md) | 人脸识别：账号级可选的登录第二因子（活体动作挑战、模板加密存储、fail-closed） |
 | [`docs/reports/AUDIT-VERIFY-REPORT.md`](docs/reports/AUDIT-VERIFY-REPORT.md) | 审计哈希链的独立复算与验证报告 |
 | [`docs/reports/CODE-QUALITY-REPORT.md`](docs/reports/CODE-QUALITY-REPORT.md) | 代码质量审计报告与整理路线 |
 
@@ -36,6 +37,7 @@ AuthBaseline 是一套完整的口令认证参考实现，覆盖认证系统的�
 - 数据库：MongoDB（推荐搭配 MongoDB Compass 直接观察数据）
 - 前端：Vue 3（Composition API + Pinia + Vite），Tauri 封装的桌面软件形态 UI
 - 密码哈希：BCrypt
+- 人脸识别（**可选**的登录第二因子）：OpenCvSharp —— YuNet 人脸检测 + SFace 特征，动作挑战活体
 
 > 前端最初是原生 HTML + CSS + JavaScript 实现，后重构为 Vue 3 单文件组件应用，
 > 呈现为**桌面软件形态**（标题栏 / 侧边栏 / 状态栏 / 可拖拽对话框 / 任务栏）。
@@ -61,7 +63,7 @@ AuthBaseline/
 │   │   ├── AuditLog.cs           # 审计实体 + 动作 / 结果 / 原因码收口
 │   │   ├── ApiResponse.cs        # 统一响应
 │   │   ├── BusinessCodes.cs      # 业务码收口（返给用户的那一套，刻意与审计码分离）
-│   │   └── AuthDtos.cs           # 请求 / 响应 DTO
+│   │   └── AuthDtos.cs           # 请求 / 响应 DTO；另有 FaceDtos.cs / FaceTemplate.cs
 │   ├── Services/
 │   │   ├── MongoDbService.cs     # MongoDB 连接与管理员种子
 │   │   ├── AuditService.cs       # 审计写入、分片轮转、哈希链
@@ -73,7 +75,9 @@ AuthBaseline/
 │   │   ├── TimeGuard.cs          # 时钟护栏：墙钟 + 单调时钟双线判定
 │   │   ├── CertificateManager.cs # 本机私有 CA 与 leaf 证书
 │   │   ├── DormantAccountService.cs  # 沉睡账号判定与冻结
+│   │   ├── Face/                 # 人脸第二因子：引擎抽象 / OpenCvSharp 实现 / 模板加密存储 / 挑战一次性票据
 │   │   └── EmailSender.cs / VerificationService.cs / EmailOptions.cs
+│   ├── face-models/              # YuNet 检测 + SFace 识别 ONNX 模型（随产物分发，含上游许可证）
 │   └── wwwroot/                  # 前端构建产物（由 AuthClient 构建生成）
 ├── AuthClient/                   # 前端源码（Vue 3）
 │   ├── package.json
@@ -89,11 +93,11 @@ AuthBaseline/
 │       ├── stores/               # Pinia
 │       │   ├── session.js        # 会话状态 + 各角色域的组装根
 │       │   ├── roles.js          # 角色常量与显示标签
-│       │   └── domains/          # auditDomain（审计域）/ adminDomain（用户管理域）
-│       ├── components/           # 外壳与通用组件；auth/ 与 users/ 放表单子组件
+│       │   └── domains/          # auditDomain（审计域）/ adminDomain（用户管理域）/ faceDomain（人脸域）
+│       ├── components/           # 外壳与通用组件；auth/、users/、face/ 放表单与流程子组件
 │       └── views/                # 登录、仪表盘、账号口令、用户管理、审计日志
 ├── docs/                         # 设计、报告与指南
-│   ├── design/                   # 四份 *-DESIGN.md（角色分离 / 审计 / 传输存储 / 沉睡账号）
+│   ├── design/                   # 五份 *-DESIGN.md（角色分离 / 审计 / 传输存储 / 沉睡账号 / 人脸）
 │   ├── reports/                  # 审计链验证报告、代码质量报告
 │   └── guides/                   # 桌面端打包、邮箱验证码使用指南
 ├── tools/                        # 验证与运维脚本（分类索引见 tools/README.md）
@@ -272,6 +276,35 @@ npm run build     # 只出浏览器产物 → ../AuthServer/wwwroot
 无障碍与规范：全矢量内联图标（无 emoji 充当图标）、表单均有标签与行内错误提示、
 焦点可见、`prefers-reduced-motion` 下自动关闭动效、深浅双主题均满足文本 4.5:1 对比度。
 
+### 10. 人脸识别（**可选**的登录第二因子）
+
+人脸是**账号级可选**的第二因子，**不录入完全不影响使用** —— 管理员账号默认不录入，也没有任何
+需要人脸才能使用的功能。三条产品规则：
+
+| 人群 | 行为 |
+|------|------|
+| 已注册用户 | 可在「账号与口令」页自助选择**添加**人脸（需重新输入当前口令） |
+| 新注册用户 | 注册流程中**可以选择**是否导入人脸 |
+| 所有管理员 | 不添加人脸，也不受任何影响 |
+
+**两步登录**：口令通过后，若该账号已录人脸，`/api/auth/login` **不签发票据**，只返回
+`FACE_REQUIRED` 与一次性挑战；人脸通过后才由同一出口签发票据。人脸响应里**没有**画面或特征 ——
+采集端在服务端（否则攻击者可直接 POST 一个伪造的特征向量进来）。
+
+- **活体动作挑战**：随机要求转头/抬头/低头，凭一次性挑战 token 完成，**用途绑定**（录入挑战不能拿去登录）。
+- **模板加密存储**：AES-256-GCM 可逆加密（人脸要能还原明文才能算余弦相似度，**不是哈希**），
+  AAD 绑定用户 ID；**绝不进审计、绝不导出**；注销账号时连带真删，不留生物特征孤儿。
+- **fail-closed**：已录人脸但本机引擎不可用 ⇒ **拒绝登录**（503 `FACE_ENGINE_UNAVAILABLE`），
+  不会静默退回单因子 —— 否则"弄坏摄像头"会比"删模板"更廉价。恢复路径是管理员 `reset-face`。
+- **失败分流（A/B 组）**：欺骗类信号（比对不符、活体不过、挑战无效、口令错）**计入**锁定计数；
+  质量/配合类问题（未检测到人脸、画质太差、动作未完成）**不计次** ——
+  用户不会被自己的摄像头误伤到锁号。规则钉在审计码上（`FaceCodes.IsCounted`），未登记码兜底计入。
+- **降级通道闸门**：录入与删除人脸都必须重新输入当前口令，口令错误按 A 组计次。
+
+> ⚠️ 口径（不说满）：人脸模板是**可逆加密**存储，防的是"库文件被拿走"，
+> **防不了**"进程被注入或调试器附加"。
+> 详见 [docs/design/FACE-AUTH-DESIGN.md](docs/design/FACE-AUTH-DESIGN.md)。
+
 ## 七、测试用例
 
 > 以下用例均已在开发机上实测验证，全部符合预期（实测记录见第十一章第 6 节）。
@@ -333,6 +366,7 @@ npm run build     # 只出浏览器产物 → ../AuthServer/wwwroot
 - `AuditChainHeads` 集合：哈希链的头部锚点。
 - `Sessions` 集合：会话票据（**只存哈希**，看不到明文票据）。
 - `EmailCodes` 集合：邮箱验证码（带有效期与使用标记）。
+- `FaceTemplates` 集合：人脸特征模板（**密文**，含 nonce / tag / 维度；明文特征只在本机内存中短暂存在）。
 
 典型的状态流转链：
 
@@ -345,7 +379,7 @@ npm run build     # 只出浏览器产物 → ../AuthServer/wwwroot
 
 ## 九、接口清单
 
-> 下表为后端当前实际暴露的全部接口（共 **20** 个）。
+> 下表为后端当前实际暴露的全部接口（共 **26** 个）。
 > 鉴权自「角色分离」改造起改为**服务端签发的 Bearer 票据**（`Authorization: Bearer <ticket>`），
 > 不再使用早期的 `?adminUsername=xxx` 由客户端自证身份的方式。
 > 鉴权失败会写入一条 `AUDIT_ACCESS_DENIED` 事件，使越权尝试可追溯。
@@ -358,7 +392,8 @@ npm run build     # 只出浏览器产物 → ../AuthServer/wwwroot
 
 | 方法 | 路径 | 鉴权 | 说明 |
 |------|------|------|------|
-| POST | `/api/auth/login` | 匿名 | 用户登录，成功返回会话票据 |
+| POST | `/api/auth/login` | 匿名 | 用户登录，成功返回会话票据。**若该账号已录入人脸，此处不签发票据**，改为返回 `FACE_REQUIRED` 与一次性挑战 |
+| POST | `/api/auth/login/face` | 匿名（凭挑战） | 人脸第二因子：请求体只有一次性挑战 token，**不含画面或特征**（采集在服务端完成），通过后才签发票据 |
 | POST | `/api/auth/logout` | 需票据 | 注销当前会话（吊销票据） |
 | GET | `/api/auth/transport` | 匿名 | 传输层状态：当前链路是否加密（TLS）、证书主题与到期日。**刻意不做鉴权** —— 状态栏在登录页就要显示，且内容属于公钥信息 |
 
@@ -371,7 +406,19 @@ npm run build     # 只出浏览器产物 → ../AuthServer/wwwroot
 | POST | `/api/auth/reset-password` | 匿名（凭验证码） | 忘记密码：校验邮箱验证码后直接设置新口令 |
 | POST | `/api/auth/change-password` | 需票据 | 修改自己的口令；新旧口令不得相同 |
 
-### 3. 用户管理（`api/auth`）
+### 3. 人脸识别（`api/auth`）—— 全部为**可选**能力
+
+> 人脸是**账号级可选**的登录第二因子。**不录入人脸的账号（含全部管理员）行为与改造前逐字一致**，
+> 照常用口令登录。下面 4 条自助接口都需要票据；其中**录入、删除都必须重新输入当前口令**作为降级通道闸门。
+
+| 方法 | 路径 | 鉴权 | 说明 |
+|------|------|------|------|
+| GET | `/api/auth/face` | 需票据 | 查询自己的人脸状态（是否已录、模板数、引擎是否就绪）。**只读，不写审计** |
+| POST | `/api/auth/face/enroll` | 需票据 + 口令 | 录入人脸第一步：校验当前口令后签发**一次性**录入挑战 |
+| POST | `/api/auth/face/enroll/complete` | 需票据（凭挑战） | 录入人脸第二步：凭挑战完成采集与入库；挑战**用途绑定**，不可挪用于登录 |
+| POST | `/api/auth/face/delete` | 需票据 + 口令 | 删除自己的人脸模板（**真删**，不留可复原数据） |
+
+### 4. 用户管理（`api/auth`）
 
 | 方法 | 路径 | 鉴权 | 说明 |
 |------|------|------|------|
@@ -383,8 +430,9 @@ npm run build     # 只出浏览器产物 → ../AuthServer/wwwroot
 | POST | `/api/auth/delete-user` | 用户管理员 | 注销普通用户（管理员账号不可被注销） |
 | POST | `/api/auth/create-account` | 管理员 | 创建**普通用户 / 用户管理员 / 审计管理员**（不可建 `Admin`）；**邮箱可选**，需二次校验操作者口令 |
 | POST | `/api/auth/set-role` | 管理员 | 任免用户角色（含 AuditAdmin），需二次校验操作者口令 |
+| POST | `/api/auth/reset-face` | 用户管理员 | 重置（清空）指定账号的人脸模板，用于账号本人丢失人脸后的恢复；复用既有 `CanBeManagedBy` 授权出口（含自我豁免） |
 
-### 4. 审计日志
+### 5. 审计日志
 
 | 方法 | 路径 | 鉴权 | 说明 |
 |------|------|------|------|
@@ -397,7 +445,7 @@ npm run build     # 只出浏览器产物 → ../AuthServer/wwwroot
 > ⚠️ **审计域没有任何写接口**。控制器只暴露上述 5 个 GET，后端不存在删除或修改审计
 > 日志的路径；界面上的「重置筛选」只是清空查询条件，与日志本体无关。
 
-### 4. 角色与权限模型
+### 6. 角色与权限模型
 
 角色为**互斥枚举**，避免出现非法权限组合：
 
