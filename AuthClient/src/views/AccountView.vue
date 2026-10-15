@@ -382,8 +382,7 @@ async function runFaceCapture() {
             <hr class="divider" />
 
             <p class="hint">
-              刷脸是<strong>第二因子</strong>：启用后光有口令还不能登录，必须再通过一次人脸验证。
-              不录入人脸则完全按原来的口令登录，不受任何影响；管理类账号默认都不启用。
+              人脸识别是登录的第二因子，请确保录入的是本人人脸。
             </p>
 
             <div class="actions">
