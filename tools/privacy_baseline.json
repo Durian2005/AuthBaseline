@@ -1,0 +1,74 @@
+{
+  "_note": "privacy_scan.py --gate 的已知命中基线。只允许登记逐条核实过的误报或设计内数据，每条必须写 reason。数字变大同样会被判为新增。",
+  "_howto": "修掉命中后请顺手删除对应条目；条目不再命中时门禁只告警（stale），不失败。",
+  "_self": "本文件自身也会被扫描：reason 里刻意不写完整的邮箱字面量与盘符路径字面量，否则基线文件自己就成了新的命中。",
+  "updatedAt": "2026-10-17",
+  "entries": [
+    {
+      "where": "AuthServer/face-models/LICENSE_yunet.txt",
+      "pattern": "邮箱地址",
+      "count": 1,
+      "reason": "上游 YuNet 的 MIT 协议原文，作者署名邮箱，属第三方文件原文"
+    },
+    {
+      "where": "AuthServer/face-models/README.md",
+      "pattern": "邮箱地址",
+      "count": 1,
+      "reason": "同上：说明文件里引用了该协议原文的署名"
+    },
+    {
+      "where": "src-tauri/tauri.conf.json",
+      "pattern": "邮箱地址",
+      "count": 1,
+      "reason": "图标文件名里的 retina 后缀被邮箱正则误判，不是地址"
+    },
+    {
+      "where": "tools/role_separation_test.py",
+      "pattern": "邮箱地址",
+      "count": 1,
+      "reason": "探针造的测试账号用的是示例域（首字母大写，未命中脚本里小写的示例域排除关键字），不是真实邮箱"
+    },
+    {
+      "where": "src-tauri/Cargo.lock",
+      "pattern": "中国大陆手机号",
+      "count": 1,
+      "reason": "64 位 checksum 十六进制串里恰好出现 11 位数字，被手机号正则误判"
+    },
+    {
+      "where": "AuthClient/src/components/face/FaceCapturePanel.vue",
+      "pattern": "口令字段赋值",
+      "count": 1,
+      "reason": "prop / 变量名里含 token 字样，等号右边不是凭据"
+    },
+    {
+      "where": "AuthClient/src/views/AccountView.vue",
+      "pattern": "口令字段赋值",
+      "count": 1,
+      "reason": "表单字段绑定（改密表单），字面量是空串或占位"
+    },
+    {
+      "where": "AuthClient/src/views/LoginView.vue",
+      "pattern": "口令字段赋值",
+      "count": 1,
+      "reason": "同上：表单字段绑定，不是真实口令"
+    },
+    {
+      "where": "tools/audit_e2e_test.py",
+      "pattern": "口令字段赋值",
+      "count": 1,
+      "reason": "探针里的一次性测试口令，仅用于造号后立刻删除"
+    },
+    {
+      "where": "tools/face_second_factor_probe.py",
+      "pattern": "口令字段赋值",
+      "count": 1,
+      "reason": "URL 查询串拼接 token 参数，是接口参数而非凭据"
+    },
+    {
+      "where": "docs/design/TRANSPORT-STORAGE-SECURITY-DESIGN.md",
+      "pattern": "本机绝对路径",
+      "count": 1,
+      "reason": "文档里的盘符路径占位示例（省略号形式），不是真实用户名路径"
+    }
+  ]
+}

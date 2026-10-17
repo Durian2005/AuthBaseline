@@ -23,8 +23,10 @@
 免得扫描报告自己变成新的泄漏点。
 
 用法：
-    python tools/privacy_scan.py                 # 扫工作区 + 历史
+    python tools/privacy_scan.py                 # 扫工作区 + 历史（发布前手动跑）
     python tools/privacy_scan.py --no-history    # 只扫工作区（快）
+    python tools/privacy_scan.py --no-history --gate
+                                                 # CI 门禁：只对基线之外的新增命中失败
 """
 
 import os
@@ -32,6 +34,7 @@ import re
 import subprocess
 import sys
 import collections
+import json
 
 from _toolchain import find_git
 
@@ -101,6 +104,78 @@ PATTERNS = [
 
 # 已知的演示默认口令：教学基线的正常设计，单列出来避免和真凭据混淆
 DEMO_OK = {"Admin123", "Admin23", "Victim12345", "Ops12345", "NewPass123", "Ops9x8y7z", "wrongold1A", "WrongPass1"}
+
+# ── CI 门禁（--gate）─────────────────────────────────────────
+# 为什么需要基线文件，而不是"零命中才算过"：
+#   本仓库有 12 处**长期存在、逐条核实过**的命中（上游协议里的作者邮箱、
+#   Tauri 图标名里的 retina 后缀被邮箱正则误判、Cargo.lock 里 64 位
+#   checksum 里的 11 位数字等）。要求零命中，门禁就会永久红着 ——
+#   红着的门禁等于没有门禁，所有人都会学会忽略它。
+#   所以把"已核实的"写进基线，门禁只对**新增**命中失败。
+# 基线的纪律：每条都必须写 reason；数字变大也算新增（同一个文件里多出 1 处
+#   同样要人看一眼）。删掉命中后基线条目会变成 stale，只告警不失败。
+BASELINE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "privacy_baseline.json")
+
+
+def load_baseline():
+    """返回 {(文件, 规则名): 允许的出现次数}。文件不存在时视为空基线。"""
+    if not os.path.isfile(BASELINE_PATH):
+        print("  ⚠️ 未找到基线 %s，按空基线处理（任何命中都会失败）"
+              % os.path.relpath(BASELINE_PATH, ROOT))
+        return {}
+    with open(BASELINE_PATH, encoding="utf-8") as f:
+        data = json.load(f)
+    out = {}
+    for e in data.get("entries", []):
+        out[(e["where"], e["pattern"])] = int(e.get("count", 1))
+    return out
+
+
+def run_gate(findings, data_containers):
+    """只对"新增"命中失败。返回进程退出码。"""
+    baseline = load_baseline()
+    counts = collections.Counter(
+        (d["where"], name) for name, lst in findings.items() for d in lst)
+
+    new_hits, stale = [], []
+    for (where, pattern), n in sorted(counts.items()):
+        allowed = baseline.get((where, pattern), 0)
+        if n > allowed:
+            new_hits.append((where, pattern, n, allowed))
+    for (where, pattern), n in sorted(baseline.items()):
+        if counts.get((where, pattern), 0) < n:
+            stale.append((where, pattern, n))
+
+    print("\n" + "=" * 74)
+    print("  门禁判定（--gate）")
+    print("=" * 74)
+    print("  基线条目: %d 条 / 本次命中: %d 处"
+          % (len(baseline), sum(counts.values())))
+
+    if stale:
+        print("\n  ⚠️ 基线里 %d 条已不再命中（无害，但建议从基线里删掉，免得掩盖后来的回归）：" % len(stale))
+        for where, pattern, n in stale:
+            print("      %-46s %s 基线 %d" % (where, pattern, n))
+
+    if data_containers:
+        print("\n  ✗ 数据容器文件（文件本身即泄漏，不设基线）：")
+        for f, sz in sorted(data_containers, key=lambda x: -x[1]):
+            print("      %-50s %8.1f KB" % (f, sz / 1024))
+
+    if new_hits:
+        print("\n  ✗ 新增命中 %d 条（基线之外，必须处理或写进基线并说明理由）：" % len(new_hits))
+        for where, pattern, n, allowed in new_hits:
+            print("      %-46s %-12s 本次 %d / 基线 %d" % (where, pattern, n, allowed))
+        print("\n  不合格：请修掉这些命中；确属误报时在 tools/privacy_baseline.json")
+        print("  里加一条并写清 reason（不允许只加数字不写理由）。")
+        return 1
+
+    if data_containers:
+        return 1
+
+    print("\n  ✓ 通过：没有基线之外的新增命中")
+    return 0
+
 
 
 def is_text(path):
@@ -269,6 +344,16 @@ def main():
           % (total, htotal, len(data_containers)))
     print("=" * 74)
 
+    if "--gate" in sys.argv:
+        # 历史扫描在 CI 里没有意义：checkout 是浅克隆（fetch-depth 1），
+        # 而且历史内容不随本次改动变化。门禁只看工作区这一块，
+        # 完整历史扫描仍然留在发布前手动跑。
+        if want_history:
+            print("\n  提示：--gate 建议与 --no-history 一起用（CI 是浅克隆）")
+        return run_gate(findings, data_containers)
+
+    return 0
+
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

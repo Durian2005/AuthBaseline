@@ -1,0 +1,130 @@
+# CI 门禁（P1-3）
+#
+# 为什么是这四个 job，而不是"全都跑一遍"：
+#   仓库里已有的回归套件（21 个探针）大多需要 **MongoDB + 真实后端进程 + Windows 桌面壳**，
+#   跑一次十几分钟，而且会写库。把它们搬进 CI 只会得到一条常年超时/抖动的流水线 ——
+#   红着的门禁等于没有门禁。所以这里只放**能在无状态机器上确定性复现**的四件事：
+#
+#     1. 后端编译 + 纯逻辑单测（TimeGuard / PasswordHasher / FacePose，不需要 Mongo）
+#     2. 前端 lint + 构建（npm ci 保证 lock 文件与依赖一致）
+#     3. 脱敏扫描门禁（只对**基线之外**的新增命中失败，见 tools/privacy_baseline.json）
+#     4. 发布产物布局（模型必须留在磁盘上、没被单文件打包器吞掉）
+#
+# 需要真实库/真机的那部分，仍然是发布前手动跑 `tools/` 下的探针 —— 那才是它们的家。
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# 同一分支的新推送取消上一次运行：PR 连着推两次时不必等旧的那次跑完。
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+# 最小权限：这些 job 只读代码，不发布、不写 Issue。
+permissions:
+  contents: read
+
+jobs:
+  backend:
+    name: 后端 · 编译 + 纯逻辑单测
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      # 产品目标是 net8.0；runner 自带的 SDK 版本会漂移，锁到 8.0.x 让"本地能编、CI 报错"
+      # 这类差异降到最低。
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: 还原依赖
+        run: dotnet restore AuthBaseline.sln
+
+      - name: 编译（Release）
+        # 不开 -warnaserror：现有代码里有一条来自 OpenCvSharp 自带分析器的 CS9057
+        # （它按更高版本的 Roslyn 编译，与 SDK 版本无关），那不是我们代码的问题。
+        run: dotnet build AuthBaseline.sln -c Release --no-restore
+
+      - name: 纯逻辑单测
+        # 这些测试不连库、不碰摄像头、不需要证书 —— 这是它们被单独抽出来的理由。
+        run: dotnet test AuthServer.Tests/AuthServer.Tests.csproj -c Release --no-build --logger "console;verbosity=normal"
+
+  frontend:
+    name: 前端 · lint + 构建
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: AuthClient
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: AuthClient/package-lock.json
+
+      # 用 ci 而不是 install：lock 文件与 package.json 不一致时直接失败，
+      # 而不是悄悄装一个"能跑但和本地不同"的依赖树。
+      - name: 安装依赖
+        run: npm ci
+
+      - name: ESLint（0 error / 0 warning）
+        # 基线是 0/0。--max-warnings 0 让"再多一条 warning"也算失败 ——
+        # 否则告警会逐次累积，直到没人看它。
+        run: npm run lint -- --max-warnings 0
+
+      - name: 构建（默认模式，产物落 AuthServer/wwwroot）
+        run: npm run build
+
+  privacy:
+    name: 脱敏门禁
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: 扫描（只对基线之外的新增命中失败）
+        # 不带 --gate 时脚本永远退出 0（它是给人看的报告）；--gate 才是门禁。
+        # 刻意不加历史扫描：CI 是浅克隆（fetch-depth 1），扫不到历史；
+        # 而历史内容不随本次改动变化，完整扫描留在发布前手动跑。
+        run: python tools/privacy_scan.py --no-history --gate
+
+  publish-layout:
+    name: 发布产物布局（模型不能被单文件吞掉）
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      # 与 package.json 的 publish:backend 等价（参数必须逐字一致，否则这条门禁验的不是真东西）
+      - name: dotnet publish
+        run: >
+          dotnet publish AuthServer/AuthServer.csproj -c Release -r win-x64
+          --self-contained false -p:PublishSingleFile=true
+          -p:IncludeNativeLibrariesForSelfExtract=true -p:DebugType=none
+          -o publish_ci
+
+      - name: 校验产物布局
+        # 判据：face-models 目录齐全 **且** exe 里找不到这些文件名。
+        # 单文件打包器吞掉随产物走的资源时，程序照常启动，只有已录人脸的账号全部
+        # fail closed —— 症状离原因极远，所以必须由机器来盯。
+        run: python tools/verify_publish_layout.py publish_ci

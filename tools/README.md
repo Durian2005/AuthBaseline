@@ -63,6 +63,7 @@ Debug 构建与发布链路隔着 Publish 与 NSIS 两层，行为**不保证一
 
 | 文件 | 作用 | 公共层 | 真实库 |
 |---|---|---|---|
+| `verify_publish_layout.py` | **CI 用的轻量版**布局校验：face-models 两文件在磁盘上且非空、exe 内**不含**这些文件名、`wwwroot/index.html` 与 `appsettings.json` 存在。不启动后端、不连库 —— 它守的是"构建配置被改坏"，完整验收仍走 `face_release_probe.py` | — | — |
 | `face_release_probe.py` | 装机产物校验：① 布局（face-models 5 文件 / exe **非空** / exe 内**未**内嵌 onnx）；② 真引擎（`=cv`）能从目标目录的 `face-models` 加载；③ 把 `face_second_factor_probe.py` 的全部断言打到目标 exe 上（共 **14 项 + 内嵌 93 项**） | ✓ | — |
 
 ### A3. 人脸动作挑战的帧回放（不连库、不连后端）
@@ -135,7 +136,7 @@ Debug 构建与发布链路隔着 Publish 与 NSIS 两层，行为**不保证一
 | `reinstall_desktop.py` | 卸载旧版 → 静默安装新版 → **md5 核验**产物确实被替换 |
 | `deploy_hotswap.py` | 热替换已安装的桌面端前后端，免去重新打安装包 |
 | `verify_install.py` | 安装包完整性验证（不启动界面，只查文件） |
-| `privacy_scan.py` | **入库前隐私扫描**（GitHub 发布前必跑） |
+| `privacy_scan.py` | **入库前隐私扫描**（GitHub 发布前必跑）。`--gate` 是 CI 门禁：只对 `privacy_baseline.json` 之外的新增命中失败；不加 `--gate` 时永远退出 0（它是给人看的报告） |
 
 ### G. 进程与连通性诊断
 

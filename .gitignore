@@ -2,6 +2,10 @@
 **/bin/
 **/obj/
 **/publish/
+# CI 的「发布产物布局」job 会用这个目录（本地复现时同理）。
+# 它**不叫 publish**是刻意的：不想让 CI 的临时产物和 AuthServer/publish 那个
+# "与装机版 md5 一致的正品"混在一起 —— 混了就会有人拿错的产物去 sync:sidecar。
+publish_ci/
 
 # Frontend dependencies and build output
 **/node_modules/
