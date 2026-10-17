@@ -77,3 +77,7 @@ tools/*.png
 # 没有任何入库价值，且会让 git status 一直有噪声。
 __pycache__/
 *.pyc
+
+# 人脸动作挑战的录制帧（fixture）——**里面是真人的脸**（连拍），只在本机用。
+# 回放工具见 tools/face_fixture_check.py；录制命令见 AuthServer --face-record。
+tools/fixtures/

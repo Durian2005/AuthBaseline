@@ -65,6 +65,17 @@ Debug 构建与发布链路隔着 Publish 与 NSIS 两层，行为**不保证一
 |---|---|---|---|
 | `face_release_probe.py` | 装机产物校验：① 布局（face-models 5 文件 / exe **非空** / exe 内**未**内嵌 onnx）；② 真引擎（`=cv`）能从目标目录的 `face-models` 加载；③ 把 `face_second_factor_probe.py` 的全部断言打到目标 exe 上（共 **14 项 + 内嵌 93 项**） | ✓ | — |
 
+### A3. 人脸动作挑战的帧回放（不连库、不连后端）
+
+录制命令在服务端：`authserver.exe --face-record <目录> <left|right>`（**需要摄像头**）。
+回放与对账：
+
+| 文件 | 作用 | 需要什么 |
+|---|---|---|
+| `face_fixture_check.py` | 逐个回放 `tools/fixtures/face/*`，比对 `passed` 与 `businessCode`。回放走 `CvFaceEngine.RunChallenge` 的同一段代码，只把采集源换成图片目录 | 模型文件（无需摄像头） |
+
+⚠️ `tools/fixtures/` 里是**真人的脸**，已列入 `.gitignore`，不得入库。
+
 ### B. 端到端 / 验收
 
 | 文件 | 作用 | 门禁 |
@@ -151,6 +162,7 @@ Debug 构建与发布链路隔着 Publish 与 NSIS 两层，行为**不保证一
 |---|---|---|
 | `evidence/` | 运行证据：截图、链快照、库导出 | **整个目录一律不入库**（含真实用户名与本机 UA） |
 | `backup/` | 数据库备份 | 不入库（含真实用户数据） |
+| `fixtures/` | 人脸动作挑战的录制帧 | 不入库（**真人的脸**，连拍） |
 | `buildlogs/` | 最近一次构建/探针的日志 | 不入库 |
 | `__pycache__/` | Python 字节码缓存 | 不入库 |
 
@@ -167,6 +179,8 @@ Debug 构建与发布链路隔着 Publish 与 NSIS 两层，行为**不保证一
 
 ## 待办
 
+- [x] 成功转头样本（`left-ok`，10-17 真机录制，46 帧）
+- [ ] 仍缺两份真机样本：**动作后不回正**（`FACE_NOT_RETURNED`）、**另一方向 right**（验证左右对称）
 - [ ] H 组两个脚本：补门禁或归档（需确认无引用）
 - [ ] 未走公共层的活跃脚本逐步收口：`cs_connect_check.py` / `cs_process_check.py` / `run_audit_e2e.py` / `email_e2e_test.py` / `verify_email.py`
 - [ ] 截图之外，`buildlogs/` 也应按月份清理（目前无轮转策略）

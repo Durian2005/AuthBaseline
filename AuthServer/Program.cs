@@ -1,5 +1,6 @@
 using System.Text.RegularExpressions;
 using AuthServer.Services;
+using AuthServer.Services.Face;
 
 // 本程序集只跑 Windows：它是 Tauri 壳的桌面端 sidecar，发布目标固定为 win-x64，
 // 且用到的系统能力本身就是 Windows 专有的（现在的 DPAPI，以及后续要做的证书存储）。
@@ -18,6 +19,12 @@ public class Program
         // 我们自己的开关若留到那之后再判断，会被当成"未知参数"，行为难以预料。
         if (PepperCli.IsPepperCommand(args))
             return PepperCli.Run(args);
+
+        // 人脸录制 / 回放：与 pepper 同理，必须在 CreateBuilder 之前截住。
+        // 这两条命令只跑引擎、不启 Web 主机，也不需要 pepper / 数据库 / 证书 ——
+        // 它们的存在是为了把"真实摄像头上的动作判定"变成可反复回放的回归样本。
+        if (FaceFixtureCli.IsFixtureCommand(args))
+            return FaceFixtureCli.Run(args);
 
         var builder = WebApplication.CreateBuilder(args);
 

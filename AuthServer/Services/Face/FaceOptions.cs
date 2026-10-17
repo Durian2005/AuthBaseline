@@ -60,6 +60,32 @@ public class FaceOptions
     public int CameraIndex { get; set; } = 0;
 
     /// <summary>
+    /// 【离线回放】把"读摄像头"换成"读一个目录里的图片序列"。空 = 正常用摄像头。
+    ///
+    /// 存在的理由：动作挑战的判定逻辑（基线 / 滑窗命中 / 回正 / 跳变）只有在**真实画面**上
+    /// 才有意义，而真实画面过去只能靠真机复现 —— 每次改阈值都得把人叫到摄像头前重看一遍，
+    /// 而且"当时到底发生了什么"无法回看。录一次帧、之后反复回放，才能把这段逻辑纳入回归。
+    ///
+    /// ⚠️ 只影响采集源，**不改判定逻辑**：回放走的是 RunChallenge 的同一段代码，
+    ///    所以回放通过 ≠ 只是"假引擎放行"，它是真的把 YuNet/SFace 跑了一遍。
+    /// ⚠️ 录下来的帧是**真人的脸**。fixture 目录已在 .gitignore 里（tools/fixtures/），
+    ///    绝不要把它们提交到公开仓库。
+    /// </summary>
+    public string ReplayDir { get; set; } = string.Empty;
+
+    /// <summary>
+    /// 【录制】把采集到的每一帧顺手写成 JPEG。空 = 不录。
+    /// 与 <see cref="ReplayDir"/> 对应：录一次 → 以后反复回放。
+    /// </summary>
+    public string RecordDir { get; set; } = string.Empty;
+
+    /// <summary>是否处于回放模式。</summary>
+    public bool IsReplaying => !string.IsNullOrWhiteSpace(ReplayDir);
+
+    /// <summary>是否处于录制模式。</summary>
+    public bool IsRecording => !string.IsNullOrWhiteSpace(RecordDir);
+
+    /// <summary>
     /// 采集分辨率。**必须与检测器预设尺寸一致** ——
     /// OpenCvSharp 的 FaceDetectorYN 没有暴露 setInputSize，输入尺寸与预设不符会直接抛异常。
     /// 反过来，尺寸固定也带来一个好处：录入与验证永远走同一分辨率，
@@ -111,6 +137,14 @@ public class FaceOptions
 
         var behavior = Environment.GetEnvironmentVariable("AUTHBASELINE_FACE_STUB_BEHAVIOR");
         if (!string.IsNullOrWhiteSpace(behavior)) StubBehavior = behavior.Trim();
+
+        // 录制 / 回放：同样走环境变量，理由与上面几条一致 ——
+        // 安装目录里的 appsettings.json 会被覆盖安装冲掉，而排障时改不了它。
+        var replay = Environment.GetEnvironmentVariable("AUTHBASELINE_FACE_REPLAY_DIR");
+        if (!string.IsNullOrWhiteSpace(replay)) ReplayDir = replay.Trim();
+
+        var record = Environment.GetEnvironmentVariable("AUTHBASELINE_FACE_RECORD_DIR");
+        if (!string.IsNullOrWhiteSpace(record)) RecordDir = record.Trim();
     }
 
     /// <summary>是否走假引擎。</summary>

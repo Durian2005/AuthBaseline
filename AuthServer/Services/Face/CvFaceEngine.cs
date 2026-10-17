@@ -48,6 +48,13 @@ public sealed class CvFaceEngine : IFaceEngine, IDisposable
     private Net? _recognizer;
     private VideoCapture? _camera;
     private FaceEngineStatus _status = FaceEngineStatus.Down("尚未初始化");
+
+    /// <summary>回放模式的帧清单（按文件名序）。null = 正常摄像头模式。</summary>
+    private List<string>? _replayFrames;
+    private int _replayIndex;
+
+    /// <summary>录制模式已写出的帧数。跨多次挑战累积，避免同名覆盖。</summary>
+    private int _recordIndex;
     private string _detectorPath = string.Empty;
     private string _recognizerPath = string.Empty;
 
@@ -145,6 +152,19 @@ public sealed class CvFaceEngine : IFaceEngine, IDisposable
             if (_camera is not null && _camera.IsOpened()) return null;
             if (_status.Ready == false) return _status.Message;
 
+            // 回放模式：不开摄像头，改为按文件名顺序读一个目录里的帧。
+            // 排序必须显式写死（Ordinal）：文件系统返回顺序不保证稳定，
+            // 帧序一乱，"转头 → 回正"的时序就毁了，判定自然全错。
+            // 注意这里**只换了采集源**：RunChallenge 的判定、预处理、特征提取全都照旧跑。
+            if (_opt.IsReplaying)
+            {
+                _replayFrames = LoadReplayFrames(_opt.ReplayDir);
+                _replayIndex = 0;
+                return _replayFrames.Count > 0
+                    ? null
+                    : $"回放目录里没有可用的帧：{_opt.ReplayDir}";
+            }
+
             try
             {
                 _camera?.Dispose();
@@ -173,6 +193,43 @@ public sealed class CvFaceEngine : IFaceEngine, IDisposable
             _camera?.Release();
             _camera?.Dispose();
             _camera = null;
+
+            // 回放状态一并归零：每次挑战都从第一帧重看，
+            // 否则第二次挑战会从"上次看到哪儿"接着放，结论随调用次数变化。
+            _replayFrames = null;
+            _replayIndex = 0;
+        }
+    }
+
+    /// <summary>回放目录里的帧，按文件名序排。只认图片扩展名，manifest 之类不会被当帧读。</summary>
+    private static List<string> LoadReplayFrames(string dir)
+    {
+        if (!Directory.Exists(dir)) return new List<string>();
+        var exts = new[] { ".jpg", ".jpeg", ".png", ".bmp" };
+        return Directory.GetFiles(dir)
+            .Where(p => exts.Contains(Path.GetExtension(p).ToLowerInvariant()))
+            .OrderBy(p => p, StringComparer.Ordinal)
+            .ToList();
+    }
+
+    /// <summary>
+    /// 录制：把判定用的这一帧落盘。
+    ///
+    /// 写失败只告警不中断 —— 录制是旁路，不该把一次真实登录搞砸。
+    /// 文件名用 4 位序号（frame_0000.jpg）：回放靠文件名排序还原时序，
+    /// 用时间戳会在同一毫秒内撞名，用 GUID 则排序全乱。
+    /// </summary>
+    private void SaveRecordedFrame(Mat frame)
+    {
+        try
+        {
+            Directory.CreateDirectory(_opt.RecordDir);
+            var path = Path.Combine(_opt.RecordDir, $"frame_{_recordIndex++:D4}.jpg");
+            Cv2.ImWrite(path, frame);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[Face] 录制写帧失败：{ex.Message}");
         }
     }
 
@@ -180,6 +237,38 @@ public sealed class CvFaceEngine : IFaceEngine, IDisposable
     {
         lock (_cameraLock)
         {
+            if (_replayFrames is not null)
+            {
+                // 帧放完之后**保持最后一帧**，而不是返回 null。
+                //
+                // 这不是偷懒，是为了让回放的结论与真实摄像头一致：真实摄像头不会"没有下一帧"，
+                // 它只会一直送同一幅画面（人不动了 / 拿着一张照片）。
+                // 若在这里返回 null，上层会走"读不到帧"那条分支 —— 计数十次 miss 后
+                // 报 FACE_NO_FACE，而真实情形该报的是 FACE_LIVENESS_FAILED（未观察到动作）。
+                // 两者的区别正是"照片能不能过活体"这个结论本身，不能混。
+                //
+                // 代价：**失败类** fixture 会一直放到 MaxChallengeSeconds（默认 8 秒）才结束，
+                // 与真人操作失败时一样慢。这符合预期 —— 回归要测的是产品行为，不是跑得快。
+                if (_replayIndex >= _replayFrames.Count)
+                {
+                    var last = Cv2.ImRead(_replayFrames[^1], ImreadModes.Color);
+                    if (last.Empty())
+                    {
+                        last.Dispose();
+                        return null;
+                    }
+                    return last;
+                }
+
+                var replay = Cv2.ImRead(_replayFrames[_replayIndex++], ImreadModes.Color);
+                if (replay.Empty())
+                {
+                    replay.Dispose();
+                    return null;
+                }
+                return replay;
+            }
+
             if (_camera is null || !_camera.IsOpened()) return null;
             var frame = new Mat();
             if (!_camera.Read(frame) || frame.Empty())
@@ -187,6 +276,7 @@ public sealed class CvFaceEngine : IFaceEngine, IDisposable
                 frame.Dispose();
                 return null;
             }
+            if (_opt.IsRecording) SaveRecordedFrame(frame);
             return frame;
         }
     }
