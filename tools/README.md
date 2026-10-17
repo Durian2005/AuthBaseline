@@ -36,6 +36,7 @@
 | 文件 | 作用 | 公共层 | 真实库 |
 |---|---|---|---|
 | `role_separation_test.py` | 角色分离：管账号的看不到日志、看日志的管不了账号；Admin 可建普通用户/用户管理员/审计管理员（**不可建 Admin**）且邮箱可选（**92 项**） | ✓ | — |
+| `sod_detect_probe.py` | 职责分离**绕过检测层**：admin 造审计管理员 → 借它读审计必须报 `ATTRIBUTED`；造号不用 → `DORMANT`；自助改密 → `SEALED`；admin 打同接口 403 且留痕；接口结论与 `sod_trace.py` 独立复算**逐链对账**（**50 项**） | ✓ | — |
 | `lockout_clock_probe.py` | 锁定能否靠拨钟解开、失败计数窗口（3 分钟内 3 次）、未锁定阶段拨钟的留痕与加固后还剩哪些边界（**40 项**） | ✓ | — |
 | `ticket_hash_probe.py` | 会话票据哈希化（存储安全 S1）（**27 项**） | ✓ | — |
 | `pepper_probe.py` | 口令 pepper + 渐进迁移（存储安全 S2）（**45 项**，最完整的一份） | ✓ | — |
@@ -113,6 +114,7 @@ Debug 构建与发布链路隔着 Publish 与 NSIS 两层，行为**不保证一
 | `db_survey.py` | 列出真实库全部集合、文档数、用户与链头等关键内容 |
 | `query_tamper_trace.py` | 查询篡改告警痕迹（字段是 camelCase） |
 | `git_health_check.py` | Git 仓库体检，**不执行任何写操作** |
+| `sod_trace.py` | 职责分离绕过线索的**独立复算**：直连 Mongo 用另一份实现重算归因链（只读，故不加门禁）。`--json` 字段名与 `/api/audit/sod` 一致，`--strict` 有 ATTRIBUTED 时退出码 1 |
 
 ### F. 构建 / 打包 / 部署
 

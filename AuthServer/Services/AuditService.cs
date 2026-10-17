@@ -569,6 +569,32 @@ public sealed class AuditService
         return (items, total);
     }
 
+    /// <summary>
+    /// 职责分离检测用的全量加载：把所有分片的审计事件按 <c>seq</c> 升序取出。
+    ///
+    /// 为什么不复用 <see cref="QueryAsync"/>：那个接口是给界面翻页用的 ——
+    /// 倒序、分页、可被筛选条件削掉一半。而检测层需要的是**完整时间线**：
+    /// 少一条"最早的那次造号"，整条归因链就不成立了。用分页接口做检测，
+    /// 结论会随"用户当时点的是第几页"而变化，那是不可接受的。
+    ///
+    /// 代价是内存与 IO 都是全量（当前规模约两千余条，可接受）。
+    /// 若日后数据量上一个量级，应改成按 action 过滤的批量拉取，
+    /// 而不是给这里加个"只取最近 N 条"的截断 —— 截断会让检测静默失准。
+    /// </summary>
+    public async Task<List<AuditLog>> LoadAllAsync()
+    {
+        var all = new List<AuditLog>();
+        foreach (var s in await ListShardsAsync())
+        {
+            all.AddRange(await ShardCollection(s.Shard)
+                .Find(FilterDefinition<AuditLog>.Empty)
+                .ToListAsync());
+        }
+        // seq 是唯一且严格递增的；时间戳可能同毫秒重复，不能单独作序。
+        all.Sort((a, b) => a.Seq.CompareTo(b.Seq));
+        return all;
+    }
+
     private static bool Contains(string? hay, string needle) =>
         !string.IsNullOrEmpty(hay) && hay.Contains(needle, StringComparison.OrdinalIgnoreCase);
 

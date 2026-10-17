@@ -223,6 +223,76 @@ public class AuditController : ControllerBase
     }
 
     /**
+     * 职责分离（SoD）绕过的检测层：把"管理员造出审计管理员再借它读日志"
+     * 从原始事件还原成一条条可枚举的归因链。
+     *
+     * 为什么这条线索必须由系统自己算出来
+     * ----------------------------------
+     * 本系统的规则允许管理员创建审计管理员 —— 这是分工需要，不是漏洞；
+     * 但同一个规则也允许管理员"自设口令造号 → 以它的身份登录读审计"。
+     * 这条路径在接口层**无法阻止**（阻止它就等于禁止管理员建审计账号），
+     * 只能做到事后可追溯。
+     *
+     * 而"可追溯"若只停留在库里有几条原始记录，就只是一句口号：
+     * CREATE_ACCOUNT、LOGIN_SUCCESS、AUDIT_QUERY 分属三条记录，
+     * 没有任何人会天天手工把它们串起来看。这里把它固化成判定规则，
+     * 让"谁造就了谁、谁用谁读了几次、什么时候封的口"成为一次调用就能拿到的东西。
+     *
+     * 权限沿用 AccessLevel.AuditRead（仅审计管理员）
+     * --------------------------------------------
+     * 理由与其它审计接口一致：这是从审计数据里推导出的结论，泄漏它的风险
+     * 与泄漏日志本身同级。管理员被结构性排除 —— 包括那个自己造号的人。
+     *
+     * ⚠️ 已知的局限（不宣称已解决）
+     *   1. 被检测对象正是"有权限看这份报告的人" —— 他可以不看。
+     *      因此本接口的价值在**事后取证**与**第三方复核**，
+     *      不能当成实时拦截；配套的 tools/sod_trace.py 允许直接查库独立复算，
+     *      不依赖本服务是否被人打开过。
+     *   2. 只能证明"口令由谁设定、读取发生在封口之前"，
+     *      不能证明"当时敲键盘的是谁"。
+     *
+     * 检测动作本身也留痕（SOD_SCAN）：谁在什么时候查过"有没有人绕过了职责分离"，
+     * 与"谁查过日志"同等重要 —— 否则"查过但没说"这件事无法证明。
+     */
+    [HttpGet("sod")]
+    public async Task<IActionResult> Sod()
+    {
+        var (auditor, deny) = await RequireAuditAsync(AuditAction.AuditAccessDenied, "audit/sod");
+        if (deny != null) return deny;
+
+        var logs = await _audit.LoadAllAsync();
+        var result = SodAnalyzer.Analyze(logs);
+
+        await _auditWriter.WriteAsync(new AuditEntry
+        {
+            OperatorId = auditor!.Id,
+            OperatorName = auditor.Username,
+            Action = AuditAction.SodScan,
+            StatusBefore = "N/A",
+            Request = new { },
+            Response = new
+            {
+                result.Scanned,
+                result.Attributed,
+                result.Sealed,
+                result.Dormant,
+                Chains = result.Chains.Count,
+                result.BatchGranters
+            },
+            StatusAfter = result.Attributed > 0 ? "ATTRIBUTED" : "CLEAN",
+            Target = "audit/sod",
+            Result = AuditResult.Success
+        });
+
+        return Ok(new ApiResponse<SodScanResult>
+        {
+            Success = true,
+            Code = BusinessCode.Ok,
+            Data = result
+        });
+    }
+
+    /**
      * 审计日志查询（兼容旧路径 api/auth/logs）。
      *
      * 旧版是 Limit(200) 硬编码 —— 写多少都只看得到最近 200 条，"撑得住"无从谈起。

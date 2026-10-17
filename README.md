@@ -384,7 +384,7 @@ npm run build     # 只出浏览器产物 → ../AuthServer/wwwroot
 
 ## 九、接口清单
 
-> 下表为后端当前实际暴露的全部接口（共 **27** 个）。
+> 下表为后端当前实际暴露的全部接口（共 **28** 个）。
 > 鉴权自「角色分离」改造起改为**服务端签发的 Bearer 票据**（`Authorization: Bearer <ticket>`），
 > 不再使用早期的 `?adminUsername=xxx` 由客户端自证身份的方式。
 > 鉴权失败会写入一条 `AUDIT_ACCESS_DENIED` 事件，使越权尝试可追溯。
@@ -448,8 +448,9 @@ npm run build     # 只出浏览器产物 → ../AuthServer/wwwroot
 | GET | `/api/audit/verify` | 审计读 | 哈希链完整性校验，返回断点序号与所在分片 |
 | GET | `/api/audit/shards` | 审计读 | 分片清单与各片规模 |
 | GET | `/api/audit/stats` | 审计读 | 概览统计：总数、失败数、篡改告警数 |
+| GET | `/api/audit/sod` | 审计读 | 职责分离绕过线索：把「管理员造出审计管理员再借它读日志」还原成可枚举的归因链（见 [角色分离设计](docs/design/ROLE-SEPARATION-DESIGN.md) §4.6） |
 
-> ⚠️ **审计域没有任何写接口**。控制器只暴露上述 5 个 GET，后端不存在删除或修改审计
+> ⚠️ **审计域没有任何写接口**。控制器只暴露上述 6 个 GET（其中 `sod` 是只读推导，不写库），后端不存在删除或修改审计
 > 日志的路径；界面上的「重置筛选」只是清空查询条件，与日志本体无关。
 
 ### 6. 角色与权限模型

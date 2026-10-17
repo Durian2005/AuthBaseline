@@ -163,6 +163,8 @@ public static class AuditAction
     public const string AuditVerify = "AUDIT_VERIFY";      // 执行完整性校验
     public const string AuditAccessDenied = "AUDIT_ACCESS_DENIED"; // 无权限访问审计数据
     public const string AuditTampered = "AUDIT_TAMPERED";  // 校验发现链断裂
+    /// <summary>职责分离绕过线索扫描：检测动作本身也要留痕。</summary>
+    public const string SodScan = "SOD_SCAN";              // 职责分离绕过（检测层自身留痕）
 
     /// <summary>
     /// 检测到系统时钟被拨动（墙钟与本机运行时长两条时间线背离）。
