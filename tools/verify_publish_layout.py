@@ -25,6 +25,19 @@ wwwroot 里、exe 没把不该吞的吞掉」？**
 import os
 import sys
 
+# 输出里有中文和 ✓/✗，而 Windows 上的 Python 默认按**系统代码页**编码 stdout。
+# GitHub 的 Windows runner 是英文 locale（cp1252），第一次跑 CI 就在这里炸：
+#   UnicodeEncodeError: 'charmap' codec can't encode characters in position 0-4
+# 退出码是 1，于是门禁红了 —— 但红的原因跟它要守的东西毫无关系，
+# 只因为一个打印语句。这类失败最耗人：看日志第一眼只会以为"构建坏了"。
+# 所以这里钉死 UTF-8；errors="replace" 是兜底：宁可个别字符变成 ?，
+# 也不要让一个字符毁掉整条门禁。
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
 # 必须是"随产物一起走、不允许被塞进单文件 exe"的资源。
 # 加新条目时请同时想清楚：它被吞掉的症状是什么？离原因有多远？
 MUST_BE_ON_DISK = [

@@ -28,6 +28,17 @@ concurrency:
 permissions:
   contents: read
 
+# Python 一律走 UTF-8。
+#
+# 这不是洁癖：`publish-layout` 跑在 windows-latest 上，而那个 runner 是**英文 locale**，
+# Python 的 stdout 默认按系统代码页（cp1252）编码。tools/ 下的脚本输出里全是中文和
+# ✓/✗，于是在 `print()` 第一步就抛 UnicodeEncodeError，退出码 1，门禁红了 ——
+# 而红的原因跟它要守的「模型有没有被单文件打包器吞掉」毫无关系。
+# 第一次跑 CI 就是这么挂的，所以在这里统一钉死，别让每个脚本各自去想办法。
+env:
+  PYTHONUTF8: '1'
+  PYTHONIOENCODING: utf-8
+
 jobs:
   backend:
     name: 后端 · 编译 + 纯逻辑单测
