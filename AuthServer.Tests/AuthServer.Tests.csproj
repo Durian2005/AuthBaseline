@@ -1,0 +1,35 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- 纯逻辑单测项目（P1-4）。
+       边界刻意划在这里：**只测不碰 IO 的东西** —— TimeGuard / PasswordHasher / FacePose。
+       凡是需要"起后端 + 打 HTTP + 直连 Mongo"才能验证的（锁定链路、审计哈希链、人脸端到端），
+       继续由 tools/ 下的探针负责，不搬进来。
+       理由：单测要能在任意机器（包括没有 Mongo、没有摄像头、没有模型文件的 CI runner）上跑；
+       一旦掺进 IO，`dotnet test` 就会变成"起服务"的隐式前置，那是探针的职责。 -->
+  <PropertyGroup>
+    <!-- 必须是 -windows 而不是 net8.0：AuthServer 在 Program.cs 顶部整体声明了
+         [assembly: SupportedOSPlatform("windows")]（DPAPI / OpenCvSharp 都是 Windows 专属）。
+         引用它的项目若写纯 net8.0，编译器会对**每一个**类型引用喷 CA1416（实测 20+ 条）；
+         而"NoWarn 掉"会把真正的跨平台误用一起遮住。声明平台才是诚实的做法 ——
+         这个产品本来就只发 win-x64，测试也不该假装能跑在 Linux 上。 -->
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <IsPackable>false</IsPackable>
+    <!-- 不生成 XML 文档，也不参与打包；这是测试夹具，不是产品的一部分。 -->
+    <IsTestProject>true</IsTestProject>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.11.1" />
+    <PackageReference Include="xunit" Version="2.9.2" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="2.8.2" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- 引用产品项目而不是"复制一份逻辑"：单测必须打在**将要发布的那份代码**上，
+         否则测的是一份副本，改产品代码时测试不会拦。 -->
+    <ProjectReference Include="..\AuthServer\AuthServer.csproj" />
+  </ItemGroup>
+
+</Project>

@@ -5,6 +5,8 @@ VisualStudioVersion = 17.0.31903.59
 MinimumVisualStudioVersion = 10.0.40219.1
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "AuthServer", "AuthServer\AuthServer.csproj", "{3D437763-8B8B-492C-9C6A-C0331DA2FB8E}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "AuthServer.Tests", "AuthServer.Tests\AuthServer.Tests.csproj", "{FDFEB130-BEFA-4700-9A6E-F887E3A2F702}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -18,5 +20,9 @@ Global
 		{3D437763-8B8B-492C-9C6A-C0331DA2FB8E}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{3D437763-8B8B-492C-9C6A-C0331DA2FB8E}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{3D437763-8B8B-492C-9C6A-C0331DA2FB8E}.Release|Any CPU.Build.0 = Release|Any CPU
+		{FDFEB130-BEFA-4700-9A6E-F887E3A2F702}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{FDFEB130-BEFA-4700-9A6E-F887E3A2F702}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{FDFEB130-BEFA-4700-9A6E-F887E3A2F702}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{FDFEB130-BEFA-4700-9A6E-F887E3A2F702}.Release|Any CPU.Build.0 = Release|Any CPU
 	EndGlobalSection
 EndGlobal
