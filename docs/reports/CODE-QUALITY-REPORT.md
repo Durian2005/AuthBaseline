@@ -284,3 +284,152 @@ store 只初始化一次、没有组件实例，`onUnmounted` 永不触发 —�
 ⚠️ **桌面安装版的前端产物已落后于源码**：批次 0 改了 `App.vue` / `PasswordField.vue`
 并重新构建（两套产物已同步），但安装目录里的 `wwwroot` 仍是上一版。
 行为上无差异（动的都是死代码），要让安装版一致需重跑 `reinstall_desktop.py`。
+
+---
+
+## 五、P1 · 测试与 CI（2026-10-17）
+
+P0 的两项（pepper 导入演练、SoD 绕过检测层）落地后，P1 剩下的三件事都是**质量与回归**。
+它们的共同点是：**不改产品行为**，只在"改动会不会悄悄弄坏别的东西"这一层加护栏。
+
+| 编号 | 内容 | 状态 |
+|---|---|---|
+| P1-4 | 后端纯逻辑单测（TimeGuard / PasswordHasher / FacePose） | ✅ **81 项**，1 秒跑完 |
+| P1-3 | GitHub Actions 门禁（编译 / 单测 / lint / 脱敏 / 产物布局） | ✅ 4 个 job |
+| P1-5 | 人脸动作挑战的帧录制与离线回放 | ✅ 通道打通 + **真实转头样本已录**（3/3 对账一致） |
+
+### P1-4 · 纯逻辑单测（杠杆最高的一件）
+
+**核心逻辑过去只能靠"起后端打 HTTP"来验**：`TimeGuard` 的 40 项断言、`PasswordHasher`
+的 45 项、`FacePose` 的阈值行为，全挂在 `tools/` 的探针里。探针证明的是"整条链路在真实
+后端上确实这样表现"，但它慢、要 Mongo、要 Windows，而且**造不出某些输入** ——
+比如"墙钟恰好比单调线快 2 秒"这种精确落在容差边界上的场景，真实拨钟永远拨不出来。
+
+新增 `AuthServer.Tests`（xUnit，**81 项**）把判定语义固化成单测：
+
+| 文件 | 覆盖 | 关键断言 |
+|---|---|---|
+| `TimeGuardTests.cs`（25） | 锁定到期、失败计数窗口、窗口背离取证 | 前拨 600 秒仍锁定且剩余按单调线算；回拨不把锁定拖长；容差 2 秒的**确定性**边界；重启后锚点失效这条边界**也写成断言**（不靠注释承诺） |
+| `PasswordHasherTests.cs`（26） | `v2$` 写入/验证、旧格式兼容、脏数据容错 | ★ `v2$` 且缺 pepper ⇒ 一律不通过（绝不回退旧格式）；★ 超过 72 字节仍能区分口令（HMAC 预处理的意义）；坏哈希返回 false 而不是 500 |
+| `FacePoseTests.cs`（30） | 阈值边界、动作池、指标归一化、常量不变量 | ★ 动作池恰好 left/right（pitch 动作已下线的取舍记录在测试里）；★ 未知动作即便偏移巨大也判不满足；★ 画面放大 2 倍 yaw/pitch 不变；`HitNeeded ≤ HitWindow` 等常量不变量 |
+
+**三个刻意的决定**：
+
+1. **测试项目用 `net8.0-windows`，不用 `NoWarn` 压警告。**
+   `AuthServer` 在 `Program.cs` 顶部整体声明了 `[assembly: SupportedOSPlatform("windows")]`
+   （DPAPI / OpenCvSharp 都是 Windows 专属）。引用它的项目若写纯 `net8.0`，编译器会对每个
+   类型引用喷 CA1416（实测 20+ 条）；`NoWarn` 掉会把真正的跨平台误用一起遮住。
+   产品本来就只发 win-x64，测试也不该假装能跑在 Linux 上。
+2. **只测不碰 IO 的东西。** 单测不连库、不碰摄像头、不需要证书。需要 IO 的那些
+   （锁定链路、审计哈希链、人脸端到端）继续由 `tools/` 的探针负责 ——
+   一旦掺进来，`dotnet test` 就会变成"起服务"的隐式前置。
+3. **引用产品项目，不复制逻辑。** 测的必须是"将要发布的那份代码"，否则改产品时测试不会拦。
+
+### P1-3 · CI 门禁
+
+新增 `.github/workflows/ci.yml`，四个 job：
+
+| job | 跑什么 | 为什么是它 |
+|---|---|---|
+| `backend` | `dotnet build AuthBaseline.sln -c Release` + `dotnet test` | 编译与单测是所有其它检查的前置 |
+| `frontend` | `npm ci` + `eslint --max-warnings 0` + `vite build` | 用 `ci` 而不是 `install`：lock 与 package.json 不一致时直接失败 |
+| `privacy` | `privacy_scan.py --no-history --gate` | 防"以后误提交本机路径/凭据" |
+| `publish-layout` | `dotnet publish` + `verify_publish_layout.py` | 防"单文件打包器把 face-models 吞掉" |
+
+**为什么不全搬进去**：仓库里 21 个探针大多需要 **MongoDB + 真实后端 + Windows 桌面壳**，
+跑一次十几分钟且会写库。搬进 CI 只会得到一条常年超时抖动的流水线 ——
+**红着的门禁等于没有门禁**，所有人都会学会忽略它。需要真库/真机的那部分，仍然是发布前手动跑。
+
+**为了让它能当门禁，改了两处工具**：
+
+- `privacy_scan.py` 原来**永远退出 0**（它是给人看的报告）。新增 `--gate`：只对
+  `tools/privacy_baseline.json` 之外的新增命中失败。基线里 11 条都是逐条核实过的
+  （上游协议署名邮箱、图标名被邮箱正则误判、Cargo.lock 的 checksum 里 11 位数字等），
+  每条都写了 `reason`；**数字变大同样算新增**；条目不再命中只告警（stale）。
+  要求"零命中"的话门禁会永久红着 —— 那是假装严格，实际是关掉门禁。
+- 新增 `tools/verify_publish_layout.py`：CI 版的产物布局校验。
+  判据是"face-models 目录齐全且非空 **且** exe 里找不到这些文件名"。
+  这条守的是构建配置回归 —— 它坏掉时程序照常启动，只有已录人脸的账号全部 fail closed，
+  症状离原因极远。完整的 14 项 + 内嵌 93 项仍由 `face_release_probe.py` 在发布前跑。
+
+**刻意不做的一件事**：CI 里不扫 git 历史。CI 是浅克隆（`fetch-depth: 1`）扫不到；
+而且历史内容不随本次 PR 变化，完整历史扫描留在发布前手动跑（它本身要几分钟）。
+
+### P1-5 · 人脸动作挑战的帧回放
+
+这是三件里唯一"过去完全做不到"的：动作挑战的判定（求基线 → 等转头 → 等回正 → 从回正帧提特征）
+只有在真实画面上才有意义，于是**每次动阈值都要把人叫到摄像头前重看一遍**，
+而且当时发生了什么只能靠一句 `Diagnostic` 字符串猜。
+
+补了一条离线通道（**不增加任何对外路由**，接口仍是 28 条）：
+
+| 入口 | 作用 |
+|---|---|
+| `authserver.exe --face-record <目录> <left\|right>` | 录一次：每帧写 JPEG + `manifest.json`（含期望结论） |
+| `authserver.exe --face-replay <目录>` | 离线重放，输出 `FACE_REPLAY_RESULT={...}` |
+| `python tools/face_fixture_check.py <exe>` | 批量回放并与期望值对账 |
+
+**为什么回放可信**：它**只换采集源**（`ReadRaw` 里从摄像头换成图片目录），不换判定 ——
+`RunChallenge` 的同一段代码照跑，YuNet 检测、SFace 特征、采样节奏、跳变与回正判定全都在。
+两个实现细节各对应一个坑：
+
+- **帧序按文件名 Ordinal 排序**：文件系统返回顺序不保证稳定，帧序一乱时序就毁了。
+- **帧放完保持最后一帧**，而不是返回 null。真实摄像头不会"没有下一帧"，它只会一直送同一幅画面。
+  若返回 null，上层会走"读不到帧"→10 次 miss→`FACE_NO_FACE`；而真实情形该报
+  `FACE_LIVENESS_FAILED`。**这两者的区别正是"照片能不能过活体"这个结论本身**。
+
+已跑通的样例（本地，fixture 不入库）：
+
+| fixture | 输入 | 录制时结论 | 回放复现 |
+|---|---|---|---|
+| `_smoke` | 8 张界面截图（画面里没有人脸） | `FACE_NO_FACE`，samples 0 | ✓ 一致 |
+| `_static` | 同一张人脸照片重复 12 帧（"拿照片对着摄像头"） | `FACE_LIVENESS_FAILED`，动作始终未成立 | ✓ 一致 |
+| `left-ok` | **真人向左转头再回正**，46 帧（10-17 录制） | `passed=true`，yaw −0.06…+4.58、actionSeen | ✓ 一致（yaw −0.06…+4.70） |
+
+`_static` 是可复现的**防照片重放**证据：不必每次拿张照片对着摄像头试。
+`left-ok` 是**正向黄金样本**：真实动作必须过，而且回放要在同一份判定代码上复现同一个结论。
+
+**顺带做的一次反向验证**（不改代码、只改要求的方向）：把 `left-ok` 的 46 帧原样喂给
+`--face-replay`，但把 manifest 的 `action` 改成 `right` —— 结果 `FACE_LIVENESS_FAILED`、
+`actionSeen False`，而 yaw 范围依旧是 −0.06…+4.70。
+
+这条比"成功样本复现了成功"更有力：它说明判定看的是**方向**，不是"画面里有没有发生过位移"。
+否则一个"动一下就放行"的判定也会让 `left-ok` 通过，那样这个 fixture 就什么都证明不了。
+
+`left-ok` 那一次的真实数据也说明了阈值余量：`YawTurn=0.13` 是"明显转头"的门槛，
+而这次实测 yaw 摆到 **+4.58**（基线 −0.01）—— 量级上差三十多倍，不是压在阈值边缘过的。
+反过来说，如果哪次"人几乎没动"也判过，那就该回头查阈值了（本次没有出现）。
+
+**口径**：它证明"同一段画面 → 同一结论"，不证明"当时坐在这儿的是本人"；
+也不覆盖跨设备/跨光照的稳定性。
+
+### 本次验证记录
+
+| 检查项 | 结果 |
+|---|---|
+| `dotnet build AuthBaseline.sln -c Release` | 0 错误（仅 1 条 OpenCvSharp 自带分析器的 CS9057，与本仓库代码无关） |
+| `dotnet test`（Release，CI 同参数） | **81 / 81**，1 秒 |
+| `npm run lint` | 0 error / 0 warning |
+| `privacy_scan.py --no-history --gate` | 通过（11 条基线命中，0 条新增）；另用一条假手机号验证过**会红** |
+| `verify_publish_layout.py`（对现有 `AuthServer/publish`） | 7 / 7 通过 |
+| `dotnet publish` + 布局校验（模拟 CI） | 7 / 7 通过 |
+| `face_fixture_check.py` | 2 / 2 fixture 结论一致 |
+| `face_second_factor_probe.py`（回归，stub 引擎） | **93 / 93**，无副作用（测试库已清理） |
+
+### 本次新增/改动文件
+
+| 文件 | 性质 |
+|---|---|
+| `AuthServer.Tests/`（csproj + 3 个测试文件） | 新增（81 项单测） |
+| `.github/workflows/ci.yml` | 新增（4 个 job） |
+| `tools/privacy_baseline.json` | 新增（11 条已核实的命中，逐条带 reason） |
+| `tools/verify_publish_layout.py` | 新增（CI 版产物布局校验） |
+| `tools/face_fixture_check.py` | 新增（帧回放对账） |
+| `AuthServer/Services/Face/FaceFixtureCli.cs` | 新增（`--face-record` / `--face-replay`） |
+| `AuthServer/Services/Face/FaceOptions.cs` | 加 `ReplayDir` / `RecordDir`（含环境变量覆盖） |
+| `AuthServer/Services/Face/CvFaceEngine.cs` | 只改采集入口：回放读目录、录制落盘；**判定逻辑一行未动** |
+| `AuthServer/Program.cs` | 子命令分支（早于 `CreateBuilder`，与 pepper 同位置） |
+| `tools/privacy_scan.py` | 加 `--gate` 与基线机制；`main()` 改为返回退出码 |
+| `.gitignore` | 加 `publish_ci/`、`tools/fixtures/` |
+| `AuthBaseline.sln` | 加入测试项目 |
+| `README.md`、`docs/design/FACE-AUTH-DESIGN.md`、`tools/README.md` | 文档同步 |

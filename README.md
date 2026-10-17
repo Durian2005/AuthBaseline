@@ -314,6 +314,33 @@ npm run build     # 只出浏览器产物 → ../AuthServer/wwwroot
 
 > 以下用例均已在开发机上实测验证，全部符合预期（实测记录见第十一章第 6 节）。
 
+### 自动化校验（不必手动点）
+
+上面这些用例是给人看的；下面这些是给机器跑的，**改动后先跑它们**：
+
+| 命令 | 覆盖 | 说明 |
+|---|---|---|
+| `dotnet test AuthServer.Tests/AuthServer.Tests.csproj` | **81 项** | `TimeGuard`（锁定/窗口/拨钟边界）、`PasswordHasher`（`v2$` 红线、升级标记、脏数据）、`FacePose`（阈值边界与常量不变量）。不连库、不碰摄像头 |
+| `cd AuthClient && npm run lint` | 0 error / 0 warning | 只开"真 bug 类"规则 |
+| `python tools/privacy_scan.py --no-history --gate` | 新增命中 0 | 只对 `tools/privacy_baseline.json` 之外的新增命中失败 |
+| `python tools/face_fixture_check.py AuthServer/bin/Debug/net8.0/AuthServer.exe` | 每个 fixture 一条 | 重放录制画面，比对 `passed` / `businessCode`（需先录，见下） |
+
+四类都在 GitHub Actions 里跑（`.github/workflows/ci.yml`）：后端编译+单测 / 前端 lint+构建 /
+脱敏门禁 / 发布产物布局（模型不能被单文件打包器吞掉）。
+需要真实库与真机的探针**不**进 CI —— 它们跑一次十几分钟且会写库，红着的门禁等于没有门禁。
+
+**人脸动作挑战的回归**（需要摄像头，录一次即可反复用）：
+
+```bash
+# 录：坐在摄像头前，按提示把头转向一侧再转回正对镜头
+AuthServer/bin/Debug/net8.0/AuthServer.exe --face-record tools/fixtures/face/left-ok left
+# 回放：不需要摄像头，输出 FACE_REPLAY_RESULT={...}
+python tools/face_fixture_check.py AuthServer/bin/Debug/net8.0/AuthServer.exe
+```
+
+⚠️ `tools/fixtures/` 里是真人的脸，已在 `.gitignore` 中，不要提交。
+
+
 ### 正常测试
 
 | 步骤 | 操作 | 预期结果 |
