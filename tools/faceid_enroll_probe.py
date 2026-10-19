@@ -6,7 +6,7 @@
 质量闸门（多脸 / 太小 / 侧脸 / 糊）、引擎降级、口令二次确认的计次、
 模板密文落库、上限淘汰、模型作废、注销连带清理。
 
-验证八组：
+验证十组：
   A. 状态    —— 未录入的账号：enrolled=false、引擎就绪、上限 3；无票据被拒
   B. 口令闸门—— 空口令 / 错口令（A 组计次 + 审计码）/ 口令对 ⇒ 录入成功
   C. 质量闸门—— no_face / multi_face / blurry / turned / engine_down 逐条都必须被拒，
@@ -18,6 +18,11 @@
                  再录一次 ⇒ 旧模板被清掉（purgedForeign=1）
   G. 删除    —— 空口令 / 错口令（计次）/ 口令对 ⇒ 模板真删
   H. 注销    —— 管理员注销账号 ⇒ FaceIdTemplates 里该用户的数据被清理
+  I. 活体闸门—— 活体显式打开：spoof ⇒ 400 且计次；模型不可用 ⇒ 503（fail closed）；
+                 同样的输入关掉活体会成功（证明拒绝确实来自 PAD）
+  J. 人脸登录—— 成功签票且票据可用、审计标 SecondFactor=FACEID；
+                 未录入 ⇒ 401 NOT_ENROLLED 且**不计次**；判错 ⇒ 401 MISMATCH 且**计次**；
+                 不存在的账号与「不匹配」同码
 
 用法：
   python tools/faceid_enroll_probe.py <exe路径> <端口> [--db NAME]
@@ -49,6 +54,8 @@ USER = "faceidprobe"
 USER_PW = "Faceidprobe123"
 DROP_USER = "faceiddrop"
 DROP_PW = "Faceiddrop123"
+PAD_USER = "faceidpad"
+PAD_PW = "Faceidpad123"
 
 probe_db = ProbeDb(DB_NAME)
 results = []
@@ -420,6 +427,120 @@ def main():
         check("管理员注销账号", st == 200 and r.get("code") == "OK", "%s %s" % (st, r.get("code")))
         check("★ 注销后 FaceIdTemplates 无残留（不留孤儿生物特征）",
               len(templates(DROP_USER)) == 0, "n=%d" % len(templates(DROP_USER)))
+
+    # =====================================================================
+    # I：活体判定（P1b）—— 照片被拒 + 计次；模型缺失 fail closed；关掉对照放行
+    # =====================================================================
+    print("\n[I] 活体判定：spoof 被拒且计次 / 模型缺失 fail closed / 关掉后放行")
+    # ⚠️ PAD 默认是关的（验收要手举照片），所以这一组必须**显式打开**，
+    #    否则测到的是"没开活体自然放行"，不构成任何证据。
+    with backend("spoof", "i_spoof", {"AUTHBASELINE_FACEID_PAD_ENABLED": "true"}):
+        st, r = login("admin", ADMIN_PW)
+        admin_ticket = (r.get("data") or {}).get("ticket", "")
+        st, r = call("POST", "/api/auth/create-account", {
+            "username": PAD_USER, "password": PAD_PW, "role": "User",
+            "email": "", "operatorPassword": ADMIN_PW}, admin_ticket)
+        check("建活体测试账号", st == 200 and r.get("code") == "OK", "%s %s" % (st, r.get("code")))
+
+        st, r = login(PAD_USER, PAD_PW)
+        pad_ticket = (r.get("data") or {}).get("ticket", "")
+
+        st, r = enroll(pad_ticket, PAD_PW)
+        check("★ spoof（举照片）⇒ 400 FACEID_LIVENESS_FAILED",
+              st == 400 and r.get("code") == "FACEID_LIVENESS_FAILED",
+              "%s %s" % (st, r.get("code")))
+        check("spoof：模板没有写入", len(templates(PAD_USER)) == 0,
+              "n=%d" % len(templates(PAD_USER)))
+
+        doc = probe_db["Users"].find_one({"username": PAD_USER})
+        check("★ spoof：活体失败计入失败窗口（failedAttempts=1）",
+              (doc or {}).get("failedLoginAttempts", 0) == 1,
+              "failed=%s" % (doc or {}).get("failedLoginAttempts"))
+        check("spoof：审计记 FACEID_LIVENESS_FAILED（A 组）",
+              audit_reason_count("FACEID_LIVENESS_FAILED") >= 1,
+              "n=%d" % audit_reason_count("FACEID_LIVENESS_FAILED"))
+
+    with backend("ok", "i_pad_down", {"AUTHBASELINE_FACEID_STUB_BEHAVIOR": "pad_down",
+                                      "AUTHBASELINE_FACEID_PAD_ENABLED": "true"}):
+        st, r = login(PAD_USER, PAD_PW)
+        pad_ticket = (r.get("data") or {}).get("ticket", "")
+        before = len(templates(PAD_USER))
+        st, r = enroll(pad_ticket, PAD_PW)
+        check("★ 活体模型不可用 ⇒ 503（fail closed，绝不放行）",
+              st == 503 and r.get("code") == "FACEID_ENGINE_UNAVAILABLE",
+              "%s %s" % (st, r.get("code")))
+        check("pad_down：模板数不变", len(templates(PAD_USER)) == before,
+              "now=%d" % len(templates(PAD_USER)))
+
+    with backend("ok", "i_pad_off", {"AUTHBASELINE_FACEID_PAD_ENABLED": "false"}):
+        st, r = login(PAD_USER, PAD_PW)
+        pad_ticket = (r.get("data") or {}).get("ticket", "")
+        st, r = enroll(pad_ticket, PAD_PW)
+        check("对照组：关掉活体后能录入（证明拒绝来自 PAD 而不是别的原因）",
+              st == 200 and len(templates(PAD_USER)) == 1,
+              "%s %s" % (st, r.get("code")))
+
+    # =====================================================================
+    # J：纯人脸登录（P2）—— 签票 / 判错计次 / 未录入不计次
+    # =====================================================================
+    print("\n[J] 纯人脸登录：成功签票 / 判错计次 / 未录入不计次")
+    LOGIN_USER = "faceidlogin"
+    LOGIN_PW = "Faceidlogin123"
+
+    with backend("ok", "j_login"):
+        st, r = login("admin", ADMIN_PW)
+        admin_ticket = (r.get("data") or {}).get("ticket", "")
+        st, r = call("POST", "/api/auth/create-account", {
+            "username": LOGIN_USER, "password": LOGIN_PW, "role": "User",
+            "email": "", "operatorPassword": ADMIN_PW}, admin_ticket)
+        check("建「未录入」账号（用于对照）", st == 200 and r.get("code") == "OK",
+              "%s %s" % (st, r.get("code")))
+
+        # PAD_USER 在 I 组的 pad_off 环节已经录过一张模板，这里直接拿它登。
+        st, r = call("POST", "/api/faceid/login", {"username": PAD_USER})
+        ticket = (r.get("data") or {}).get("ticket", "")
+        check("★ 人脸登录成功并签发票据", st == 200 and bool(ticket),
+              "%s %s" % (st, r.get("code")))
+        st2, r2 = status(ticket)
+        check("★ 签出的票据真的可用（status 200）", st2 == 200, str(st2))
+
+        doc = [d for d in audit_docs("LOGIN_SUCCESS") if d.get("target") == PAD_USER]
+        check("审计记 LOGIN_SUCCESS 且标明 SecondFactor=FACEID",
+              any("FACEID" in str(d.get("response", "")) for d in doc),
+              "n=%d" % len(doc))
+
+        st, r = call("POST", "/api/faceid/login", {"username": LOGIN_USER})
+        check("★ 未录入人脸 ⇒ 401 FACEID_NOT_ENROLLED（不是「人脸不像」）",
+              st == 401 and r.get("code") == "FACEID_NOT_ENROLLED",
+              "%s %s" % (st, r.get("code")))
+        d2 = probe_db["Users"].find_one({"username": LOGIN_USER})
+        check("未录入：不计次（failedAttempts=0）",
+              (d2 or {}).get("failedLoginAttempts", 0) == 0,
+              "failed=%s" % (d2 or {}).get("failedLoginAttempts"))
+
+        st, r = call("POST", "/api/faceid/login", {"username": "nobody_here"})
+        check("★ 不存在的账号 ⇒ 与「不匹配」同码（不给枚举额外信号）",
+              st == 401 and r.get("code") == "FACEID_MISMATCH",
+              "%s %s" % (st, r.get("code")))
+
+    # 判错要用**另一个身份**的假引擎：默认 backend() 注入的 STUB_IDENTITY 就是 USER，
+    # 同一个身份算出来的特征余弦恒为 1.0 —— 那样"判错"永远测不出来（会得到 200）。
+    with backend("ok", "j_mismatch", {"AUTHBASELINE_FACEID_STUB_IDENTITY": "stranger-identity"}):
+        mismatch_before = audit_reason_count("FACEID_MISMATCH")
+        st, r = call("POST", "/api/faceid/login", {"username": PAD_USER})
+        check("★ 人脸判错 ⇒ 401 FACEID_MISMATCH", st == 401 and r.get("code") == "FACEID_MISMATCH",
+              "%s %s" % (st, r.get("code")))
+        sim = (r.get("data") or {}).get("similarity")
+        check("判错时回传相似度（便于用户判断是光线还是脸不对）",
+              isinstance(sim, (int, float)), "sim=%s" % sim)
+
+        d3 = probe_db["Users"].find_one({"username": PAD_USER})
+        check("★ 判错计入失败窗口（failedAttempts=1）",
+              (d3 or {}).get("failedLoginAttempts", 0) == 1,
+              "failed=%s" % (d3 or {}).get("failedLoginAttempts"))
+        check("审计记 FACEID_MISMATCH（本组恰好多 1 条）",
+              audit_reason_count("FACEID_MISMATCH") == mismatch_before + 1,
+              "n=%d→%d" % (mismatch_before, audit_reason_count("FACEID_MISMATCH")))
 
     # =====================================================================
     # 汇总

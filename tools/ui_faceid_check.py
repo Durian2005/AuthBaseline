@@ -11,12 +11,16 @@
   1. 起后端（独立测试库 + **假引擎** + 明文 HTTP），静态文件取仓库里的 `AuthServer/wwwroot`；
   2. 用 HTTP 登录拿票据，再通过 CDP 把 `auth.ticket` / `auth.currentUser` 写进 localStorage
      —— 等价于"用户已经登录"，避免脚本去驱动登录表单；
-  3. 点侧边栏「账号与口令」，滚到卡片，截图 + 断言文案。
+  3. 点侧边栏「账号与口令」，滚到卡片，截图 + 断言文案；
+  4. **清掉 localStorage 退出**，回到登录页，点「人脸登录」页签再截图 + 断言
+     —— P2 交付物的一半是"登录页得真有这个入口"（10-19 用户实测反馈：录完脸退出后找不到入口）。
 
 用法：
   <faceid venv>/python tools/ui_faceid_check.py
 产物：
-  tools/evidence/faceid_p1_account_ui.png（`tools/evidence/` 不入库）
+  tools/evidence/faceid_p1_account_ui.png（账号页卡片）
+  tools/evidence/faceid_p2_login_ui.png（登录页「人脸登录」页签）
+  （`tools/evidence/` 不入库）
 """
 import asyncio
 import base64
@@ -40,6 +44,8 @@ DB = resolve_probe_db("AuthBaselineFaceIdUiProbe")
 BASE = "http://127.0.0.1:%d" % PORT
 EDGE = r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"
 SHOT = os.path.join(ROOT, "tools", "evidence", "faceid_p1_account_ui.png")
+SHOT_LOGIN = os.path.join(ROOT, "tools", "evidence", "faceid_p2_login_ui.png")
+SHOT_CREATE = os.path.join(ROOT, "tools", "evidence", "faceid_p2_create_account.png")
 
 
 def cdp_targets():
@@ -123,7 +129,52 @@ async def run_ui(ws_url, ticket, user_json):
             with open(SHOT, "wb") as f:
                 f.write(base64.b64decode(data))
 
-        return clicked, text, cards
+        # ---- 新建账号弹窗：初始口令必须是固定值（10-19 用户报"新账号密码=管理员密码"）----
+        await js(
+            "(() => { const el = [...document.querySelectorAll('button')]"
+            ".find(b => (b.textContent || '').includes('用户管理'));"
+            "if (el) el.click(); return !!el; })()"
+        )
+        await asyncio.sleep(1.2)
+        dlg_opened = await js(
+            "(() => { const el = [...document.querySelectorAll('button')]"
+            ".find(b => (b.textContent || '').includes('新建账号'));"
+            "if (!el) return 'no-btn'; el.click(); return 'clicked'; })()"
+        )
+        await asyncio.sleep(0.8)
+        dlg_text = await js("document.body.innerText") or ""
+        pw_inputs = await js("document.querySelectorAll('input[type=password]').length")
+
+        shot3 = await cmd("Page.captureScreenshot", {"format": "png"})
+        data3 = (shot3.get("result") or {}).get("data")
+        if data3:
+            os.makedirs(os.path.dirname(SHOT_CREATE), exist_ok=True)
+            with open(SHOT_CREATE, "wb") as f:
+                f.write(base64.b64decode(data3))
+
+        # ---- 退出登录，验证登录页的第三种入口（P2） ----
+        await js("localStorage.clear(); sessionStorage.clear(); 'ok'")
+        await cmd("Page.reload", {"ignoreCache": True})
+        await asyncio.sleep(2.0)
+
+        login_text = await js("document.body.innerText") or ""
+        tab_clicked = await js(
+            "(() => { const el = [...document.querySelectorAll('button')]"
+            ".find(b => (b.textContent || '').trim() === '人脸登录');"
+            "if (!el) return 'no-tab'; el.click(); return 'clicked'; })()"
+        )
+        await asyncio.sleep(0.8)
+        faceid_text = await js("document.body.innerText") or ""
+
+        shot2 = await cmd("Page.captureScreenshot", {"format": "png"})
+        data2 = (shot2.get("result") or {}).get("data")
+        if data2:
+            os.makedirs(os.path.dirname(SHOT_LOGIN), exist_ok=True)
+            with open(SHOT_LOGIN, "wb") as f:
+                f.write(base64.b64decode(data2))
+
+        return (clicked, text, cards, dlg_opened, dlg_text, pw_inputs,
+                login_text, tab_clicked, faceid_text)
 
 
 def main():
@@ -164,7 +215,9 @@ def main():
         ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
         ws_url = wait_target()
-        clicked, text, cards = asyncio.run(run_ui(ws_url, ticket, user_json))
+        (clicked, text, cards, dlg_opened, dlg_text, pw_inputs,
+         login_text, tab_clicked, faceid_text) = asyncio.run(
+            run_ui(ws_url, ticket, user_json))
 
         checks = [
             ("侧边栏可切换到账号页", clicked == "clicked", clicked),
@@ -173,7 +226,21 @@ def main():
             ("卡片显示录入状态", "录入状态" in text and "未录入" in text, ""),
             ("卡片显示特征模型身份", "特征模型" in text and "stub:" in text, ""),
             ("卡片声明二次口令要求", "重新输入当前口令" in text, ""),
-            ("截图已生成", os.path.exists(SHOT), SHOT),
+            ("账号页截图已生成", os.path.exists(SHOT), SHOT),
+            # ---- P2：新建账号的初始口令固定（用户报"新账号密码=管理员密码"）----
+            ("用户管理页可打开「新建账号」弹窗", dlg_opened == "clicked", dlg_opened),
+            ("★ 弹窗把初始口令固定展示为 Abc12345", "Abc12345" in dlg_text, ""),
+            ("★ 弹窗只剩一个口令框（操作者本人），不再让填初始口令",
+             pw_inputs == 1, "password 输入框=%s" % pw_inputs),
+            ("弹窗要求创建后立即改密", "立即修改" in dlg_text, ""),
+            ("新建账号截图已生成", os.path.exists(SHOT_CREATE), SHOT_CREATE),
+            # ---- P2：登录页要有独立的纯人脸入口（用户 10-19 实测反馈的原问题）----
+            ("★ 登录页存在「人脸登录」页签", tab_clicked == "clicked", tab_clicked),
+            ("★ 页签切到人脸登录表单后有「开始人脸登录」按钮",
+             "开始人脸登录" in faceid_text, ""),
+            ("人脸登录表单要求填用户名", "用户名" in faceid_text, ""),
+            ("人脸登录表单说明会开摄像头识别", "打开摄像头识别" in faceid_text, ""),
+            ("登录页截图已生成", os.path.exists(SHOT_LOGIN), SHOT_LOGIN),
         ]
         ok = 0
         for name, passed, detail in checks:
@@ -182,6 +249,8 @@ def main():
             ok += 1 if passed else 0
 
         print("\n截图：%s" % SHOT)
+        print("截图：%s" % SHOT_CREATE)
+        print("截图：%s" % SHOT_LOGIN)
         print("汇总：%d/%d" % (ok, len(checks)))
         return 0 if ok == len(checks) else 1
     finally:

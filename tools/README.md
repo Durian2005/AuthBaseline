@@ -115,13 +115,14 @@ Python 侧按字节接、`errors="replace"` 容错解码。
 
 | 文件 | 作用 | 需要什么 |
 |---|---|---|
-| `faceid_enroll_probe.py` | **接口 + 库级回归（56 项，8 组）**：状态、口令二次确认（计次）、五条质量拒绝路径、模板密文落库、审计不含特征、上限淘汰、模型作废、删除、注销连带清理 | Debug 构建 + 系统 Python（pymongo） |
-| `ui_faceid_check.py` | **界面自验（7 项）**：headless Edge + CDP 登录态 → 账号页截图，断言「刷脸登录」与「纯人脸登录」是两张独立卡片、状态/模型/二次口令文案齐备 | venv（`pip install "websockets<14"`）+ `AuthServer/wwwroot` |
+| `faceid_enroll_probe.py` | **接口 + 库级回归（75 项，10 组）**：状态、口令二次确认（计次）、五条质量拒绝路径、模板密文落库、审计不含特征、上限淘汰、模型作废、删除、注销连带清理、**活体闸门（I 组：spoof 拒 + 计次 / 模型缺失 503 / 关闭后放行）**、**人脸登录（J 组：签票可用 / `SecondFactor=FACEID` / 未录入不计次 / 判错计次 / 不存在账号同码）** | Debug 构建 + 系统 Python（pymongo） |
+| `ui_faceid_check.py` | **界面自验（17 项）**：headless Edge + CDP 登录态 → 账号页截图，断言「刷脸登录」与「纯人脸登录」是两张独立卡片、状态/模型/二次口令文案齐备；**再验新建账号弹窗初始口令固定为 `Abc12345` 且只剩一个口令框**；**退出后验登录页「人脸登录」页签与表单** | venv（`pip install "websockets<14"`）+ `AuthServer/wwwroot` |
 
 ```bash
 # 接口回归（库名必须含 Probe，脚本已守卫）
 python tools/faceid_enroll_probe.py AuthServer/bin/Debug/net8.0/AuthServer.exe 5391
-# 界面自验（产物 tools/evidence/faceid_p1_account_ui.png，证据目录不入库）
+# 界面自验（产物 tools/evidence/faceid_p{1_account,2_create_account,2_login}_ui.png，
+#           证据目录不入库）
 <faceid venv>/python tools/ui_faceid_check.py
 ```
 
@@ -129,9 +130,82 @@ python tools/faceid_enroll_probe.py AuthServer/bin/Debug/net8.0/AuthServer.exe 5
 用**系统** Python（pymongo 只装在那里），`ui_faceid_check.py` 用 faceid venv
 （依赖 websockets）；③ `dotnet build` **不复制** `wwwroot` ⇒ 界面脚本显式设
 `ASPNETCORE_CONTENTROOT` 指向 `AuthServer/`，否则页面 404。
+⚠️ J 组测「判错」必须换 **`AUTHBASELINE_FACEID_STUB_IDENTITY`**：默认它等于探针用户，
+同一身份算出的特征余弦恒 1.0，判错永远测成 200（本组曾因此假通过过一轮）。
 
 ⚠️ 质量闸门的四个阈值（最小脸宽 0.12 / 清晰度 60 / 偏航 0.35 / 滚转 0.30）只是**起点**，
 不是标定结论：真机标定属于 P1b（与 P3 的阈值定档同批做）。
+
+### A6. 纯人脸登录（FaceId）P1b 活体判定：对照与标定
+
+对应 `AuthServer/Services/FaceId/CvFaceIdLiveness.cs`（MiniFASNetV2，**被动、单帧**，无动作挑战）。
+两份工作都靠一个脚本，按模式切换。
+
+| 模式 | 作用 | 需要什么 |
+|---|---|---|
+| `--compare` | **预处理等价**：C#（`--faceid-pad`）与 Python 参考管线逐张比 `live` 分数，判据 Δ ≤ 1e-4。实测 46 帧 max\|Δ\| = 9e-7 | Debug 构建 + 模型 |
+| `--dist` | **阈值标定**：`--spoof` 收多个目录，**按攻击类型逐组**报分布（手机 / 打印 / 回放难度不同，合并会掩盖最危险的那类），并按 0.30/0.50/0.70/0.80 四个候选阈值给出各组通过率 | 活人帧 + 至少一组攻击帧 |
+
+```bash
+# 等价性对照（改任何预处理之前先跑它 —— 除 255 这类错误不会报错，只会给错分数）
+<faceid venv>/python tools/faceid_pad_check.py --compare --images tools/fixtures/face/left-ok
+
+# 阈值标定（推荐：三类攻击分组报数）
+<faceid venv>/python tools/faceid_pad_check.py --dist \
+  --live tools/fixtures/face/left-ok \
+  --spoof tools/fixtures/pad/spoof-phone tools/fixtures/pad/spoof-print tools/fixtures/pad/spoof-replay
+```
+
+实测（46 活人 + 120 攻击）：活人中位 0.968，三类攻击 max ≤ 0.0030，
+**阈值 0.70 下攻击通过 0/120、活人单帧通过 91%**。数据与口径见
+`docs/reports/FACEID-P1B-PAD-REPORT.md`。
+
+⚠️ **活体默认是关的**（`FaceIdOptions.PadEnabled = false`）：本项目的验收方式就是
+手举照片对着镜头测，默认开着会把流程整个堵死。上面的标定是"打开时"的效果；
+要演示反欺骗就设 `AUTHBASELINE_FACEID_PAD_ENABLED=true` 重启后端。
+同理，举手机时操作者自己容易同框，需要时用 `AUTHBASELINE_FACEID_ALLOW_MULTI_FACE=true`
+放行多脸（取最大那张）。
+
+采样用后端自己的命令（**不提示动作**，因为举照片的人没法配合"转头"）：
+
+```bash
+AuthServer/bin/Debug/net8.0/AuthServer.exe --faceid-capture <目录> [帧数=60] [间隔ms=120]
+```
+
+⚠️ 五个坑：① 采集走 `ImEncode + WriteAllBytes`（`ImWrite` 在中文目录会失败）；
+② 活人侧可以直接复用 `tools/fixtures/face/left-ok`（同一摄像头、同一分辨率）；
+③ **样本里有真人的脸，目录必须落在 `tools/fixtures/`（已 gitignore）**；
+④ **攻击样本必须"人不出镜、只有攻击载体"** —— 本人的真脸一旦同框，YuNet 取最大框拿到的是真脸，
+量到的是"多脸闸门"而不是活体模型（首次采样就栽在这里：40 帧里 23 帧同框）；
+⑤ 采集命令要在**项目根目录**下跑，或路径写全 —— 相对路径按当前工作目录解析，
+在 `C://Users//<你>` 下会报"不是内部或外部命令"。
+
+### A7. 纯人脸登录（FaceId）识别精度：用照片做 1:N 比对
+
+验收要覆盖"不同人种 / 明星各年龄段 / 双胞胎 / 特殊人群"，这些**找不到真人**，
+只能拿照片测。这个脚本直接调后端自己的 `--faceid-embed`（**与线上同一条管线**）
+算余弦，比在界面上逐张录入快一个数量级。
+
+```bash
+<faceid venv>/python tools/faceid_similarity_check.py \
+  --template <模板图目录> --probe <探针图目录> [--threshold 0.50] [--gray-band 0.05]
+```
+
+输出：每张探针图的最佳匹配与判定（Pass / GrayZone / Mismatch）、汇总分布，
+以及 0.30–0.70 的**阈值扫描计数**（换阈值会怎么变，一次看清）。
+
+实测参考（同一台机器）：
+
+| 组 | n | min | 中位 | max |
+|---|---|---|---|---|
+| 同一个人（`left-ok` 前 20 张当模板、后 26 张当探针） | 26 | 0.0025 | 0.8601 | 0.9675 |
+| 不同人（模板=本人，探针=鲍喜顺翻拍） | 40 | 0.1804 | 0.2076 | 0.2340 |
+
+⚠️ 三个坑：
+① **中文路径不能靠回显匹配** —— C# 控制台在中文 Windows 下按 GBK 输出，路径回显到管道会被打成
+`U+FFFD`。所以 `--faceid-embed` 的第一列是**输入序号**，调用方自己按顺序映射回路径；
+② 同人组里余弦接近 0 的帧是**转头/糊掉的废帧**，不是阈值问题，看中位数而不是看 min；
+③ 双胞胎会落在灰区甚至误通过 —— ArcFace 类模型的已知边界，别拿"准确率 96.83%"去暗示能分开。
 
 ### B. 端到端 / 验收
 
@@ -158,7 +232,7 @@ python tools/faceid_enroll_probe.py AuthServer/bin/Debug/net8.0/AuthServer.exe 5
 | `ui_e2e.mjs` | （自带） | 注册绑定邮箱 / 忘记密码全流程（**11 项**） |
 | `desktop_e2e.py` | （自带） | 桌面端登录 + 截图 + 可选制造篡改并截告警弹窗（`tamper` 步骤需门禁） |
 | `desktop_shot.py` | （自带） | 启动桌面端截取窗口真实画面并驱动界面 |
-| `ui_faceid_check.py` | （自带，Python 内联 CDP） | 账号页「纯人脸登录」卡片（**7 项**）—— headless Edge，不需要装桌面端（见 A5） |
+| `ui_faceid_check.py` | （自带，Python 内联 CDP） | 账号页「纯人脸登录」卡片 + 新建账号弹窗固定初始口令 + 登录页「人脸登录」页签（**17 项**）—— headless Edge，不需要装桌面端（见 A5） |
 
 截图统一写入 `tools/evidence/`（可用环境变量 `E2E_SHOTDIR` 覆盖）。
 例外：`ui_e2e.mjs` 的输出名由**命令行参数**给定（见 `docs/guides/EMAIL-VERIFY-README.md`），要归入证据目录请先 `cd tools/evidence`。
