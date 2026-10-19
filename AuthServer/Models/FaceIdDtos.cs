@@ -9,9 +9,20 @@ namespace AuthServer.Models;
  *   就等于给攻击者开了一条"完全绕开摄像头"的伪造入口。
  *
  * 人脸录入（P1）只做两件事：确认操作者知道当前口令、采集并保存一张模板。
- * 登录侧（P2）的 DTO 会另建一套，不复用这里的类型 ——
- * 与 2FA 当初"登录请求和录入请求刻意分成两个类型"的理由相同。
+ * 登录侧（P2）的请求体另建一个类型（<see cref="FaceIdLoginRequest"/>），不复用录入请求 ——
+ * 与 2FA 当初"登录请求和录入请求刻意分成两个类型"的理由相同：
+ * 两种请求的字段集不同，混用会让"某个字段在另一条路径上被忽略"这种事没人看得出。
  */
+
+/// <summary>
+/// 纯人脸登录的请求体：**只有用户名**。
+/// 画面由服务端自己采集 —— 接口上不存在"传一张图 / 传一个特征"这种形状，
+/// 所以"前端伪造向量直接登录"在类型层面就不可能。
+/// </summary>
+public class FaceIdLoginRequest
+{
+    public string Username { get; set; } = string.Empty;
+}
 
 /// <summary>
 /// 录入 / 删除 FaceId 模板时的二次口令。
@@ -62,4 +73,23 @@ public class FaceIdStatusResponse
 
     /// <summary>引擎不可用时的原因（直接显示给用户）。</summary>
     public string EngineMessage { get; set; } = string.Empty;
+
+    /// <summary>
+    /// 活体判定（PAD）是否启用。
+    /// 单独下发而不并进 EngineReady：两者是**独立的两件事**，
+    /// 引擎好、活体模型缺失时用户看到的原因必须准确（否则会去反复调摄像头）。
+    /// </summary>
+    public bool PadEnabled { get; set; }
+
+    /// <summary>活体模型是否就绪。PadEnabled 为 true 而它为 false ⇒ 录入会被 fail closed 拒绝。</summary>
+    public bool PadReady { get; set; }
+
+    /// <summary>活体判定当前阈值（已按 46 活人 + 120 攻击标定，见 FACEID-P1B-PAD-REPORT）。</summary>
+    public double PadMinLive { get; set; }
+
+    /// <summary>
+    /// 是否拒绝"画面里有多张脸"。默认 true；为 false 时取面积最大那张
+    /// （用照片做识别测试时需要 —— 举手机的人自己容易同框）。
+    /// </summary>
+    public bool RejectMultipleFaces { get; set; }
 }

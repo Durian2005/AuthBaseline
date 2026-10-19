@@ -2,6 +2,7 @@ using AuthServer.Models;
 using AuthServer.Services;
 using AuthServer.Services.FaceId;
 using Microsoft.AspNetCore.Mvc;
+using MongoDB.Driver;
 
 namespace AuthServer.Controllers;
 
@@ -28,14 +29,16 @@ namespace AuthServer.Controllers;
 public class FaceIdController : AuthControllerBase
 {
     private readonly FaceIdEnrollService _enroll;
+    private readonly FaceIdLoginService _login;
     private readonly FaceIdTemplateStore _templates;
 
     public FaceIdController(MongoDbService db, AuditWriter auditWriter, SessionService sessions,
         PepperProvider pepper, IConfiguration configuration,
-        FaceIdEnrollService enroll, FaceIdTemplateStore templates)
+        FaceIdEnrollService enroll, FaceIdLoginService login, FaceIdTemplateStore templates)
         : base(db, auditWriter, sessions, pepper, configuration)
     {
         _enroll = enroll;
+        _login = login;
         _templates = templates;
     }
 
@@ -69,7 +72,11 @@ public class FaceIdController : AuthControllerBase
                 Threshold = _enroll.Threshold,
                 ModelId = _templates.ModelId,
                 EngineReady = engine.Ready,
-                EngineMessage = engine.Ready ? string.Empty : engine.Message
+                EngineMessage = engine.Ready ? string.Empty : engine.Message,
+                PadEnabled = _enroll.PadEnabled,
+                PadReady = _enroll.PadStatus.Ready,
+                PadMinLive = _enroll.PadMinLive,
+                RejectMultipleFaces = _enroll.RejectMultipleFaces
             }
         });
     }
@@ -142,13 +149,25 @@ public class FaceIdController : AuthControllerBase
         var outcome = await _enroll.EnrollAsync(user.Id, user.Username);
         if (!outcome.Success)
         {
+            // 计次与否**由码决定**（FaceIdCodes.IsCounted），调用点不许自己判断：
+            //   活体失败 = 攻击信号 ⇒ 与口令错同等累加失败窗口（P1b 起）；
+            //   质量类/引擎类 = 配合或环境问题 ⇒ 一律不计，否则用户反复调整坐姿就会把自己锁掉。
+            var countedLock = FaceIdCodes.IsCounted(outcome.AuditReason)
+                ? await ApplyCountedFailureAsync(user)
+                : null;
+
             // 引擎不可用属于本机环境问题（503），质量不合格属于"这次没配合好"（400）。
             // 两者在审计里也分开（FaceIdEngineUnavailable vs FaceIdEnrollRejected）。
             var resp = new ApiResponse
             {
                 Success = false,
-                Code = outcome.BusinessCode,
-                Message = outcome.Message
+                Code = countedLock is null ? outcome.BusinessCode : BusinessCode.AccountLocked,
+                Message = countedLock ?? outcome.Message,
+                Data = countedLock is null ? null : new
+                {
+                    FailedAttempts = user.FailedLoginAttempts,
+                    LockoutEnd = user.LockoutEnd
+                }
                 // 诊断量（帧数 / 脸数 / 清晰度）只进审计，不进响应体：对用户没有意义
             };
             var httpStatus = string.Equals(outcome.BusinessCode, BusinessCode.FaceIdEngineUnavailable, StringComparison.Ordinal)
@@ -162,8 +181,9 @@ public class FaceIdController : AuthControllerBase
                     outcome.Diagnostic,
                     ModelId = _templates.ModelId
                 },
-                statusBefore, user.Username, AuditResult.Failed, outcome.AuditReason);
-            return StatusCode(httpStatus, resp);
+                statusBefore, user.Username, AuditResult.Failed,
+                countedLock is null ? outcome.AuditReason : AuditReason.AccountLocked);
+            return StatusCode(countedLock is null ? httpStatus : 401, resp);
         }
 
         var response = new ApiResponse
@@ -256,5 +276,141 @@ public class FaceIdController : AuthControllerBase
         await _auditWriter.WriteAsync(user.Id, user.Username, action, statusBefore, requestLog, response,
             statusBefore, user.Username, AuditResult.Success);
         return Ok(response);
+    }
+
+    /* ==================== 匿名：纯人脸登录 ==================== */
+
+    /**
+     * 用户名 + 一次摄像头采集完成登录。**匿名可访问**（与 /api/auth/login 同级）。
+     *
+     * 与口令登录是**两种并列的登录方式**，不是"口令之后再刷脸"：
+     *   请求体里没有口令，画面也永远由服务端自己采集 ——
+     *   接口上没有"传一张图 / 传一个特征"这种形状，所以前端无法伪造一次识别。
+     *
+     * 计次规则由码决定（FaceIdCodes.IsCounted），调用点不自己判断：
+     *   MISMATCH（明确不是本人）计次，与口令错同级；
+     *   GRAY_ZONE（把握不足）、质量类、引擎类一律不计 ——
+     *   把光线问题算成失败，等于让"今天灯太暗"逐步把本人锁在门外。
+     */
+    [HttpPost("login")]
+    public async Task<IActionResult> Login([FromBody] FaceIdLoginRequest req)
+    {
+        const string action = AuditAction.LoginFailed;
+        var username = Norm(req.Username);
+        var requestLog = new { req.Username };
+
+        if (string.IsNullOrWhiteSpace(username))
+        {
+            var resp = new ApiResponse { Success = false, Code = BusinessCode.EmptyFields, Message = "用户名不能为空" };
+            await _auditWriter.WriteAsync("anonymous", "anonymous", action, "N/A", requestLog, resp, "N/A",
+                username, AuditResult.Failed, AuditReason.EmptyFields);
+            return BadRequest(resp);
+        }
+
+        var user = await _db.Users.Find(u => u.Username == username).FirstOrDefaultAsync();
+
+        // 账号不存在：与"人脸不匹配"**同码同话术**。人脸登录天然要开摄像头，
+        // 本来就无法做到与口令登录等价的不可区分；但至少不额外泄露一个"这个用户名存在"。
+        if (user == null)
+        {
+            var resp = new ApiResponse
+            {
+                Success = false,
+                Code = BusinessCode.FaceIdMismatch,
+                Message = FaceIdCodes.MessageFor(BusinessCode.FaceIdMismatch)
+            };
+            await _auditWriter.WriteAsync("anonymous", "anonymous", action, "N/A", requestLog, resp, "N/A",
+                username, AuditResult.Failed, AuditReason.FaceIdMismatch);
+            return Unauthorized(resp);
+        }
+
+        var statusBefore = user.Status.ToString();
+
+        // 禁用与锁定都必须在采脸之前拒绝：锁定账号不该再拿到一次识别机会。
+        if (user.Status != UserStatus.Enabled)
+        {
+            if (user.Status == UserStatus.Locked)
+            {
+                var verdict = TimeGuard.Assess(user, TimeGuard.WallNow(), TimeGuard.UptimeMs());
+                await LogClockDriftIfAnyAsync(user, verdict, "FACEID_LOGIN", user.Username);
+                return await LockoutRejectionAsync(user, verdict, action, statusBefore, requestLog,
+                    user.Username, "账号已锁定，", 401);
+            }
+
+            var disabled = new ApiResponse
+            {
+                Success = false,
+                Code = BusinessCode.AccountDisabled,
+                Message = "账号已被禁用，请联系管理员"
+            };
+            await _auditWriter.WriteAsync(user.Id, user.Username, action, statusBefore, requestLog, disabled,
+                statusBefore, user.Username, AuditResult.Failed, AuditReason.AccountDisabled);
+            return StatusCode(403, disabled);
+        }
+
+        var outcome = await _login.LoginAsync(user.Id);
+
+        if (outcome.Success)
+        {
+            ResetFailedAttempts(user);
+            user.LastLoginAt = DateTime.UtcNow;
+            await _db.Users.ReplaceOneAsync(u => u.Id == user.Id, user);
+
+            var issued = await _sessions.IssueAsync(user);
+            var ok = new ApiResponse<LoginResult>
+            {
+                Success = true,
+                Code = BusinessCode.Ok,
+                Message = "登录成功（人脸）",
+                Data = new LoginResult
+                {
+                    Username = user.Username,
+                    Status = user.Status.ToString(),
+                    Role = user.Role.ToString(),
+                    RoleLabel = UserRoles.Label(user.Role),
+                    IsAdmin = UserRoles.CanManageUsers(user.Role),
+                    Ticket = issued.Ticket,
+                    ExpiresAt = issued.Session.ExpiresAt
+                }
+            };
+
+            // 审计里记"第二因子 = FACEID"，让审计员能区分"口令登录"与"人脸登录"；
+            // 相似度只进审计（对用户没有意义，对事后判断"是不是擦边通过"有用）。
+            await _auditWriter.WriteAsync(user.Id, user.Username, AuditAction.LoginSuccess, statusBefore,
+                new { req.Username, Similarity = outcome.Similarity },
+                new
+                {
+                    user.Username,
+                    user.Status,
+                    Role = user.Role.ToString(),
+                    TicketIssued = true,
+                    SecondFactor = "FACEID"
+                },
+                user.Status.ToString(), user.Username, AuditResult.Success);
+            return Ok(ok);
+        }
+
+        // 失败：计次与否**只看码**（与录入侧同一套规则）。
+        var auditReason = FaceIdCodes.ToAuditReason(outcome.BusinessCode);
+        var counted = FaceIdCodes.IsCounted(auditReason);
+        var lockMessage = counted ? await ApplyCountedFailureAsync(user) : null;
+
+        var body = new ApiResponse
+        {
+            Success = false,
+            Code = lockMessage is null ? outcome.BusinessCode : BusinessCode.AccountLocked,
+            Message = lockMessage ?? outcome.Message,
+            Data = new
+            {
+                // 相似度回传给界面：本人看到"0.83 还差一点"就知道是光线问题，
+                // 而"0.12"说明脸根本不对。它不构成可用的攻击信息（本来就能反复试）。
+                Similarity = outcome.Similarity,
+                LockoutEnd = lockMessage is null ? (DateTime?)null : user.LockoutEnd
+            }
+        };
+        await _auditWriter.WriteAsync(user.Id, user.Username, action, statusBefore,
+            new { req.Username, Similarity = outcome.Similarity }, body, statusBefore, user.Username,
+            AuditResult.Failed, lockMessage is null ? auditReason : AuditReason.AccountLocked);
+        return Unauthorized(body);
     }
 }

@@ -29,6 +29,12 @@ public class Program
         // 只跑引擎、不启 Web 主机，用于 P0 Stage 0 的 C#/Python 嵌入对照实验。
         if (AuthServer.Services.FaceId.FaceIdEmbedCli.IsCommand(args))
             return AuthServer.Services.FaceId.FaceIdEmbedCli.Run(args);
+        // 活体分数导出：同样只跑引擎，用于 P1b 的"预处理等价"对照。
+        if (AuthServer.Services.FaceId.FaceIdPadCli.IsCommand(args))
+            return AuthServer.Services.FaceId.FaceIdPadCli.Run(args);
+        // 纯采集（不提示动作）：P1b 活体标定要录"活人 / 举照片 / 举手机"三类画面。
+        if (AuthServer.Services.FaceId.FaceIdCaptureCli.IsCommand(args))
+            return AuthServer.Services.FaceId.FaceIdCaptureCli.Run(args);
 
         var builder = WebApplication.CreateBuilder(args);
 
@@ -207,6 +213,14 @@ public class Program
             : new AuthServer.Services.FaceId.CvFaceIdEngine(faceIdOptions);
         builder.Services.AddSingleton(faceIdEngine);
 
+        // 活体判定（PAD）：与引擎同"真假"口径 —— 假引擎配假活体，真引擎配真模型。
+        // 单独注册而不是塞进引擎，是因为它的失败（模型缺失）必须能被控制器单独报出来，
+        // 而不是和"摄像头打不开"混成同一个原因。
+        AuthServer.Services.FaceId.IFaceIdLiveness faceIdLiveness = faceIdOptions.UseStubEngine
+            ? new AuthServer.Services.FaceId.StubFaceIdLiveness(faceIdOptions)
+            : new AuthServer.Services.FaceId.CvFaceIdLiveness(faceIdOptions);
+        builder.Services.AddSingleton(faceIdLiveness);
+
         // 模板存储：加密密钥、模型身份、存取、录入编排。
         // 模型身份在这里算一次（权重文件的 sha256 前缀）—— 模板与它绑定，
         // 换模型后旧模板会**被判为作废**而不是被拿去算一个无意义的余弦（见 FaceIdModelIdentity）。
@@ -215,6 +229,7 @@ public class Program
         builder.Services.AddSingleton<AuthServer.Services.FaceId.FaceIdTemplateCrypto>();
         builder.Services.AddSingleton<AuthServer.Services.FaceId.FaceIdTemplateStore>();
         builder.Services.AddSingleton<AuthServer.Services.FaceId.FaceIdEnrollService>();
+        builder.Services.AddSingleton<AuthServer.Services.FaceId.FaceIdLoginService>();
 
         // 账号注销时的统一清理入口：FaceId 把自己登记进去，用户管理域只遍历接口，
         // 不认识"人脸模板"这种细节（见 IUserDataPurger 的注释）。
@@ -281,10 +296,24 @@ public class Program
         else
         {
             var faceIdStatus = faceIdEngine.Status;
+            var padStatus = faceIdOptions.PadEnabled ? faceIdLiveness.Status : null;
+            // 两个开关各自拼成一句，再拼进主句 —— 用嵌套三元 + 字符串相加会因
+            // 条件表达式右结合而把 ":" 的边界吃掉（编译期就报 CS1026）。
+            var padText = faceIdOptions.PadEnabled
+                ? (padStatus!.Ready
+                    ? $"活体 已启用（{faceIdOptions.PadMinLive:F2}，被动单帧）"
+                    : "⚠️ 活体模型不可用 ⇒ 录入 fail closed")
+                : "⚠️ 活体判定已关闭（手举照片可过，测试默认值；"
+                  + "设 AUTHBASELINE_FACEID_PAD_ENABLED=true 启用）";
+            var multiText = faceIdOptions.RejectMultipleFaces
+                ? "多脸 拒绝"
+                : "⚠️ 多脸 已放行（照片测试模式，取最大那张）";
+
             Console.WriteLine(faceIdStatus.Ready
-                ? $"[FaceId] 纯人脸登录已就绪（用户名 + 人脸，无活体）· 阈值 {faceIdOptions.Threshold:F2}"
+                ? $"[FaceId] 纯人脸登录已就绪（用户名 + 人脸）· 阈值 {faceIdOptions.Threshold:F2}"
                   + $" · 灰区 ±{faceIdOptions.GrayBand:F2} · 每人上限 {faceIdOptions.MaxTemplates} 张"
                   + $" · 模型 {faceIdModel.ModelId}"
+                  + " · " + padText + " · " + multiText
                 : $"[FaceId] 引擎不可用，纯人脸登录将整体降级：{faceIdStatus.Message}");
         }
 

@@ -491,4 +491,23 @@ public static class AuditReason
     /// 必须与 QUALITY / MISMATCH 区分开，否则排查会一路往摄像头和光线方向跑。（不计）
     /// </summary>
     public const string FaceIdModelMismatch = "FACEID_MODEL_MISMATCH";
+
+    /// <summary>
+    /// 未通过活体判定（照片 / 屏幕回放）。（**A 组 · 计次**）
+    ///
+    /// 这是本模块第一个计次的录入侧原因码，理由：
+    ///   一次活体失败可能只是光线，但**连续多次**只有一个解释 —— 有人拿着照片在试。
+    ///   与二级口令错、2FA 的 LIVENESS_FAILED 归同一组，语义一致：
+    ///   它们都是"正在被试探"的直接证据，而不是配合问题。
+    /// </summary>
+    public const string FaceIdLivenessFailed = "FACEID_LIVENESS_FAILED";
+
+    /// <summary>纯人脸登录：相似度明确低于阈值，判为不是本人。（A 组 · 计次）</summary>
+    public const string FaceIdMismatch = "FACEID_MISMATCH";
+
+    /// <summary>
+    /// 纯人脸登录：相似度落在灰区。（B 组 · **不计次**）
+    /// 灰区是"证据不足"，不是"证明不是"；计次等于让光线问题积累成锁定。
+    /// </summary>
+    public const string FaceIdGrayZone = "FACEID_GRAY_ZONE";
 }

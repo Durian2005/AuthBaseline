@@ -152,4 +152,19 @@ public static class BusinessCode
 
     /// <summary>模板与当前模型不匹配（换过权重）—— 必须重新录入，不是"人脸不像"。</summary>
     public const string FaceIdModelMismatch = "FACEID_MODEL_MISMATCH";
+
+    /// <summary>
+    /// 未通过活体判定（画面像是打印照片 / 屏幕回放）。与"脸不像"严格区分：
+    /// 前者是**攻击信号**，后者是本人没对上；混成一个码会让审计看不出有人在试照片。
+    /// </summary>
+    public const string FaceIdLivenessFailed = "FACEID_LIVENESS_FAILED";
+
+    /// <summary>相似度**明确低于**阈值 ⇒ 不是本人。计次（与口令错的地位相同）。</summary>
+    public const string FaceIdMismatch = "FACEID_MISMATCH";
+
+    /// <summary>
+    /// 相似度落在灰区：既不能判定是本人，也不足以判定不是。**不计次、不签票**，
+    /// 引导改用口令登录 —— 计次会让"光线不好"逐步把本人锁在门外。
+    /// </summary>
+    public const string FaceIdGrayZone = "FACEID_GRAY_ZONE";
 }

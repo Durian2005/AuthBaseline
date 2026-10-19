@@ -12,9 +12,11 @@ namespace AuthServer.Services.FaceId;
  *
  * 与 2FA 的差异（本模块特有的取舍）：
  *   2FA 的 A 组包含 MISMATCH / LIVENESS / CHALLENGE_INVALID —— 那是登录链路上的
- *   欺骗信号。本模块 P1 只有**录入**，而录入发生在已登录之后，失败没有安全含义，
- *   所以全部归 B 组（不计次）；唯一计次的是"二次口令错"，因为它是对口令的在线猜测。
- *   P2 会补上登录侧的原因码，届时仍按"码决定分组"这条规则扩展，不改计数逻辑。
+ *   欺骗信号。本模块 P1a 只有**录入**，而录入发生在已登录之后，失败没有安全含义，
+ *   所以当时全部归 B 组（不计次）。P1b 补了活体判定之后，多了一条**计次**的码
+ *   （LIVENESS_FAILED）—— 它的理由不是"录入本身危险"，而是"连续失败说明有人在拿照片试"。
+ *   P2（见下）补上了登录侧的两个码：MISMATCH 计次（等价于口令错），
+ *   GRAY_ZONE 不计（证据不足 ≠ 证明不是）。扩展方式仍是"码决定分组"，计数逻辑一行没动。
  */
 public static class FaceIdCodes
 {
@@ -47,7 +49,10 @@ public static class FaceIdCodes
         "FACEID_LOW_QUALITY" => AuditReason.FaceIdEnrollRejected,
         "FACEID_ENROLL_FAILED" => AuditReason.FaceIdEnrollRejected,
         "FACEID_MODEL_MISMATCH" => AuditReason.FaceIdModelMismatch,
+        "FACEID_LIVENESS_FAILED" => AuditReason.FaceIdLivenessFailed,
         "FACEID_NOT_ENROLLED" => AuditReason.FaceIdNoTemplate,
+        "FACEID_MISMATCH" => AuditReason.FaceIdMismatch,
+        "FACEID_GRAY_ZONE" => AuditReason.FaceIdGrayZone,
         _ => AuditReason.FaceIdEnrollRejected
     };
 
@@ -60,6 +65,9 @@ public static class FaceIdCodes
     public static bool IsCounted(string auditReason) => auditReason switch
     {
         AuditReason.FaceIdWrongPassword => true,
+        AuditReason.FaceIdLivenessFailed => true,
+        // 登录侧：明确不是本人 ⇒ 计次（与口令错同等地位）；灰区不计。
+        AuditReason.FaceIdMismatch => true,
         _ => false
     };
 
@@ -93,6 +101,9 @@ public static class FaceIdCodes
         "FACEID_ENROLL_FAILED" => "人脸录入未通过，请重新尝试",
         "FACEID_NOT_ENROLLED" => "该账号尚未录入可用于登录的人脸",
         "FACEID_MODEL_MISMATCH" => "已录入的人脸模板与当前模型不匹配，请重新录入",
+        "FACEID_LIVENESS_FAILED" => "未通过活体检测：画面里像是照片或屏幕，请由本人现场正对摄像头",
+        "FACEID_MISMATCH" => "人脸与已录入的模板不匹配，请正对摄像头重试，或改用口令登录",
+        "FACEID_GRAY_ZONE" => "这次识别把握不足（可能是光线或角度问题），请改用口令登录，或调整后重试",
         _ => "人脸录入未通过"
     };
 }

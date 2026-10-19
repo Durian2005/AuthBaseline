@@ -27,6 +27,9 @@ public class FaceIdCodesTests
     [InlineData(BusinessCode.FaceIdEnrollFailed, AuditReason.FaceIdEnrollRejected)]
     [InlineData(BusinessCode.FaceIdModelMismatch, AuditReason.FaceIdModelMismatch)]
     [InlineData(BusinessCode.FaceIdNotEnrolled, AuditReason.FaceIdNoTemplate)]
+    [InlineData(BusinessCode.FaceIdLivenessFailed, AuditReason.FaceIdLivenessFailed)]
+    [InlineData(BusinessCode.FaceIdMismatch, AuditReason.FaceIdMismatch)]
+    [InlineData(BusinessCode.FaceIdGrayZone, AuditReason.FaceIdGrayZone)]
     public void ToAuditReason_MapsEachCode(string businessCode, string expected)
     {
         Assert.Equal(expected, FaceIdCodes.ToAuditReason(businessCode));
@@ -47,8 +50,18 @@ public class FaceIdCodesTests
         Assert.False(FaceIdCodes.IsCounted(reason));
     }
 
-    [Theory(DisplayName = "计次规则：只有二次口令错计次")]
+    /// <summary>
+    /// 计次的只有三类：二次口令错（在线口令猜测）、活体失败（拿照片在试）、
+    /// 登录时人脸判错（等价于口令错）。
+    ///
+    /// **灰区刻意不计**：灰区是"证据不足"而不是"证明不是"，
+    /// 计次会让"灯太暗"这种环境问题逐步把本人锁在门外。
+    /// </summary>
+    [Theory(DisplayName = "计次规则：口令错 + 活体失败 + 登录判错；灰区不计")]
     [InlineData(AuditReason.FaceIdWrongPassword, true)]
+    [InlineData(AuditReason.FaceIdLivenessFailed, true)]
+    [InlineData(AuditReason.FaceIdMismatch, true)]
+    [InlineData(AuditReason.FaceIdGrayZone, false)]
     [InlineData(AuditReason.FaceIdEnrollRejected, false)]
     [InlineData(AuditReason.FaceIdNoTemplate, false)]
     [InlineData(AuditReason.FaceIdEngineUnavailable, false)]
@@ -84,6 +97,9 @@ public class FaceIdCodesTests
     [InlineData(BusinessCode.FaceIdEnrollFailed)]
     [InlineData(BusinessCode.FaceIdNotEnrolled)]
     [InlineData(BusinessCode.FaceIdModelMismatch)]
+    [InlineData(BusinessCode.FaceIdLivenessFailed)]
+    [InlineData(BusinessCode.FaceIdMismatch)]
+    [InlineData(BusinessCode.FaceIdGrayZone)]
     public void MessageFor_IsNeverEmpty(string code)
     {
         Assert.False(string.IsNullOrWhiteSpace(FaceIdCodes.MessageFor(code)));
