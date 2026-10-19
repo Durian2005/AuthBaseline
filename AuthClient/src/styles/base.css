@@ -198,6 +198,12 @@ button {
   font-weight: 500;
   color: var(--c-text-muted);
 }
+/* 等宽字体工具类：身份证/模型指纹/固定初始口令这类"逐字符核对"的文本用 */
+.mono {
+  font-family: var(--font-mono);
+  letter-spacing: 0.02em;
+}
+
 .field__hint {
   font-size: var(--fs-xs);
   color: var(--c-text-subtle);

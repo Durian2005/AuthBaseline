@@ -77,6 +77,41 @@ async function submitLogin() {
   }
 }
 
+/* ---------------- 纯人脸登录（FaceId，与口令并列的第二种登录方式） ----------------
+ * 只输用户名，画面由**服务端**打开摄像头采集 —— 前端不碰摄像头、不传任何图像。
+ * 与下面的"登录第二阶段"是两件事：那个是口令之后的第二因子，这个本身就是一个完整因子。
+ */
+const faceIdForm = ref({ username: '' })
+const faceIdBusy = ref(false)
+
+async function submitFaceIdLogin() {
+  formError.value = ''
+  lockNotice.value = null
+  const username = faceIdForm.value.username.trim()
+  if (!username) {
+    formError.value = '请输入用户名'
+    return
+  }
+
+  faceIdBusy.value = true
+  try {
+    const res = await session.loginByFaceId(username)
+    toast.success(res?.message || '登录成功')
+    faceIdForm.value = { username: '' }
+  } catch (err) {
+    const e = err instanceof ApiError ? err : new ApiError(err.message)
+    // 界面要能区分"脸不对"和"识别没把握"：前者计次、后者不计次，提示语也不同。
+    // 相似度只在后端给出时显示（灰区/不匹配两条路径都有）。
+    const sim = e.data?.similarity
+    formError.value = typeof sim === 'number'
+      ? `${e.message}（相似度 ${sim.toFixed(3)}）`
+      : e.message
+    if (e.data?.lockoutEnd) lockNotice.value = { lockoutEnd: e.data.lockoutEnd }
+  } finally {
+    faceIdBusy.value = false
+  }
+}
+
 /* ---------------- 登录第二阶段：人脸验证 ----------------
  * 面板展示的动作与指令都由**服务端**下发（动作随机，客户端无法指定）。
  * 这里只做一件事：把这张一次性挑战交回去，由后端自己开摄像头采集。
@@ -295,6 +330,17 @@ function switchTab(next) {
           <button
             type="button"
             class="tab"
+            :class="{ 'is-active': tab === 'faceid' }"
+            role="tab"
+            :aria-selected="tab === 'faceid'"
+            @click="switchTab('faceid')"
+          >
+            <AppIcon name="face" :size="15" />
+            <span>人脸登录</span>
+          </button>
+          <button
+            type="button"
+            class="tab"
             :class="{ 'is-active': tab === 'register' }"
             role="tab"
             :aria-selected="tab === 'register'"
@@ -385,6 +431,38 @@ function switchTab(next) {
           <p class="aux">
             <button type="button" class="linkbtn" @click="switchTab('reset')">忘记密码？</button>
           </p>
+        </form>
+
+        <!-- 纯人脸登录：用户名 + 服务端采集（不传图像、不传特征） -->
+        <form v-else-if="tab === 'faceid'" class="stack" novalidate @submit.prevent="submitFaceIdLogin">
+          <div class="field">
+            <label class="field__label" for="faceid-username">用户名</label>
+            <input
+              id="faceid-username"
+              v-model="faceIdForm.username"
+              class="input"
+              type="text"
+              placeholder="请输入要登录的账号"
+              autocomplete="off"
+              spellcheck="false"
+              :disabled="faceIdBusy"
+            />
+          </div>
+
+          <div class="field__hint">
+            <AppIcon name="info" :size="13" />
+            <span>点击下方按钮后会打开摄像头识别一次（约 1–3 秒），请正对镜头。</span>
+          </div>
+
+          <button
+            type="submit"
+            class="btn btn--primary btn--block btn--lg"
+            :disabled="faceIdBusy"
+          >
+            <Spinner v-if="faceIdBusy" :size="14" />
+            <AppIcon v-else name="face" :size="15" />
+            <span>{{ faceIdBusy ? '识别中…' : '开始人脸登录' }}</span>
+          </button>
         </form>
 
         <!-- 注册：先验证邮箱，验证通过才建号 -->

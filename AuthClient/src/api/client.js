@@ -233,6 +233,13 @@ export const api = {
   login: (username, password) =>
     request('/auth/login', { method: 'POST', body: { username, password } }),
 
+  /**
+   * 纯人脸登录（与口令登录并列的第二种方式，不是第二因子）。
+   * 请求体只有用户名：画面由服务端自己采集，前端不传任何图像或特征。
+   */
+  loginFaceId: (username) =>
+    request('/faceid/login', { method: 'POST', body: { username } }),
+
   /** 登出：吊销服务端票据。前端随后清空本地副本 */
   logout: () => request('/auth/logout', { method: 'POST' }),
 

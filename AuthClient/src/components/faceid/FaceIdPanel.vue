@@ -50,6 +50,31 @@ function errorText(err) {
   return err instanceof ApiError ? err.message : err?.message || '操作失败'
 }
 
+/**
+ * 活体判定的显示文案。
+ *
+ * 刻意把"模型不可用"单列，不并进上面的"引擎不可用"：
+ * 引擎好、活体模型缺失时，录入会被 fail closed 拒绝 —— 这时如果界面只说
+ * "引擎正常"，用户会一直怀疑是摄像头或光线的问题。
+ */
+const padText = computed(() => {
+  const s = status.value
+  if (!s) return '—'
+  if (!s.padEnabled) return '已关闭（照片可通过）'
+  if (!s.padReady) return '模型不可用 ⇒ 录入将被拒绝'
+  return `已启用 · ${s.padMinLive != null ? s.padMinLive.toFixed(2) : '—'}`
+})
+
+/**
+ * 多脸闸门状态：默认拒绝；给照片测试放开时，取画面里面积最大的那张。
+ * 必须在界面上可见 —— 放开之后"存进去的是谁"就没有保证了。
+ */
+const multiFaceText = computed(() => {
+  const s = status.value
+  if (!s) return '—'
+  return s.rejectMultipleFaces === false ? '已放行（取最大那张）' : '拒绝'
+})
+
 async function load() {
   error.value = ''
   try {
@@ -145,8 +170,24 @@ async function submit() {
         <span class="sec__value">{{ status?.threshold != null ? status.threshold.toFixed(2) : '—' }}</span>
       </div>
       <div class="sec__row">
+        <span class="sec__label">活体判定</span>
+        <span class="sec__value">{{ padText }}</span>
+      </div>
+      <div class="sec__row">
         <span class="sec__label">特征模型</span>
         <span class="sec__value mono">{{ status?.modelId || '—' }}</span>
+      </div>
+
+      <div class="sec__row">
+        <span class="sec__label">多脸画面</span>
+        <span class="sec__value">{{ multiFaceText }}</span>
+      </div>
+
+      <!-- 活体关闭是**默认状态**，必须在界面上说清楚，否则会被读成"本模块有反欺骗" -->
+      <div v-if="status && !status.padEnabled" class="hint hint--warn">
+        <AppIcon name="alert-triangle" :size="14" :stroke-width="2" />
+        <span>活体判定已关闭：手举照片也能录入。这是用照片做识别测试的默认模式；需要反欺骗时设
+          <code>AUTHBASELINE_FACEID_PAD_ENABLED=true</code> 重启后端。</span>
       </div>
 
       <!-- 模板与模型绑定：换了权重，旧模板不能再比，必须明确告诉用户"重新录" -->

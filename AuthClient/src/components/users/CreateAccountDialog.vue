@@ -17,7 +17,14 @@ import { useToastStore } from '../../stores/toast'
  * 但后端要求二次校验操作者本人的登录口令 —— 这是特权操作，
  * 仅凭会话票据不足以防冒用，所以这里必须再输一次自己的口令。
  *
- * 表单状态自持：调用方只需要 `v-model:open`，不再关心字段与提交过程。
+ * 初始口令**固定为 <see cref="INITIAL_PASSWORD"/>，不再让管理员填写**。
+ * 这不是偷懒：表单里原本并排有两个口令框（"初始口令"与"您的登录口令"），
+ * 很容易把**自己的口令**填进"初始口令"，于是新账号的密码就等于管理员密码 ——
+ * 一次填反就把管理员凭据交给了别人。固定值从结构上消掉了这个失误，
+ * 也让批量建测试账号（人脸样本需要很多账号）变成只填用户名。
+ *
+ * ⚠️ 代价必须写在界面上：初始口令是**公开的约定值**，任何知道用户名的人
+ *    都能在本人改密之前登进来。所以提示语明确要求"创建后立刻让本人改密"。
  */
 const props = defineProps({
   open: { type: Boolean, default: false }
@@ -27,7 +34,15 @@ const emit = defineEmits(['update:open'])
 const session = useSessionStore()
 const toast = useToastStore()
 
-const form = ref({ username: '', email: '', password: '', role: 'UserAdmin', operatorPassword: '' })
+/**
+ * 统一初始口令。
+ *
+ * 8 位、含大小写与数字 ⇒ 满足后端的复杂度裁决（IS_PASSWORD_COMPLEX），
+ * 不需要为"固定口令"在后端开一个例外分支 —— 那条例外迟早会被别处复用。
+ */
+const INITIAL_PASSWORD = 'Abc12345'
+
+const form = ref({ username: '', email: '', role: 'UserAdmin', operatorPassword: '' })
 const error = ref('')
 const creating = ref(false)
 
@@ -36,7 +51,7 @@ watch(
   () => props.open,
   (v) => {
     if (!v) return
-    form.value = { username: '', email: '', password: '', role: 'UserAdmin', operatorPassword: '' }
+    form.value = { username: '', email: '', role: 'UserAdmin', operatorPassword: '' }
     error.value = ''
   }
 )
@@ -47,8 +62,8 @@ function close() {
 
 async function confirm() {
   const f = form.value
-  if (!f.username.trim() || !f.password || !f.operatorPassword) {
-    error.value = '请填写账号、初始口令与您本人的登录口令'
+  if (!f.username.trim() || !f.operatorPassword) {
+    error.value = '请填写账号与您本人的登录口令'
     return
   }
   creating.value = true
@@ -56,7 +71,7 @@ async function confirm() {
   try {
     const res = await session.createAccount(
       f.username.trim(),
-      f.password,
+      INITIAL_PASSWORD,
       f.role,
       f.operatorPassword,
       // 邮箱可选，留空即不绑定。格式由后端裁决 —— 与口令复杂度同一条原则：
@@ -87,7 +102,7 @@ async function confirm() {
       <div class="form__notice">
         <AppIcon name="info" :size="15" :stroke-width="2" />
         <span>
-          新建账号<strong>无需绑定邮箱</strong>，创建后即可用初始口令登录。
+          新建账号<strong>无需绑定邮箱</strong>，创建后即可用初始口令 <strong>Abc12345</strong> 登录。
           邮箱是<strong>可选项</strong>：留空则只能凭口令登录、用不了「忘记密码」；
           填写则登记为已验证，该账号随后即可自助找回密码。请按职责选择角色。
         </span>
@@ -131,12 +146,15 @@ async function confirm() {
         />
       </label>
 
-      <PasswordField
-        v-model="form.password"
-        label="初始口令"
-        placeholder="至少 8 位，含大小写字母与数字"
-        autocomplete="new-password"
-      />
+      <!-- 初始口令固定：只读展示，避免管理员把自己的口令填进来 -->
+      <div class="field">
+        <span class="field__label">初始口令（固定）</span>
+        <input class="input mono" :value="INITIAL_PASSWORD" readonly tabindex="-1" />
+        <p class="field__hint">
+          所有新建账号统一为这个口令，创建后请让本人登录并立即修改。
+          它只用于"第一次交接"，不是长期凭据。
+        </p>
+      </div>
 
       <PasswordField
         v-model="form.operatorPassword"

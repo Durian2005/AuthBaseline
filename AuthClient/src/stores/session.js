@@ -344,6 +344,27 @@ export const useSessionStore = defineStore('session', () => {
   }
 
   /**
+   * 纯人脸登录（FaceId）：用户名 + 服务端采集的一次识别。
+   *
+   * 与 <see cref="loginFace"/> 的区别：那是**第二因子**（口令已过、还差一张脸），
+   * 这是与口令并列的**第二种登录方式** —— 没有中间态，成功即拿到票据。
+   * 失败时同样绝不写入 currentUser：认证没过就建会话是比不做还糟的事。
+   */
+  async function loginByFaceId(username) {
+    submitting.value = true
+    pendingFace.value = null
+    try {
+      const res = await api.loginFaceId(username)
+      establishSession(res.data)
+      return res
+    } catch (err) {
+      throw fail(err, '人脸登录失败')
+    } finally {
+      submitting.value = false
+    }
+  }
+
+  /**
    * 登出。
    *
    * 除了清本地状态，还**必须通知服务端吊销票据** ——
@@ -441,6 +462,7 @@ export const useSessionStore = defineStore('session', () => {
     // pendingFace 非 null = 口令已过、还差人脸；此刻**没有任何票据**。
     pendingFace,
     loginFace,
+    loginByFaceId,
     cancelFaceLogin,
 
     // ---------------- 用户管理域（Admin / UserAdmin） ----------------
