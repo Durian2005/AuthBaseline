@@ -51,46 +51,13 @@ function errorText(err) {
 }
 
 /**
- * 活体判定的显示文案。
+ * 卡片只展示三项基础状态：录入状态 / 最近录入 / 判定阈值。
  *
- * 刻意把"模型不可用"单列，不并进上面的"引擎不可用"：
- * 引擎好、活体模型缺失时，录入会被 fail closed 拒绝 —— 这时如果界面只说
- * "引擎正常"，用户会一直怀疑是摄像头或光线的问题。
+ * 活体判定、多脸闸门、特征模型这三项**刻意不在这里显示**（10-19 用户要求收敛）。
+ * 它们不是没了：活体与多脸开关仍然写在**后端启动日志**里（`[FaceId] 活体判定已关闭…`
+ * `多脸 拒绝/已放行`），`GET /api/faceid/status` 也照旧下发；只是卡片不再摆一行行参数。
+ * 代价要清楚：界面上不再主动声明"活体是关的"，回答"有没有反欺骗"只能靠日志与环境变量。
  */
-const padText = computed(() => {
-  const s = status.value
-  if (!s) return '—'
-  if (!s.padEnabled) return '已关闭（照片可通过）'
-  if (!s.padReady) return '模型不可用 ⇒ 录入将被拒绝'
-  return `已启用 · ${s.padMinLive != null ? s.padMinLive.toFixed(2) : '—'}`
-})
-
-/**
- * 多脸闸门状态：默认拒绝；给照片测试放开时，取画面里面积最大的那张。
- * 必须在界面上可见 —— 放开之后"存进去的是谁"就没有保证了。
- */
-const multiFaceText = computed(() => {
-  const s = status.value
-  if (!s) return '—'
-  return s.rejectMultipleFaces === false ? '已放行（取最大那张）' : '拒绝'
-})
-
-/**
- * 特征模型的**短名**。
- *
- * modelId 的完整形态是 `cv:face_recognition_arcface_w600k_r50.onnx:<sha16>:512`，
- * 直接摆进这一行会折成两行、还挤掉了真正的信息（维度）。这里只保留
- * 权重短名 + 维度，完整值留在 title 里按需悬停查看。
- */
-const modelText = computed(() => {
-  const raw = status.value?.modelId
-  if (!raw) return '—'
-  const p = raw.split(':')
-  const dim = p[p.length - 1]
-  if (p.length < 4) return `${p[0]} · ${dim} 维`
-  const weight = p[1].replace(/\.onnx$/i, '').replace(/^face_recognition_/i, '')
-  return `${weight} · ${dim} 维`
-})
 
 async function load() {
   error.value = ''
@@ -185,19 +152,6 @@ async function submit() {
       <div class="sec__row">
         <span class="sec__label">判定阈值</span>
         <span class="sec__value">{{ status?.threshold != null ? status.threshold.toFixed(2) : '—' }}</span>
-      </div>
-      <div class="sec__row">
-        <span class="sec__label">活体判定</span>
-        <span class="sec__value">{{ padText }}</span>
-      </div>
-      <div class="sec__row">
-        <span class="sec__label">特征模型</span>
-        <span class="sec__value" :title="status?.modelId || ''">{{ modelText }}</span>
-      </div>
-
-      <div class="sec__row">
-        <span class="sec__label">多脸画面</span>
-        <span class="sec__value">{{ multiFaceText }}</span>
       </div>
 
       <!-- 模板与模型绑定：换了权重，旧模板不能再比，必须明确告诉用户"重新录" -->

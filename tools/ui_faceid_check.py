@@ -121,6 +121,18 @@ async def run_ui(ws_url, ticket, user_json):
         cards = await js(
             "[...document.querySelectorAll('h3')].map(e => (e.textContent || '').trim())"
         )
+        # 卡片自身的状态行标签（只取「纯人脸登录」那张 section，别串到左边的第二因子卡）
+        card_labels = await js(
+            "(() => { const h = [...document.querySelectorAll('h3')]"
+            ".find(e => (e.textContent || '').includes('纯人脸登录'));"
+            "if (!h) return []; const s = h.closest('section'); if (!s) return [];"
+            "return [...s.querySelectorAll('.sec__label')].map(e => (e.textContent || '').trim()); })()"
+        ) or []
+        card_text = await js(
+            "(() => { const h = [...document.querySelectorAll('h3')]"
+            ".find(e => (e.textContent || '').includes('纯人脸登录'));"
+            "if (!h) return ''; const s = h.closest('section'); return s ? s.innerText : ''; })()"
+        ) or ""
 
         shot = await cmd("Page.captureScreenshot", {"format": "png"})
         data = (shot.get("result") or {}).get("data")
@@ -173,7 +185,7 @@ async def run_ui(ws_url, ticket, user_json):
             with open(SHOT_LOGIN, "wb") as f:
                 f.write(base64.b64decode(data2))
 
-        return (clicked, text, cards, dlg_opened, dlg_text, pw_inputs,
+        return (clicked, text, cards, card_labels, card_text, dlg_opened, dlg_text, pw_inputs,
                 login_text, tab_clicked, faceid_text)
 
 
@@ -215,7 +227,7 @@ def main():
         ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
         ws_url = wait_target()
-        (clicked, text, cards, dlg_opened, dlg_text, pw_inputs,
+        (clicked, text, cards, card_labels, card_text, dlg_opened, dlg_text, pw_inputs,
          login_text, tab_clicked, faceid_text) = asyncio.run(
             run_ui(ws_url, ticket, user_json))
 
@@ -223,11 +235,12 @@ def main():
             ("侧边栏可切换到账号页", clicked == "clicked", clicked),
             ("存在「刷脸登录」卡片（第二因子）", "刷脸登录" in (cards or []), cards),
             ("存在「纯人脸登录」卡片（独立登录方式）", "纯人脸登录" in (cards or []), cards),
-            ("卡片显示录入状态", "录入状态" in text and "未录入" in text, ""),
-            ("卡片显示特征模型（短名 + 维度，不折行）",
-             "特征模型" in text and "维" in text and "face_recognition_" not in text, ""),
-            ("卡片保留活体状态与多脸画面两行", "活体判定" in text and "多脸画面" in text, ""),
-            ("卡片提供录入入口", "录入人脸" in text or "追加一张人脸" in text, ""),
+            # 用户 10-19 定稿：这张卡只留三项，其余参数一律不摆到界面上
+            ("★ 卡片只有三项状态行（录入状态/最近录入/判定阈值）",
+             card_labels == ["录入状态", "最近录入", "判定阈值"], card_labels),
+            ("★ 卡片不再展示活体 / 特征模型 / 多脸参数",
+             not any(k in card_text for k in ("活体判定", "特征模型", "多脸画面")), ""),
+            ("卡片提供录入入口", "录入人脸" in card_text or "追加一张人脸" in card_text, ""),
             ("账号页截图已生成", os.path.exists(SHOT), SHOT),
             # ---- P2：新建账号的初始口令固定（用户报"新账号密码=管理员密码"）----
             ("用户管理页可打开「新建账号」弹窗", dlg_opened == "clicked", dlg_opened),
