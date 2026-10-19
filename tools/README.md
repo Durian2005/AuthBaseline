@@ -77,6 +77,36 @@ Debug 构建与发布链路隔着 Publish 与 NSIS 两层，行为**不保证一
 
 ⚠️ `tools/fixtures/` 里是**真人的脸**，已列入 `.gitignore`，不得入库。
 
+### A4. 纯人脸登录（FaceId）P0 评测（不连库、不连后端）
+
+对应 `AuthServer/Services/FaceId/`（YuNet + ArcFace w600k_r50，**无活体、独立模块**）。
+结论与证据见 `docs/reports/FACEID-P0-BASELINE-REPORT.md`。
+
+**独立 Python 环境**（与系统 Python 隔离；`opencv-python` 必须 <5，5.x 移除了
+`FaceDetectorYN.create` 小写入口）：
+
+```bash
+python -m venv .venv-faceid
+.venv-faceid/Scripts/pip install numpy onnxruntime "opencv-python<5" pymongo
+```
+
+| 文件 | 作用 | 需要什么 |
+|---|---|---|
+| `faceid_stage0_check.py` | **Stage 0 对照**：C# CLI（`AuthServer.exe --faceid-embed <图...>`）与 Python 参考管线逐位等价，判据 min(cos) ≥ 0.999。默认图片源 `tools/fixtures/face/` | Debug 构建 + 两个 onnx |
+| `faceid_lfw_eval.py` | **LFW 子集评测**：1500 正 + 1500 负对（固定种子），出 acc@阈值 / EER / TAR@FAR。import Stage 0 脚本复用参考管线（不复制，防两处漂移） | 同左 + LFW 数据 |
+
+数据与模型（**都不入库**）：
+
+- LFW：官方站点不可达时从 ModelScope `Composable/labeled_faces_in_the_wild` 下载，
+  解压到 `.workbuddy/tmp/lfw/`（结构 `lfw-deepfunneled/lfw-deepfunneled/<人物>/<图片>`）。
+- ArcFace 权重：`AuthServer/face-models/face_recognition_arcface_w600k_r50.onnx`
+  （174,383,860 字节，sha256 `4c06341c33c2ca1f86781dab0e829f88ad5b64be9fba56e56bc9ebdefc619e43`），
+  上游仅授权**非商业研究**用途，下载与校验方式见 `AuthServer/face-models/README.md`。
+
+⚠️ 两个坑（脚本内已处理，改脚本前先读）：① OpenCV 读不了**中文路径**下的 onnx
+（本仓库目录名就含中文）—— 先镜像到 ASCII 目录再加载；② .NET 控制台按 GBK 回显，
+Python 侧按字节接、`errors="replace"` 容错解码。
+
 ### B. 端到端 / 验收
 
 | 文件 | 作用 | 门禁 |
