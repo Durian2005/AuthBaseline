@@ -75,6 +75,23 @@ const multiFaceText = computed(() => {
   return s.rejectMultipleFaces === false ? '已放行（取最大那张）' : '拒绝'
 })
 
+/**
+ * 特征模型的**短名**。
+ *
+ * modelId 的完整形态是 `cv:face_recognition_arcface_w600k_r50.onnx:<sha16>:512`，
+ * 直接摆进这一行会折成两行、还挤掉了真正的信息（维度）。这里只保留
+ * 权重短名 + 维度，完整值留在 title 里按需悬停查看。
+ */
+const modelText = computed(() => {
+  const raw = status.value?.modelId
+  if (!raw) return '—'
+  const p = raw.split(':')
+  const dim = p[p.length - 1]
+  if (p.length < 4) return `${p[0]} · ${dim} 维`
+  const weight = p[1].replace(/\.onnx$/i, '').replace(/^face_recognition_/i, '')
+  return `${weight} · ${dim} 维`
+})
+
 async function load() {
   error.value = ''
   try {
@@ -175,19 +192,12 @@ async function submit() {
       </div>
       <div class="sec__row">
         <span class="sec__label">特征模型</span>
-        <span class="sec__value mono">{{ status?.modelId || '—' }}</span>
+        <span class="sec__value" :title="status?.modelId || ''">{{ modelText }}</span>
       </div>
 
       <div class="sec__row">
         <span class="sec__label">多脸画面</span>
         <span class="sec__value">{{ multiFaceText }}</span>
-      </div>
-
-      <!-- 活体关闭是**默认状态**，必须在界面上说清楚，否则会被读成"本模块有反欺骗" -->
-      <div v-if="status && !status.padEnabled" class="hint hint--warn">
-        <AppIcon name="alert-triangle" :size="14" :stroke-width="2" />
-        <span>活体判定已关闭：手举照片也能录入。这是用照片做识别测试的默认模式；需要反欺骗时设
-          <code>AUTHBASELINE_FACEID_PAD_ENABLED=true</code> 重启后端。</span>
       </div>
 
       <!-- 模板与模型绑定：换了权重，旧模板不能再比，必须明确告诉用户"重新录" -->
@@ -209,11 +219,11 @@ async function submit() {
 
         <p v-if="mode === 'enroll'" class="hint">
           <AppIcon name="info" :size="13" />
-          <span>点下按钮后请正对摄像头约 1 秒：画面由服务端采集，不落盘、不进审计。</span>
+          <span>点下按钮后请正对摄像头约 1 秒。</span>
         </p>
         <p v-else class="hint hint--warn">
           <AppIcon name="alert-triangle" :size="13" :stroke-width="2" />
-          <span>删除后该账号只能使用口令登录，人脸模板不可恢复。</span>
+          <span>删除后只能口令登录，人脸模板不可恢复。</span>
         </p>
 
         <div class="actions">
@@ -241,17 +251,6 @@ async function submit() {
           <span>删除人脸</span>
         </button>
       </div>
-
-      <ul class="tips">
-        <li>
-          <AppIcon name="check-circle" :size="13" />
-          录入与删除都需要<strong>重新输入当前口令</strong>，输错会累计失败次数
-        </li>
-        <li>
-          <AppIcon name="check-circle" :size="13" />
-          模板以 AES-GCM 加密存储，只存特征、不存照片；换模型后旧模板自动作废
-        </li>
-      </ul>
     </div>
   </section>
 </template>
@@ -277,10 +276,6 @@ async function submit() {
   color: var(--c-text);
   text-align: right;
   word-break: break-all;
-}
-.mono {
-  font-family: var(--font-mono);
-  font-size: var(--fs-sm);
 }
 
 .pill {
@@ -364,27 +359,5 @@ async function submit() {
 }
 .hint--warn > svg {
   color: var(--c-warn);
-}
-
-.tips {
-  display: flex;
-  flex-direction: column;
-  gap: var(--sp-2);
-  margin: 0;
-  padding: 0;
-  list-style: none;
-}
-.tips li {
-  display: flex;
-  align-items: flex-start;
-  gap: var(--sp-2);
-  font-size: var(--fs-sm);
-  line-height: 1.5;
-  color: var(--c-text-muted);
-}
-.tips svg {
-  flex-shrink: 0;
-  margin-top: 2px;
-  color: var(--st-enabled-fg);
 }
 </style>

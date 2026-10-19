@@ -224,8 +224,10 @@ def main():
             ("存在「刷脸登录」卡片（第二因子）", "刷脸登录" in (cards or []), cards),
             ("存在「纯人脸登录」卡片（独立登录方式）", "纯人脸登录" in (cards or []), cards),
             ("卡片显示录入状态", "录入状态" in text and "未录入" in text, ""),
-            ("卡片显示特征模型身份", "特征模型" in text and "stub:" in text, ""),
-            ("卡片声明二次口令要求", "重新输入当前口令" in text, ""),
+            ("卡片显示特征模型（短名 + 维度，不折行）",
+             "特征模型" in text and "维" in text and "face_recognition_" not in text, ""),
+            ("卡片保留活体状态与多脸画面两行", "活体判定" in text and "多脸画面" in text, ""),
+            ("卡片提供录入入口", "录入人脸" in text or "追加一张人脸" in text, ""),
             ("账号页截图已生成", os.path.exists(SHOT), SHOT),
             # ---- P2：新建账号的初始口令固定（用户报"新账号密码=管理员密码"）----
             ("用户管理页可打开「新建账号」弹窗", dlg_opened == "clicked", dlg_opened),
