@@ -14,8 +14,12 @@ namespace AuthServer.Services.FaceId;
  * 不需要 pepper / 数据库 / 证书）。
  *
  * 输出（每张图一行，TSV）：
- *   <路径> \t <维度> \t f0,f1,...,fN      （R 格式， round-trip 精度， InvariantCulture）
- * 读不到图 / 检测不到脸 / 提不出特征 ⇒ 该行进 stderr，退出码非 0。
+ *   <输入序号> \t <维度> \t f0,f1,...,fN    （R 格式， round-trip 精度， InvariantCulture）
+ *
+ * ⚠️ 第一列是**序号**而不是路径：中文 Windows 下 C# 控制台按 GBK 输出，
+ *    含中文的路径回显到管道后会被调用方打成 U+FFFD，按路径精确配对所有图都失败。
+ *    序号由调用方自己映射回路径 —— 输入顺序即输出顺序，缺行代表该图失败。
+ *    失败原因（读图失败 / 没检测到脸 / 提不出特征）走 stderr，退出码非 0。
  */
 public static class FaceIdEmbedCli
 {
@@ -42,8 +46,10 @@ public static class FaceIdEmbedCli
         }
 
         int failed = 0;
-        foreach (var path in paths)
+        for (int i = 0; i < paths.Length; i++)
         {
+            var path = paths[i];
+
             using var mat = Cv2.ImRead(path, ImreadModes.Color);
             if (mat.Empty())
             {
@@ -71,7 +77,7 @@ public static class FaceIdEmbedCli
 
             var line = string.Join(",", feature.Select(f =>
                 f.ToString("R", System.Globalization.CultureInfo.InvariantCulture)));
-            Console.WriteLine($"{path}\t{feature.Length}\t{line}");
+            Console.WriteLine($"{i}\t{feature.Length}\t{line}");
         }
 
         return failed == 0 ? 0 : 4;

@@ -8,13 +8,15 @@
 | `face_detection_yunet_2023mar.onnx` | 232,589 | 人脸检测（YuNet，2FA 与 FaceId 两个模块共用） | MIT | 是 |
 | `face_recognition_sface_2021dec.onnx` | 38,696,353 | 人脸 2FA 的特征提取（SFace） | Apache-2.0 | 是 |
 | `face_recognition_arcface_w600k_r50.onnx` | 174,383,860 | FaceId（纯人脸登录）的特征提取（ArcFace，Glint360K 训练，512 维） | **仅限非商业研究** | **否，见下文** |
+| `minifasnet_v2_80x80.onnx` | 1,743,495 | FaceId 的活体判定（MiniFASNetV2，80×80，三分类 [打印/真人/回放]） | Apache-2.0 | 是 |
 
 许可证原文已随模型一并放在本目录：
 
 - `LICENSE_yunet.txt` — MIT，`Copyright (c) 2020 Shiqi Yu <shiqi.yu@gmail.com>`
 - `LICENSE_sface.txt` — Apache License 2.0（上游文件中的版权人为未填写的占位符，照原样保留）
+- `LICENSE_minifasnet.txt` — Apache License 2.0（minivision-ai/Silent-Face-Anti-Spoofing）
 
-**再分发时请一并保留这两个许可证文件。**
+**再分发时请一并保留这三个许可证文件。**
 
 ## 校验值（SHA-256）
 
@@ -22,6 +24,7 @@
 8f2383e4dd3cfbb4553ea8718107fc0423210dc964f9f4280604804ed2552fa4  face_detection_yunet_2023mar.onnx
 0ba9fbfa01b5270c96627c4ef784da859931e02f04419c829e83484087c34e79  face_recognition_sface_2021dec.onnx
 4c06341c33c2ca1f86781dab0e829f88ad5b64be9fba56e56bc9ebdefc619e43  face_recognition_arcface_w600k_r50.onnx
+fa2cddb678630906f7b60b0f63b2d31c413ee2ee158b4f3a9b42ea2a6de4309f  minifasnet_v2_80x80.onnx
 ```
 
 ## ArcFace 权重：研究许可，**不入库**
@@ -75,3 +78,24 @@ sha256sum face_recognition_arcface_w600k_r50.onnx
   （路径按 ANSI 编组后变成乱码）。`CvFaceEngine.EnsureAsciiModel()` 会先把模型镜像到
   `%LOCALAPPDATA%\AuthBaselineData\face-models\<路径哈希>\` 再加载，因此本项目
   **不需要**任何环境变量来指定模型位置。
+
+## MiniFASNetV2（活体判定）：来源与**预处理红线**
+
+上游是 [minivision-ai/Silent-Face-Anti-Spoofing](https://github.com/minivision-ai/Silent-Face-Anti-Spoofing)
+（Apache-2.0）。上游只发布 PyTorch `.pth`，本文件是对上游模型定义与权重的 ONNX 导出
+（固定 80×80 输入、NCHW），来自 `leandroveronezi/go-onnxface` 的 `models-v1` release，
+**SHA-256 由我们实测并锁定在上面那张表里**。
+
+预处理是这套分数的地基，改任何一项都不会报错、只会安静地给出错分数：
+
+| 项 | 取值 | 说明 |
+|---|---|---|
+| 裁剪 | 检测框中心扩 **2.7 倍**，夹到画面内 | 上游文件名里的 2.7 就是这个数 |
+| 尺寸 | resize **80×80**，**不做五点对齐** | 模型是在"原样裁块"上训练的，对齐反而会破坏纹理线索 |
+| 通道 | **BGR**，不交换 R/B | 与上游 `cv2.imread` 的次序一致 |
+| 数值 | **保持 0–255，绝不除 255** | 实测：除 255 后 46 帧真人样本被全军判成 replay |
+| 输出 | 3 类 softmax `[print, live, replay]`，活体分取 `p[live]` | 索引顺序来自上游训练标签 |
+
+⚠️ 另一个来源（garciafido / deepface 的导出）实测**输出对输入几乎不敏感**
+（46 帧之间的概率差 < 0.001），已弃用；换模型前必须先用
+`tools/faceid_pad_check.py --compare` 验证"分数确实随画面变化"。

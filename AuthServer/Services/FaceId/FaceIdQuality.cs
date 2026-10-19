@@ -76,7 +76,8 @@ public static class FaceIdQuality
     /// 按配置的阈值判定一帧。
     /// </summary>
     public static FaceIdQualityResult Evaluate(FaceIdQualitySample sample, FaceIdOptions opt) =>
-        Evaluate(sample, opt.MinFaceWidthRatio, opt.MaxYawRatio, opt.MaxRollRatio, opt.MinSharpness);
+        Evaluate(sample, opt.MinFaceWidthRatio, opt.MaxYawRatio, opt.MaxRollRatio, opt.MinSharpness,
+            opt.RejectMultipleFaces);
 
     /// <summary>
     /// 判定一帧（阈值显式传入，便于单测把边界钉死，不依赖配置类）。
@@ -85,8 +86,14 @@ public static class FaceIdQuality
     /// <param name="maxYawRatio">鼻尖水平偏移 / 双眼间距 的上限（绝对值）。</param>
     /// <param name="maxRollRatio">双眼连线 |dy| / |dx| 的上限。</param>
     /// <param name="minSharpness">拉普拉斯方差下限；sample.Sharpness 为 null 时跳过。</param>
+    /// <param name="rejectMultipleFaces">
+    /// 出现第二张脸时是否拒绝。默认 true。置 false 只用于"用照片做识别测试"：
+    /// 举着手机时操作者自己的脸常常同框，此时取面积最大那张即可。
+    /// ⚠️ 这不是放宽体验，而是放弃"存的是谁"的保证 —— 调用点必须明确知道自己在做什么。
+    /// </param>
     public static FaceIdQualityResult Evaluate(FaceIdQualitySample sample,
-        double minWidthRatio, double maxYawRatio, double maxRollRatio, double minSharpness)
+        double minWidthRatio, double maxYawRatio, double maxRollRatio, double minSharpness,
+        bool rejectMultipleFaces = true)
     {
         var yaw = YawRatio(sample.Points);
         var roll = RollRatio(sample.Points);
@@ -98,7 +105,7 @@ public static class FaceIdQuality
         if (sample.FaceCount <= 0)
             return new FaceIdQualityResult(FaceIdQualityVerdict.NoFace, diagnostic);
 
-        if (sample.FaceCount > 1)
+        if (rejectMultipleFaces && sample.FaceCount > 1)
             return new FaceIdQualityResult(FaceIdQualityVerdict.MultipleFaces, diagnostic);
 
         // 帧宽缺失/为 0 属于调用方传错，但也不能放行 —— fail closed。

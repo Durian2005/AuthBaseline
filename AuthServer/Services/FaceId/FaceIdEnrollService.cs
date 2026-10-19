@@ -32,12 +32,15 @@ public sealed class FaceIdEnrollService
 {
     private readonly FaceIdOptions _opt;
     private readonly IFaceIdEngine _engine;
+    private readonly IFaceIdLiveness _liveness;
     private readonly FaceIdTemplateStore _store;
 
-    public FaceIdEnrollService(FaceIdOptions opt, IFaceIdEngine engine, FaceIdTemplateStore store)
+    public FaceIdEnrollService(FaceIdOptions opt, IFaceIdEngine engine,
+        IFaceIdLiveness liveness, FaceIdTemplateStore store)
     {
         _opt = opt;
         _engine = engine;
+        _liveness = liveness;
         _store = store;
     }
 
@@ -46,6 +49,10 @@ public sealed class FaceIdEnrollService
     public double Threshold => _opt.Threshold;
     public int MaxTemplates => _opt.MaxTemplates;
     public string ModelId => _store.ModelId;
+    public bool PadEnabled => _opt.PadEnabled;
+    public double PadMinLive => _opt.PadMinLive;
+    public FaceIdLivenessStatus PadStatus => _liveness.Status;
+    public bool RejectMultipleFaces => _opt.RejectMultipleFaces;
 
     /// <summary>失败结果的统一构造（业务码 → 审计码的映射只走 FaceIdCodes）。</summary>
     private static FaceIdEnrollOutcome Fail(string businessCode, string diagnostic,
@@ -81,11 +88,19 @@ public sealed class FaceIdEnrollService
         if (!_store.KeyAvailable)
             return EngineUnavailable("本机模板加密密钥不可用");
 
+        // 活体判定不可用 ⇒ **fail closed**（同 P1a 的密钥分支）。
+        // 为什么不能"跳过活体继续录"：那样一来，删掉一个 1.7MB 的 onnx 文件
+        // 就等于关掉全部反欺骗 —— 最省事的那条路，恰恰是最不该存在的绕过。
+        if (_opt.PadEnabled && !_liveness.Status.Ready)
+            return EngineUnavailable($"活体判定不可用：{_liveness.Status.Message}");
+
         var openError = _engine.TryOpen();
         if (openError is not null) return EngineUnavailable(openError);
 
         FaceIdQualityVerdict worst = FaceIdQualityVerdict.Pass;
         var framesRead = 0;
+        var padRejected = 0;
+        double? padBest = null;
         var diagnostics = new List<string>(3);
         double[]? feature = null;
 
@@ -125,6 +140,26 @@ public sealed class FaceIdEnrollService
                     continue;
                 }
 
+                // 活体判定排**质量闸门之后**：质量不过的帧连"是不是人脸"都存疑，
+                // 拿去问活体模型只会得到噪声；而且先把"太远/太糊"报出来对用户更有用
+                // —— 那类原因他能自己纠正，而"未通过活体检测"他只能莫名其妙。
+                if (_opt.PadEnabled)
+                {
+                    var live = _liveness.Score(frame, box!);
+                    if (live is null)
+                        return EngineUnavailable("活体判定没有给出结论（模型未就绪或单帧推理失败）");
+
+                    if (live.Value < _opt.PadMinLive)
+                    {
+                        padRejected++;
+                        if (padBest is null || live.Value > padBest.Value) padBest = live.Value;
+                        if (diagnostics.Count < 3)
+                            diagnostics.Add($"liveness={live.Value:F3}<{_opt.PadMinLive:F2}");
+                        SleepBetweenFrames();
+                        continue;
+                    }
+                }
+
                 // 闸门过了才提特征。提不出来（关键点退化/对齐失败）等同于"这一帧不可用"，
                 // 但原因归到质量而不是"人脸不像"—— 录入阶段根本没有比对的语义。
                 feature = _engine.Feature(frame, box!);
@@ -144,7 +179,9 @@ public sealed class FaceIdEnrollService
             _engine.Close();
         }
 
-        var trace = $"frames={framesRead} worst={worst} | " + string.Join(" ; ", diagnostics);
+        var trace = $"frames={framesRead} worst={worst} pad_rejected={padRejected}"
+            + (padBest is null ? string.Empty : $" best_live={padBest.Value:F3}")
+            + " | " + string.Join(" ; ", diagnostics);
 
         if (feature is null)
         {
@@ -152,6 +189,12 @@ public sealed class FaceIdEnrollService
             // 报"引擎不可用"比报"没检测到人脸"更接近事实。
             if (framesRead == 0)
                 return EngineUnavailable("摄像头没有返回任何画面");
+
+            // 有帧过了质量闸门、却没通过活体 ⇒ 报活体失败，**优先于**质量类原因。
+            // 依据：能过质量闸门的帧已经"是张干净的脸"，此时剩下的解释只有"这张脸不像真的"；
+            // 报"糊 / 太远"会把用户的注意力引到完全无关的地方，也会让审计读不出攻击意图。
+            if (padRejected > 0)
+                return Fail(BusinessCode.FaceIdLivenessFailed, trace);
 
             var code = FaceIdCodes.BusinessCodeFor(worst == FaceIdQualityVerdict.Pass
                 ? FaceIdQualityVerdict.NoFace   // 理论上到不了：Pass 却拿不到特征，按最保守的原因报

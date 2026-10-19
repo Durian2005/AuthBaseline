@@ -78,6 +78,29 @@ public class FaceIdQualityTests
         Assert.Equal(FaceIdQualityVerdict.MultipleFaces, r.Verdict);
     }
 
+    /// <summary>
+    /// 多脸闸门可以**显式关掉**：用照片做识别测试时（明星各年龄段 / 双胞胎 / 特殊人群
+    /// 都找不到真人来配合），举着手机的人自己很容易入镜，此时取面积最大那张即可。
+    ///
+    /// 这条断言钉两件事：
+    ///   ① 关掉之后多脸不再是否决项，其它判据照常生效（这里给的是标准正脸 ⇒ Pass）；
+    ///   ② **默认值必须是 true** —— 关掉等于放弃"存进去的是谁"，不能是默认行为。
+    /// </summary>
+    [Fact(DisplayName = "多脸闸门可显式关闭（照片测试），默认仍为拒绝")]
+    public void MultipleFaces_CanBeAllowedForPhotoTesting()
+    {
+        var relaxed = FaceIdQuality.Evaluate(Sample(faces: 2), MinWidth, MaxYaw, MaxRoll, MinSharp,
+            rejectMultipleFaces: false);
+        Assert.Equal(FaceIdQualityVerdict.Pass, relaxed.Verdict);
+
+        // 关掉多脸不等于关掉其它判据：太小/侧脸照样拒。
+        var tooSmall = FaceIdQuality.Evaluate(Sample(faces: 2, width: 20), MinWidth, MaxYaw, MaxRoll,
+            MinSharp, rejectMultipleFaces: false);
+        Assert.Equal(FaceIdQualityVerdict.TooSmall, tooSmall.Verdict);
+
+        Assert.True(new FaceIdOptions().RejectMultipleFaces, "默认必须拒绝多脸（照片测试是 opt-in）");
+    }
+
     // ─────────────────────────────── 二、尺寸边界
 
     /// <summary>

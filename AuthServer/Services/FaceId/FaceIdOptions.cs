@@ -66,6 +66,50 @@ public class FaceIdOptions
     /// </summary>
     public string RecognizerModel { get; set; } = "face-models/face_recognition_arcface_w600k_r50.onnx";
 
+    // ── 活体判定（PAD，P1b） ────────────────────────────────────────
+
+    /// <summary>
+    /// 是否启用活体判定。**默认关**（从"默认开"改回来的，理由必须写清楚）：
+    ///   本项目的验收方式就是**手举照片对着镜头测**，默认开着会把这套流程整个堵死
+    ///   —— 拿不到"能被识别"的画面，就测不了相似度、灰区、计次、锁定这些真正要验的东西。
+    ///   所以这里把活体做成 **opt-in 硬化**：想演示"照片能不能过"时开一行环境变量即可：
+    ///       AUTHBASELINE_FACEID_PAD_ENABLED=true
+    ///   开启后的效果已标定过：阈值 0.70 下三类翻拍 0/120 通过、真人单帧 91% 通过
+    ///   （见 docs/reports/FACEID-P1B-PAD-REPORT.md）。
+    ///
+    /// ⚠️ 口径：默认关闭意味着**本模块当前没有反欺骗能力** —— 照片对着镜头就能录、能登。
+    ///    界面与文档都必须如实标"活体判定：关闭"，不能让人以为有 PAD 保护。
+    /// </summary>
+    public bool PadEnabled { get; set; } = false;
+
+    /// <summary>
+    /// 活体阈值：p(live) 低于它就判"疑似攻击"。
+    ///
+    /// ⚠️ 0.70 是**起点**，不是标定结论（同下面的质量闸门）：
+    ///    方向已定（偏安全：宁可误拒真人、不让照片过关），具体数值要等真机样本扫。
+    ///    真机样本上的实测分布见 docs/reports/FACEID-P1B-PAD-REPORT.md。
+    /// </summary>
+    public double PadMinLive { get; set; } = 0.70;
+
+    /// <summary>
+    /// 画面里出现**第二张脸**时是否直接拒绝。默认 true。
+    ///
+    /// 关掉只在"用照片做识别测试"的场景下成立：举着手机时操作者自己的脸很容易同框，
+    /// 而测试集（不同人种 / 明星各年龄段 / 双胞胎 / 特殊人群）本来就找不到真人来配合。
+    /// 关掉后取**面积最大**的那张脸。
+    ///
+    /// ⚠️ 关掉等于放弃"存进模板的是谁"这一保证（可能出现"想录 A、实际存了 B"）。
+    ///    只在受控测试环境用；界面与日志都会标出这一点。
+    /// </summary>
+    public bool RejectMultipleFaces { get; set; } = true;
+
+    /// <summary>
+    /// 活体模型（MiniFASNetV2，80×80，三分类 [print, live, replay]）。
+    /// Apache-2.0 ⇒ 可随仓库与安装包分发（与 ArcFace 的"仅非商业研究"不同）。
+    /// ⚠️ 预处理红线见 CvFaceIdLiveness 的类头注释：除 255 会让真人永远录不进去。
+    /// </summary>
+    public string PadModel { get; set; } = "face-models/minifasnet_v2_80x80.onnx";
+
     public int CameraIndex { get; set; } = 0;
 
     /// <summary>
@@ -186,6 +230,25 @@ public class FaceIdOptions
         var maxTemplates = Environment.GetEnvironmentVariable("AUTHBASELINE_FACEID_MAX_TEMPLATES");
         if (!string.IsNullOrWhiteSpace(maxTemplates) && int.TryParse(maxTemplates.Trim(), out var mt) && mt > 0)
             MaxTemplates = mt;
+
+        // 活体判定：探针需要验证"挡住"与"放行"两个方向，以及"模型缺失 ⇒ fail closed"，
+        // 所以开关与阈值都必须能在同一次构建上用环境变量切换。
+        var padEnabled = Environment.GetEnvironmentVariable("AUTHBASELINE_FACEID_PAD_ENABLED");
+        if (!string.IsNullOrWhiteSpace(padEnabled))
+            PadEnabled = !padEnabled.Trim().Equals("false", StringComparison.OrdinalIgnoreCase)
+                         && padEnabled.Trim() != "0";
+
+        // 多脸放行：照片测试时需要（举手机的人自己会入镜）。
+        var allowMulti = Environment.GetEnvironmentVariable("AUTHBASELINE_FACEID_ALLOW_MULTI_FACE");
+        if (!string.IsNullOrWhiteSpace(allowMulti))
+            RejectMultipleFaces = !(allowMulti.Trim().Equals("true", StringComparison.OrdinalIgnoreCase)
+                                    || allowMulti.Trim() == "1");
+
+        var padMinLive = Environment.GetEnvironmentVariable("AUTHBASELINE_FACEID_PAD_MIN_LIVE");
+        if (!string.IsNullOrWhiteSpace(padMinLive)
+            && double.TryParse(padMinLive.Trim(), System.Globalization.NumberStyles.Float,
+                System.Globalization.CultureInfo.InvariantCulture, out var pl))
+            PadMinLive = pl;
     }
 
     /// <summary>是否走假引擎。</summary>
@@ -194,6 +257,7 @@ public class FaceIdOptions
     /// <summary>把模型路径解析成绝对路径（相对路径按 exe 所在目录）。</summary>
     public string ResolveDetector() => Resolve(DetectorModel);
     public string ResolveRecognizer() => Resolve(RecognizerModel);
+    public string ResolvePadModel() => Resolve(PadModel);
 
     private static string Resolve(string path) =>
         Path.IsPathRooted(path) ? path : Path.Combine(AppContext.BaseDirectory, path);
