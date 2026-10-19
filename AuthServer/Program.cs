@@ -25,6 +25,10 @@ public class Program
         // 它们的存在是为了把"真实摄像头上的动作判定"变成可反复回放的回归样本。
         if (FaceFixtureCli.IsFixtureCommand(args))
             return FaceFixtureCli.Run(args);
+        // FaceId 嵌入导出：与 pepper/fixture 同理，必须在 CreateBuilder 之前截住。
+        // 只跑引擎、不启 Web 主机，用于 P0 Stage 0 的 C#/Python 嵌入对照实验。
+        if (AuthServer.Services.FaceId.FaceIdEmbedCli.IsCommand(args))
+            return AuthServer.Services.FaceId.FaceIdEmbedCli.Run(args);
 
         var builder = WebApplication.CreateBuilder(args);
 
@@ -189,6 +193,20 @@ public class Program
         // "要不要人脸、这轮算不算失败"全部收在这一处（见 FaceLoginService 注释）。
         builder.Services.AddSingleton<AuthServer.Services.Face.FaceLoginService>();
 
+        // ---- 纯人脸登录（FaceId，独立模块，无活体） ----
+        // 与人脸 2FA 是两套完全独立的引擎/配置/端点：这里不共用任何实例，
+        // 两个模块各自加载自己的检测器与识别器（可以共用同一个 YuNet 模型文件，
+        // 那只是数据不是代码）。删除其中任何一个模块都不影响另一个。
+        var faceIdOptions = new AuthServer.Services.FaceId.FaceIdOptions();
+        builder.Configuration.GetSection(AuthServer.Services.FaceId.FaceIdOptions.SectionName).Bind(faceIdOptions);
+        faceIdOptions.ApplyEnvironmentOverrides();
+        builder.Services.AddSingleton(faceIdOptions);
+
+        AuthServer.Services.FaceId.IFaceIdEngine faceIdEngine = faceIdOptions.UseStubEngine
+            ? new AuthServer.Services.FaceId.StubFaceIdEngine(faceIdOptions)
+            : new AuthServer.Services.FaceId.CvFaceIdEngine(faceIdOptions);
+        builder.Services.AddSingleton(faceIdEngine);
+
         // 允许前端跨域访问
         builder.Services.AddCors(options =>
         {
@@ -237,6 +255,21 @@ public class Program
             Console.WriteLine(st.Ready
                 ? $"[Face] 第二因子已就绪（账号级可选启用）· 阈值 {faceOptions.Threshold:F2} · 每人上限 {faceOptions.MaxTemplates} 张"
                 : $"[Face] 引擎不可用，第二因子将整体降级：{st.Message}");
+        }
+
+        // 纯人脸登录：同样把"当前处在什么档位"讲清楚，
+        // 避免"以为开了免密人脸登录、其实引擎根本没起来"
+        if (!faceIdOptions.Enabled)
+        {
+            Console.WriteLine("[FaceId] 纯人脸登录已关闭（FaceId:Enabled=false）。");
+        }
+        else
+        {
+            var faceIdStatus = faceIdEngine.Status;
+            Console.WriteLine(faceIdStatus.Ready
+                ? $"[FaceId] 纯人脸登录已就绪（用户名 + 人脸，无活体）· 阈值 {faceIdOptions.Threshold:F2}"
+                  + $" · 灰区 ±{faceIdOptions.GrayBand:F2} · 每人上限 {faceIdOptions.MaxTemplates} 张"
+                : $"[FaceId] 引擎不可用，纯人脸登录将整体降级：{faceIdStatus.Message}");
         }
 
         // Configure the HTTP request pipeline.

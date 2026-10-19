@@ -85,3 +85,8 @@ __pycache__/
 # 人脸动作挑战的录制帧（fixture）——**里面是真人的脸**（连拍），只在本机用。
 # 回放工具见 tools/face_fixture_check.py；录制命令见 AuthServer --face-record。
 tools/fixtures/
+
+# ArcFace（w600k_r50，insightface）权重：上游仅授权**非商业研究**用途，
+# 因此不进公开仓库；装机/评测需要时按 AuthServer/face-models/README.md
+# 的说明下载并用 SHA-256 校验。YuNet/SFace 为 MIT/Apache-2.0，继续随仓库分发。
+AuthServer/face-models/face_recognition_arcface_w600k_r50.onnx
