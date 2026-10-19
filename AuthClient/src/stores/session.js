@@ -7,6 +7,7 @@ import { ROLES, ROLE_LABELS } from './roles'
 import { useAdminDomain } from './domains/adminDomain'
 import { useAuditDomain } from './domains/auditDomain'
 import { useFaceDomain } from './domains/faceDomain'
+import { useFaceIdDomain } from './domains/faceIdDomain'
 
 // 角色常量对外仍从本模块导出（历史引用点不变），定义在 ./roles.js。
 export { ROLES, ROLE_LABELS }
@@ -157,6 +158,10 @@ export const useSessionStore = defineStore('session', () => {
   // 人脸域不需要 currentUser / persist：后端用**票据**判定"本人是谁"，
   // 前端连用户名都不用传（请求体里根本没有这个字段）。
   const face = useFaceDomain({ markOnline, fail })
+
+  // 纯人脸登录（FaceId）是**独立的第二登录方式**，与 face（第二因子）互不引用。
+  // 拆成两个域的直接收益：两张卡片各有自己的 busy / status，操作其一不会锁住另一张。
+  const faceId = useFaceIdDomain({ markOnline, fail })
 
   /**
    * 登录第二因子（人脸）的**待完成挑战**。非 null 表示"口令已通过、还差人脸"。
@@ -361,6 +366,7 @@ export const useSessionStore = defineStore('session', () => {
     admin.reset()
     audit.reset()
     face.reset()
+    faceId.reset()
     persist()
     if (!silent) toast.info('已安全退出')
   }
@@ -473,6 +479,14 @@ export const useSessionStore = defineStore('session', () => {
     faceEnrollComplete: face.completeEnroll,
     faceDelete: face.remove,
     cancelFaceEnroll: face.cancelEnroll,
+
+    // ---------------- 纯人脸登录（FaceId，独立于第二因子） ----------------
+    faceIdStatus: faceId.faceIdStatus,
+    faceIdLoading: faceId.faceIdLoading,
+    faceIdBusy: faceId.faceIdBusy,
+    refreshFaceIdStatus: faceId.refreshFaceIdStatus,
+    enrollFaceId: faceId.enrollFaceId,
+    removeFaceId: faceId.removeFaceId,
 
     // ---------------- 审计域（仅 AuditAdmin） ----------------
     logs: audit.logs,

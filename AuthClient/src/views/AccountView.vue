@@ -6,6 +6,7 @@ import PasswordRules from '../components/PasswordRules.vue'
 import Spinner from '../components/Spinner.vue'
 import StatusBadge from '../components/StatusBadge.vue'
 import FaceCapturePanel from '../components/face/FaceCapturePanel.vue'
+import FaceIdPanel from '../components/faceid/FaceIdPanel.vue'
 import { useSessionStore } from '../stores/session'
 import { useToastStore } from '../stores/toast'
 import { ApiError } from '../api/client'
@@ -411,6 +412,9 @@ async function runFaceCapture() {
           </template>
         </div>
       </section>
+
+      <!-- 纯人脸登录（FaceId）：独立的登录方式，与上面的第二因子卡片刻意分开 -->
+      <FaceIdPanel />
     </div>
   </div>
 </template>

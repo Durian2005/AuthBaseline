@@ -365,7 +365,26 @@ export const api = {
    * 用途：换人 / 换设备 / 疑似泄露后作废，以及"录入者摄像头损坏、
    * 第二因子无法完成"时**唯一**的恢复路径。
    */
-  resetFace: (username) => request('/auth/reset-face', { method: 'POST', body: { username } })
+  resetFace: (username) => request('/auth/reset-face', { method: 'POST', body: { username } }),
+
+  /* ---------------- 纯人脸登录（FaceId） ----------------
+   * 与上面的 `/auth/face*`（第二因子）是**两条独立的链路**，路由也分开：
+   *   · `/auth/face*`  = 口令之后的第二因子（有动作挑战、有识别画面）；
+   *   · `/faceid/*`    = 用户名 + 人脸的独立登录方式（无活体、无预览，
+   *                       请求体里只有口令，画面由服务端自己采）。
+   * 界面把它们显示成两张卡片，所以客户端也不共用方法名。
+   */
+
+  /** 本人 FaceId 状态：是否已录、几张、是否因换模型作废、引擎是否可用 */
+  faceIdStatus: (signal) => request('/faceid/status', { signal }),
+
+  /** 录入 / 更换 FaceId 模板。只需当前口令 —— 采集与提特征全在服务端完成 */
+  faceIdEnroll: (password) =>
+    request('/faceid/enroll', { method: 'POST', body: { password } }),
+
+  /** 删除本人全部 FaceId 模板（需当前口令） */
+  faceIdDelete: (password) =>
+    request('/faceid/delete', { method: 'POST', body: { password } })
 }
 
 export { API_ROOT }
