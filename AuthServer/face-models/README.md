@@ -1,12 +1,13 @@
 # face-models/ — 人脸模型文件（随发布产物与安装包一并分发）
 
-这两个 ONNX 模型来自 [OpenCV Zoo](https://github.com/opencv/opencv_zoo)，
-**版权归原作者所有，遵循各自的上游许可证**，不在本仓库 MIT 授权的覆盖范围内。
+本目录的 ONNX 模型来自上游开源项目，**版权归原作者所有，遵循各自的上游许可证**，
+不在本仓库 MIT 授权的覆盖范围内。
 
-| 文件 | 大小 (字节) | 用途 | 许可证 |
-|---|---|---|---|
-| `face_detection_yunet_2023mar.onnx` | 232,589 | 人脸检测（YuNet） | MIT |
-| `face_recognition_sface_2021dec.onnx` | 38,696,353 | 人脸识别 / 特征提取（SFace） | Apache-2.0 |
+| 文件 | 大小 (字节) | 用途 | 许可证 | 随仓库分发 |
+|---|---|---|---|---|
+| `face_detection_yunet_2023mar.onnx` | 232,589 | 人脸检测（YuNet，2FA 与 FaceId 两个模块共用） | MIT | 是 |
+| `face_recognition_sface_2021dec.onnx` | 38,696,353 | 人脸 2FA 的特征提取（SFace） | Apache-2.0 | 是 |
+| `face_recognition_arcface_w600k_r50.onnx` | 174,383,860 | FaceId（纯人脸登录）的特征提取（ArcFace，Glint360K 训练，512 维） | **仅限非商业研究** | **否，见下文** |
 
 许可证原文已随模型一并放在本目录：
 
@@ -20,9 +21,37 @@
 ```
 8f2383e4dd3cfbb4553ea8718107fc0423210dc964f9f4280604804ed2552fa4  face_detection_yunet_2023mar.onnx
 0ba9fbfa01b5270c96627c4ef784da859931e02f04419c829e83484087c34e79  face_recognition_sface_2021dec.onnx
+4c06341c33c2ca1f86781dab0e829f88ad5b64be9fba56e56bc9ebdefc619e43  face_recognition_arcface_w600k_r50.onnx
 ```
 
-## 需要重新下载时
+## ArcFace 权重：研究许可，**不入库**
+
+`face_recognition_arcface_w600k_r50.onnx` 来自 [insightface](https://github.com/deepinsight/insightface)
+模型 zoo 的 buffalo_l 包（w600k_r50：WebFace600K/Glint360K 训练）。
+上游声明 **these models are only used for non-commercial research purposes**，
+与 YuNet/SFace 的 MIT/Apache-2.0 不同，因此：
+
+- 它**不在 git 里**（`.gitignore` 已挡住），本仓库只分发许可友好的两个模型；
+- 需要它的人按下面的说明自行下载并校验 SHA-256；
+- 文件缺失时 FaceId 引擎判"不可用"并显式降级留痕（启动不拒绝、接口 fail closed），
+  不影响人脸 2FA 与其余任何功能。
+
+### 下载（任选其一，校验值以本节 SHA-256 为准）
+
+```bash
+# 上游发布页（canonical）：
+curl -L -o face_recognition_arcface_w600k_r50.onnx \
+  https://github.com/deepinsight/insightface/releases/download/v0.7/w600k_r50.onnx
+
+# 镜像（本机实测 GitHub Releases 走代理 502 时可用；文件与上游逐字节同源）：
+curl -L -o face_recognition_arcface_w600k_r50.onnx \
+  "https://modelscope.cn/api/v1/models/cunkai/ComfyUI_Notebook/repo?Revision=master&FilePath=buffalo_l/w600k_r50.onnx"
+
+sha256sum face_recognition_arcface_w600k_r50.onnx
+# 期望：4c06341c33c2ca1f86781dab0e829f88ad5b64be9fba56e56bc9ebdefc619e43
+```
+
+## 需要重新下载时（YuNet / SFace）
 
 模型在 OpenCV Zoo 仓库里由 **Git LFS** 托管，直接访问 `raw.githubusercontent.com`
 只会拿到 LFS 指针文件（131 字节）而不是模型本体。下载后请用上面的 SHA-256 校验。
