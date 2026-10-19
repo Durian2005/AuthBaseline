@@ -13,6 +13,7 @@ public class MongoDbService
     private readonly IMongoCollection<Session> _sessions;
     private readonly IMongoCollection<AuditChainHead> _auditChainHeads;
     private readonly IMongoCollection<FaceTemplate> _faceTemplates;
+    private readonly IMongoCollection<AuthServer.Models.FaceIdTemplate> _faceIdTemplates;
     private readonly PepperProvider _pepper;
 
     public MongoDbService(IConfiguration configuration, PepperProvider pepper)
@@ -32,6 +33,7 @@ public class MongoDbService
         _sessions = _database.GetCollection<Session>("Sessions");
         _auditChainHeads = _database.GetCollection<AuditChainHead>("AuditChainHeads");
         _faceTemplates = _database.GetCollection<FaceTemplate>("FaceTemplates");
+        _faceIdTemplates = _database.GetCollection<AuthServer.Models.FaceIdTemplate>("FaceIdTemplates");
 
         EnsureIndexes();
 
@@ -141,6 +143,26 @@ public class MongoDbService
         catch (Exception ex)
         {
             Console.WriteLine($"[Mongo] 人脸模板索引创建失败（人脸功能将不可用）: {ex.Message}");
+        }
+
+        try
+        {
+            // 纯人脸登录模板：与 2FA 的 FaceTemplates **分开一个集合**（理由见 FaceIdTemplate 注释）。
+            // 查询模式与 2FA 相同：按 userId 取全部 / 计数，按 username 清理注销账号。
+            // 同样不建唯一索引 —— 一人最多 MaxTemplates 张（默认 3）。
+            var faceIdKeys = Builders<AuthServer.Models.FaceIdTemplate>.IndexKeys
+                .Ascending(t => t.UserId);
+            _faceIdTemplates.Indexes.CreateOne(
+                new CreateIndexModel<AuthServer.Models.FaceIdTemplate>(faceIdKeys));
+
+            var faceIdNameKeys = Builders<AuthServer.Models.FaceIdTemplate>.IndexKeys
+                .Ascending(t => t.Username);
+            _faceIdTemplates.Indexes.CreateOne(
+                new CreateIndexModel<AuthServer.Models.FaceIdTemplate>(faceIdNameKeys));
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[Mongo] 纯人脸登录模板索引创建失败（该功能将不可用）: {ex.Message}");
         }
     }
 
@@ -341,4 +363,7 @@ public class MongoDbService
 
     /// <summary>人脸特征模板。**不参与审计哈希链**，是独立集合。</summary>
     public IMongoCollection<FaceTemplate> FaceTemplates => _faceTemplates;
+
+    /// <summary>纯人脸登录（FaceId）的模板集合 —— 与 <see cref="FaceTemplates"/>（2FA）刻意分开。</summary>
+    public IMongoCollection<AuthServer.Models.FaceIdTemplate> FaceIdTemplates => _faceIdTemplates;
 }

@@ -24,12 +24,16 @@ namespace AuthServer.Controllers;
 public class UserAdminController : AuthControllerBase
 {
     private readonly FaceTemplateStore _faceTemplates;
+    /// <summary>各模块登记的个人数据清理入口（当前只有 FaceId）。见 <see cref="IUserDataPurger"/>。</summary>
+    private readonly IEnumerable<IUserDataPurger> _purgers;
 
     public UserAdminController(MongoDbService db, AuditWriter auditWriter, SessionService sessions,
-        PepperProvider pepper, IConfiguration configuration, FaceTemplateStore faceTemplates)
+        PepperProvider pepper, IConfiguration configuration, FaceTemplateStore faceTemplates,
+        IEnumerable<IUserDataPurger> purgers)
         : base(db, auditWriter, sessions, pepper, configuration)
     {
         _faceTemplates = faceTemplates;
+        _purgers = purgers;
     }
 
     /* ==================== 管理员：审核 ==================== */
@@ -351,6 +355,18 @@ public class UserAdminController : AuthControllerBase
         // 而"漏删模板"是这段代码最不能接受的失败。
         // 不用 try/catch：本机 Mongo 的失败本就该让请求失败，吞掉它才是真的危险。
         await _faceTemplates.DeleteByUsernameAsync(user.Username);
+
+        // 其它模块（当前是纯人脸登录 FaceId）的模板同样必须真删：它们是**独立集合**，
+        // 删掉 2FA 的模板不代表 FaceId 的模板也消失了。
+        // 通过接口遍历而不是逐个硬编码，理由见 IUserDataPurger ——
+        // 账号域不该认识每一个生物特征模块。
+        // 同样排在删除账号之前：清理失败 ⇒ 整个请求失败、账号仍在，不留孤儿向量。
+        foreach (var purger in _purgers)
+        {
+            var purged = await purger.PurgeByUsernameAsync(user.Username);
+            if (purged > 0)
+                Console.WriteLine($"[UserAdmin] 注销「{user.Username}」：{purger.Name} 清理 {purged} 条");
+        }
 
         await _db.Users.DeleteOneAsync(u => u.Id == user.Id);
 

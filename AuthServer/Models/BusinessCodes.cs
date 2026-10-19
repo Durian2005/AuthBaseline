@@ -115,4 +115,41 @@ public static class BusinessCode
 
     /// <summary>人脸引擎不可用（模型缺失 / 摄像头打不开）。</summary>
     public const string FaceEngineUnavailable = "FACE_ENGINE_UNAVAILABLE";
+
+    // ── 纯人脸登录（FaceId，独立模块） ───────────────────────────
+    // 与上面的 FACE_* 是**两套模块的码**，刻意不复用：
+    //   前端要把"2FA 的人脸"和"纯人脸登录"显示成两张不同的卡片，
+    //   若共用码，界面就只能靠上下文猜这句提示属于哪张卡。
+    //   同理，审计里 FACEID_* 与 FACE_* 必须能分开检索 —— 两条链路的失败
+    //   对安全的意义不同（前者是唯一因子，后者是第二因子）。
+
+    /// <summary>纯人脸登录模块整体关闭（等价于从未实现过）。</summary>
+    public const string FaceIdDisabled = "FACEID_DISABLED";
+
+    /// <summary>本机 FaceId 引擎不可用（模型缺失 / 摄像头打不开）。</summary>
+    public const string FaceIdEngineUnavailable = "FACEID_ENGINE_UNAVAILABLE";
+
+    /// <summary>画面里没有人脸。</summary>
+    public const string FaceIdNoFace = "FACEID_NO_FACE";
+
+    /// <summary>画面里有不止一张脸 —— 无法确认要录入的是谁。</summary>
+    public const string FaceIdMultipleFaces = "FACEID_MULTIPLE_FACES";
+
+    /// <summary>人脸太小（离摄像头太远）。</summary>
+    public const string FaceIdTooSmall = "FACEID_FACE_TOO_SMALL";
+
+    /// <summary>侧脸或歪头幅度过大。</summary>
+    public const string FaceIdNotFrontal = "FACEID_NOT_FRONTAL";
+
+    /// <summary>画面模糊（失焦 / 运动模糊）/ 特征提取失败。</summary>
+    public const string FaceIdLowQuality = "FACEID_LOW_QUALITY";
+
+    /// <summary>录入过程未通过（质量原因），模板没有写入。</summary>
+    public const string FaceIdEnrollFailed = "FACEID_ENROLL_FAILED";
+
+    /// <summary>该账号没有可用于纯人脸登录的模板（未录入，或模板属于旧模型）。</summary>
+    public const string FaceIdNotEnrolled = "FACEID_NOT_ENROLLED";
+
+    /// <summary>模板与当前模型不匹配（换过权重）—— 必须重新录入，不是"人脸不像"。</summary>
+    public const string FaceIdModelMismatch = "FACEID_MODEL_MISMATCH";
 }

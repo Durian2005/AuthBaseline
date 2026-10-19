@@ -243,6 +243,21 @@ public static class AuditAction
 
     /// <summary>管理员重置他人人脸模板（处置类操作，与注销同权限出口）。</summary>
     public const string FaceTemplateReset = "FACE_TEMPLATE_RESET";
+
+    /* ==================== 纯人脸登录（FaceId） ==================== */
+    // 与上面 FACE_* 是**两条链路**的动作码，刻意不共用（理由同 BusinessCode 的注释）：
+    //   FACE_*   是"口令之后的第二因子"；
+    //   FACEID_* 是"用户名 + 人脸"的独立登录方式（P2 会补齐登录侧的动作码）。
+    // 混用会让"这个账号的哪条链路被削弱了"变成一道需要靠上下文推断的题。
+
+    /// <summary>本人录入 FaceId 模板成功。</summary>
+    public const string FaceIdEnroll = "FACEID_ENROLL";
+
+    /// <summary>FaceId 录入被拒（质量 / 引擎 / 口令二次确认失败）。</summary>
+    public const string FaceIdEnrollFailed = "FACEID_ENROLL_FAILED";
+
+    /// <summary>本人删除 FaceId 模板（等于主动放弃这种登录方式）。</summary>
+    public const string FaceIdTemplateDeleted = "FACEID_TEMPLATE_DELETED";
 }
 
 /// <summary>
@@ -444,4 +459,36 @@ public static class AuditReason
     ///   给它一个独立码，"过程失败"与"认证失败"就不会在审计里混成一类。
     /// </summary>
     public const string FaceEnrollRejected = "FACE_ENROLL_REJECTED";
+
+    /* ==================== 纯人脸登录（FaceId）的原因码 ====================
+     *
+     * 分组规则与 2FA 一致：**A 组计次、B 组不计**。
+     * 但本模块的"计次"语义更窄 —— P1 只有录入这一条路径，
+     * 而录入发生在**已登录之后**，一次录不上没有任何安全含义。
+     * 唯一计次的是"口令二次确认失败"（它本身就是对账号口令的一次在线猜测）。
+     * P2 的登录路径会补上 FACEID_MISMATCH 等 A 组码，届时分组规则不变。
+     */
+
+    /// <summary>录入 / 删除 FaceId 模板时二次口令不符。（A 组 · 计次）</summary>
+    public const string FaceIdWrongPassword = "FACEID_WRONG_PASSWORD";
+
+    /// <summary>
+    /// 录入过程未通过（单脸 / 尺寸 / 清晰度 / 正脸度），模板没有写入。（B 组 · 不计）
+    ///
+    /// 与 FACE_ENROLL_REJECTED 分开的理由：两条链路的模板各自独立，
+    /// 审计员要能分别回答"2FA 那边录失败几次"和"纯人脸这边录失败几次"。
+    /// </summary>
+    public const string FaceIdEnrollRejected = "FACEID_ENROLL_REJECTED";
+
+    /// <summary>该账号没有可用的 FaceId 模板（未录入 / 模板属于旧模型）。（不计）</summary>
+    public const string FaceIdNoTemplate = "FACEID_NO_TEMPLATE";
+
+    /// <summary>FaceId 引擎不可用（模型缺失 / 摄像头打不开）。本机环境问题，不是攻击。（不计）</summary>
+    public const string FaceIdEngineUnavailable = "FACEID_ENGINE_UNAVAILABLE";
+
+    /// <summary>
+    /// 模板与当前模型不匹配（换过权重）。这不是"不像"，而是"没法比" ——
+    /// 必须与 QUALITY / MISMATCH 区分开，否则排查会一路往摄像头和光线方向跑。（不计）
+    /// </summary>
+    public const string FaceIdModelMismatch = "FACEID_MODEL_MISMATCH";
 }

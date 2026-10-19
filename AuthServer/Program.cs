@@ -207,6 +207,21 @@ public class Program
             : new AuthServer.Services.FaceId.CvFaceIdEngine(faceIdOptions);
         builder.Services.AddSingleton(faceIdEngine);
 
+        // 模板存储：加密密钥、模型身份、存取、录入编排。
+        // 模型身份在这里算一次（权重文件的 sha256 前缀）—— 模板与它绑定，
+        // 换模型后旧模板会**被判为作废**而不是被拿去算一个无意义的余弦（见 FaceIdModelIdentity）。
+        var faceIdModel = new AuthServer.Services.FaceId.FaceIdModelIdentity(faceIdOptions);
+        builder.Services.AddSingleton(faceIdModel);
+        builder.Services.AddSingleton<AuthServer.Services.FaceId.FaceIdTemplateCrypto>();
+        builder.Services.AddSingleton<AuthServer.Services.FaceId.FaceIdTemplateStore>();
+        builder.Services.AddSingleton<AuthServer.Services.FaceId.FaceIdEnrollService>();
+
+        // 账号注销时的统一清理入口：FaceId 把自己登记进去，用户管理域只遍历接口，
+        // 不认识"人脸模板"这种细节（见 IUserDataPurger 的注释）。
+        // 用工厂复用上面那个单例 —— 注册成两个独立实例会让"密钥是否可用"这类状态出现两份。
+        builder.Services.AddSingleton<AuthServer.Services.IUserDataPurger>(sp =>
+            sp.GetRequiredService<AuthServer.Services.FaceId.FaceIdTemplateStore>());
+
         // 允许前端跨域访问
         builder.Services.AddCors(options =>
         {
@@ -269,6 +284,7 @@ public class Program
             Console.WriteLine(faceIdStatus.Ready
                 ? $"[FaceId] 纯人脸登录已就绪（用户名 + 人脸，无活体）· 阈值 {faceIdOptions.Threshold:F2}"
                   + $" · 灰区 ±{faceIdOptions.GrayBand:F2} · 每人上限 {faceIdOptions.MaxTemplates} 张"
+                  + $" · 模型 {faceIdModel.ModelId}"
                 : $"[FaceId] 引擎不可用，纯人脸登录将整体降级：{faceIdStatus.Message}");
         }
 
