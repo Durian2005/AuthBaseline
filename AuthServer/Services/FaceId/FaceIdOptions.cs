@@ -31,20 +31,28 @@ public class FaceIdOptions
     public string Engine { get; set; } = "cv";
 
     /// <summary>
-    /// 余弦相似度判定阈值。默认 0.50，与现有人脸 2FA 同侧的保守取值。
+    /// 余弦相似度判定阈值 —— **通过线本身**（P3 定档：0.30）。
     ///
-    /// ⚠️ 这只是**起点**：ArcFace（Glint360K）与 SFace 是不同的特征管线，
-    ///    0.50 对 SFace 偏保守，对 ArcFace 可能偏松也可能偏紧，必须由 P3 的
-    ///    实测定档（目标 FAR 1e-4）重新扫出来，不许把 2FA 的数字当成本模块的结论。
+    /// 定档依据（`tools/faceid_threshold_sweep.py`，LFW 正 3000 对 / 负 50000 对，
+    /// 共 7915 张图；正样本 median 0.671、负样本 p99.99 = 0.267）：
+    ///   阈值 0.30 ⇒ FAR 2e-5、TAR 98.30%
+    ///   阈值 0.50 ⇒ FAR ≈ 0、TAR 93.13%（旧默认，相当于白拒 6.9% 的本人）
+    ///   旧写法是 `sim >= Threshold + GrayBand` 才通过 ⇒ 实际通过线 0.55 ⇒ TAR 仅 87.3%。
+    /// 目标 FAR 1e-4 对应 0.267，取 0.30 是为了给 1:N（取 3 张模板的最大余弦）留余量。
+    ///
     /// ⚠️ 阈值只对"同一条特征管线"有意义：换模型 ⇒ 全部历史模板作废，
-    ///    因此 <see cref="RecognizerModel"/> 的版本信息会随模板一起存（P2）。
+    ///    因此 modelId 会随模板一起存（换模型后旧模板报"已作废"）。
+    /// ⚠️ LFW 是简单集，这里的 FAR 不是线上估计，更不能当成 PAD / 识别认证的结论。
     /// </summary>
-    public double Threshold { get; set; } = 0.50;
+    public double Threshold { get; set; } = 0.30;
 
     /// <summary>
-    /// 灰区半宽：相似度落在 [Threshold - GrayBand, Threshold + GrayBand] 内时判"灰区"，
-    /// 既不签票也不直接计失败 —— 引导用户转用口令登录（见 P2 的决策）。
-    /// 默认 0.05。与阈值一样需要在 P3 按实测数据定档。
+    /// 灰区半宽：相似度落在 [Threshold - GrayBand, Threshold) 内时判"灰区"，
+    /// 既不签票也不直接计失败 —— 引导用户转用口令登录。
+    ///
+    /// 0.05 是**故意保留**的：灰区越宽，本人越不容易被锁（0.25–0.30 这段 LFW 上
+    /// 攻击者命中率只有 1.6e-4，但本人掉进来并不罕见）；但灰区不计次 ⇒ 也给了
+    /// 攻击者一块"试了不锁"的地带。0.05 是这两者之间留的窄带，不随阈值一起调。
     /// </summary>
     public double GrayBand { get; set; } = 0.05;
 

@@ -20,14 +20,14 @@ public class FaceIdOptionsTests
     /// 默认值即"可用"：缺配置时模块按可用启动，而不是像 pepper/证书那样拒绝启动
     /// （人脸是可选登录方式，拒绝启动等于让没有摄像头的机器把整个认证系统拖下线）。
     /// </summary>
-    [Fact(DisplayName = "默认值：按可用启动，阈值 0.50 / 灰区 0.05 / 模板上限 3")]
+    [Fact(DisplayName = "默认值：按可用启动，阈值 0.30（P3 定档）/ 灰区 0.05 / 模板上限 3")]
     public void Defaults_AreUsable()
     {
         var opt = new FaceIdOptions();
 
         Assert.True(opt.Enabled);
         Assert.Equal("cv", opt.Engine);
-        Assert.Equal(0.50, opt.Threshold);
+        Assert.Equal(0.30, opt.Threshold);
         Assert.Equal(0.05, opt.GrayBand);
         Assert.Equal(3, opt.MaxTemplates);
         Assert.Equal(0, opt.CameraIndex);
@@ -118,8 +118,8 @@ public class FaceIdOptionsTests
     public void Override_Threshold()
     {
         WithEnv("AUTHBASELINE_FACEID_THRESHOLD", "0.65", opt => Assert.Equal(0.65, opt.Threshold));
-        WithEnv("AUTHBASELINE_FACEID_THRESHOLD", "abc", opt => Assert.Equal(0.50, opt.Threshold));
-        WithEnv("AUTHBASELINE_FACEID_THRESHOLD", "   ", opt => Assert.Equal(0.50, opt.Threshold));
+        WithEnv("AUTHBASELINE_FACEID_THRESHOLD", "abc", opt => Assert.Equal(0.30, opt.Threshold));
+        WithEnv("AUTHBASELINE_FACEID_THRESHOLD", "   ", opt => Assert.Equal(0.30, opt.Threshold));
     }
 
     [Fact(DisplayName = "FACEID_GRAYBAND 覆盖")]

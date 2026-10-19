@@ -157,7 +157,7 @@ public sealed class FaceIdLoginService
                 }
 
                 // 早停：够 Pass 了就不必再采。
-                if (best >= _opt.Threshold + Math.Max(0, _opt.GrayBand)) break;
+                if (best >= _opt.Threshold) break;
             }
         }
         finally

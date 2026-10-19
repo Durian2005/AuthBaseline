@@ -205,11 +205,11 @@ def main():
 
         st, r = status(ticket)
         d = r.get("data") or {}
-        check("状态：未录入 / 引擎就绪 / 上限 3 / 阈值 0.50",
+        check("状态：未录入 / 引擎就绪 / 上限 3 / 阈值 0.30（P3 定档）",
               st == 200 and d.get("enrolled") is False and d.get("templateCount") == 0
               and d.get("usableCount") == 0 and d.get("modelMismatchCount") == 0
               and d.get("engineReady") is True and d.get("maxTemplates") == 3
-              and abs((d.get("threshold") or 0) - 0.5) < 1e-9,
+              and abs((d.get("threshold") or 0) - 0.30) < 1e-9,
               str(d))
         check("状态下发当前模型身份（stub:*）",
               str(d.get("modelId", "")).startswith("stub:"), str(d.get("modelId")))

@@ -11,14 +11,19 @@ namespace AuthServer.Services.FaceId;
  *   因为起一次服务才能碰到它；抠成纯函数后，`dotnet test` 在没有任何摄像头、
  *   没有任何模型文件的机器上就能把边界全部钉住。
  *
- * 边界语义（以及为什么这样定）：
- *   · sim >= threshold + grayBand            → Pass   （明确是本人）
- *   · threshold - grayBand <= sim < threshold + grayBand → GrayZone（灰区）
- *   · sim < threshold - grayBand             → Mismatch（明确不是本人）
- *   灰区**不计失败、不签票**，引导用户转用口令登录。两条边都取"含"（>=）：
- *   相似度是连续量，"恰好压在边上"时没有任何信息量能区分该归哪边，
- *   而不对称的代价决定了偏向 —— 误把本人推进 Mismatch 会计一次失败、
- *   离锁窗更近一步；误把本人留在灰区只是让他改输口令。所以边上的样本归灰区，
+ * 边界语义（P3 定档时正名：**阈值就是通过线**）：
+ *   · sim >= threshold                       → Pass   （明确是本人，签票）
+ *   · threshold - grayBand <= sim < threshold → GrayZone（灰区，不签票、不计失败）
+ *   · sim < threshold - grayBand             → Mismatch（明确不是本人，计一次失败）
+ *
+ *   为什么 P3 把语义改成"阈值即通过线"：
+ *     P2 的写法是 `sim >= threshold + grayBand` 才通过，于是界面上写着"判定阈值 0.50"、
+ *     实际要 0.55 才放行 —— 同一个数字在代码与界面里指两件事。定档正是要拿实测曲线
+ *     反推一个数，这种歧义必然算错一档，所以先改正再定档。
+ *
+ *   两条边都取"含"（>=）：相似度是连续量，"恰好压在边上"时没有信息量能区分归哪边，
+ *   而不对称的代价决定了偏向 —— 误把本人推进 Mismatch 会计一次失败、离锁窗更近一步；
+ *   误把本人留在灰区只是让他改输口令。所以边界样本归灰区，
  *   只有**明确低于**阈值一个灰区宽度，才计 Mismatch。
  *
  * 这个函数**看不到**质量类失败（没检测到脸 / 特征提不出来 / 模板读不了）——
@@ -57,7 +62,7 @@ public static class FaceIdDecision
     public static FaceIdVerdict Classify(double similarity, double threshold, double grayBand)
     {
         var band = grayBand < 0 ? 0 : grayBand;
-        if (similarity >= threshold + band) return FaceIdVerdict.Pass;
+        if (similarity >= threshold) return FaceIdVerdict.Pass;
         if (similarity >= threshold - band) return FaceIdVerdict.GrayZone;
         return FaceIdVerdict.Mismatch;
     }
