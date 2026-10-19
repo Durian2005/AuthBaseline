@@ -107,6 +107,32 @@ python -m venv .venv-faceid
 （本仓库目录名就含中文）—— 先镜像到 ASCII 目录再加载；② .NET 控制台按 GBK 回显，
 Python 侧按字节接、`errors="replace"` 容错解码。
 
+### A5. 纯人脸登录（FaceId）P1 录入闸门（假引擎 / 独立测试库）
+
+对应 `AuthServer/Services/FaceId/` 的录入链路（P1a）。两份脚本**都不需要摄像头**：
+假引擎的行为由环境变量切换（`AUTHBASELINE_FACEID_STUB_BEHAVIOR`），
+所以多脸 / 侧脸 / 糊 / 引擎不可用这些分支可以被确定性地覆盖。
+
+| 文件 | 作用 | 需要什么 |
+|---|---|---|
+| `faceid_enroll_probe.py` | **接口 + 库级回归（56 项，8 组）**：状态、口令二次确认（计次）、五条质量拒绝路径、模板密文落库、审计不含特征、上限淘汰、模型作废、删除、注销连带清理 | Debug 构建 + 系统 Python（pymongo） |
+| `ui_faceid_check.py` | **界面自验（7 项）**：headless Edge + CDP 登录态 → 账号页截图，断言「刷脸登录」与「纯人脸登录」是两张独立卡片、状态/模型/二次口令文案齐备 | venv（`pip install "websockets<14"`）+ `AuthServer/wwwroot` |
+
+```bash
+# 接口回归（库名必须含 Probe，脚本已守卫）
+python tools/faceid_enroll_probe.py AuthServer/bin/Debug/net8.0/AuthServer.exe 5391
+# 界面自验（产物 tools/evidence/faceid_p1_account_ui.png，证据目录不入库）
+<faceid venv>/python tools/ui_faceid_check.py
+```
+
+⚠️ 三个坑：① 探针必须 `AUTHBASELINE_REQUIRE_HTTPS=false`；② `faceid_enroll_probe.py`
+用**系统** Python（pymongo 只装在那里），`ui_faceid_check.py` 用 faceid venv
+（依赖 websockets）；③ `dotnet build` **不复制** `wwwroot` ⇒ 界面脚本显式设
+`ASPNETCORE_CONTENTROOT` 指向 `AuthServer/`，否则页面 404。
+
+⚠️ 质量闸门的四个阈值（最小脸宽 0.12 / 清晰度 60 / 偏航 0.35 / 滚转 0.30）只是**起点**，
+不是标定结论：真机标定属于 P1b（与 P3 的阈值定档同批做）。
+
 ### B. 端到端 / 验收
 
 | 文件 | 作用 | 门禁 |
@@ -132,6 +158,7 @@ Python 侧按字节接、`errors="replace"` 容错解码。
 | `ui_e2e.mjs` | （自带） | 注册绑定邮箱 / 忘记密码全流程（**11 项**） |
 | `desktop_e2e.py` | （自带） | 桌面端登录 + 截图 + 可选制造篡改并截告警弹窗（`tamper` 步骤需门禁） |
 | `desktop_shot.py` | （自带） | 启动桌面端截取窗口真实画面并驱动界面 |
+| `ui_faceid_check.py` | （自带，Python 内联 CDP） | 账号页「纯人脸登录」卡片（**7 项**）—— headless Edge，不需要装桌面端（见 A5） |
 
 截图统一写入 `tools/evidence/`（可用环境变量 `E2E_SHOTDIR` 覆盖）。
 例外：`ui_e2e.mjs` 的输出名由**命令行参数**给定（见 `docs/guides/EMAIL-VERIFY-README.md`），要归入证据目录请先 `cd tools/evidence`。
