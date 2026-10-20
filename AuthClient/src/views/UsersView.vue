@@ -206,8 +206,9 @@ const resetFaceDetail = computed(() => {
   const u = faceTarget.value
   if (!u) return ''
   return (
-    `重置后「${u.username}」不再需要刷脸登录，该账号的认证强度退回单因子。` +
-    '本操作会记入审计日志（谁重置了谁）。另一种用法：' +
+    `重置后「${u.username}」的两套人脸都会被删除：第二因子模板（口令 + 人脸）与` +
+    '刷脸登录（用户名 + 人脸），该账号退回纯口令登录。' +
+    '本操作会记入审计日志（谁重置了谁，两条记录）。另一种用法：' +
     '当本人摄像头损坏、无法完成第二因子时，这是唯一的恢复路径。'
   )
 })
@@ -473,13 +474,14 @@ onMounted(() => {
                     <AppIcon name="swap" :size="13" />
                     <span>变更角色</span>
                   </button>
-                  <!-- 重置人脸：把对方的第二因子拿掉，是一次降级动作，
-                       因此与"注销"一样走二次确认，不用行内直接生效 -->
+                  <!-- 重置人脸：把对方的**两套**人脸（第二因子 + 刷脸登录）一起拿掉，
+                       是一次降级动作，因此与"注销"一样走二次确认，不用行内直接生效。
+                       只清其中一套会留下一条更宽松的登录路径，恢复就成了半截。 -->
                   <button
                     v-if="canResetFace(u)"
                     type="button"
                     class="btn btn--sm"
-                    :title="`重置「${u.username}」的人脸模板`"
+                    :title="`重置「${u.username}」的人脸（第二因子 + 刷脸登录）`"
                     @click="faceTarget = u"
                   >
                     <AppIcon name="face" :size="13" />
@@ -671,7 +673,7 @@ onMounted(() => {
          而不是像注销那样用 danger —— 避免两者在视觉上被当成同一档操作。 -->
     <ConfirmDialog
       :open="!!faceTarget"
-      title="重置人脸模板"
+      title="重置人脸（两套）"
       icon="face"
       tone="warn"
       :message="`确定要重置「${faceTarget?.username}」的人脸吗？`"

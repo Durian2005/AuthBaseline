@@ -116,7 +116,15 @@ export const ACTION_META = {
   // 删除/重置人脸是**降级**动作（把第二因子拿掉），所以用与"注销"同档的醒目色：
   // 它们不是普通字段修改，而是"这个账号从此退回单因子"。
   FACE_TEMPLATE_DELETED: { label: '本人删除人脸', tone: 'warn' },
-  FACE_TEMPLATE_RESET: { label: '管理员重置人脸', tone: 'warn' }
+  FACE_TEMPLATE_RESET: { label: '管理员重置人脸', tone: 'warn' },
+
+  // ---- 纯人脸登录（FaceId）----
+  // 与上面 FACE_* 是两条链路，动作码刻意不共用（后端注释里有同样的理由）：
+  // 一个账号可能只开其中一种，混成一张表就分不出"被削弱的是哪条链路"。
+  FACEID_ENROLL: { label: '录入刷脸登录', tone: 'info' },
+  FACEID_ENROLL_FAILED: { label: '录入刷脸登录失败', tone: 'warn' },
+  FACEID_TEMPLATE_DELETED: { label: '本人删除刷脸登录', tone: 'warn' },
+  FACEID_TEMPLATE_RESET: { label: '管理员重置刷脸登录', tone: 'warn' }
 }
 
 export function actionMeta(action) {
