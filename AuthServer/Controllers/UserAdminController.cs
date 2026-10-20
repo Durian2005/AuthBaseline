@@ -1,6 +1,7 @@
 using AuthServer.Models;
 using AuthServer.Services;
 using AuthServer.Services.Face;
+using AuthServer.Services.FaceId;
 using Microsoft.AspNetCore.Mvc;
 using MongoDB.Driver;
 using System.Text.Json;
@@ -24,15 +25,23 @@ namespace AuthServer.Controllers;
 public class UserAdminController : AuthControllerBase
 {
     private readonly FaceTemplateStore _faceTemplates;
+
+    /// <summary>
+    /// 纯人脸登录的模板存储。**直接注入具体类，不复用下面的 <see cref="IUserDataPurger"/> 列表**：
+    /// 那是"注销 = 把这个人的一切清掉"的语义；重置只该拿掉人脸，
+    /// 将来别的模块登记 purger 时，重置不该顺手把它们也清了。
+    /// </summary>
+    private readonly FaceIdTemplateStore _faceIdTemplates;
     /// <summary>各模块登记的个人数据清理入口（当前只有 FaceId）。见 <see cref="IUserDataPurger"/>。</summary>
     private readonly IEnumerable<IUserDataPurger> _purgers;
 
     public UserAdminController(MongoDbService db, AuditWriter auditWriter, SessionService sessions,
         PepperProvider pepper, IConfiguration configuration, FaceTemplateStore faceTemplates,
-        IEnumerable<IUserDataPurger> purgers)
+        FaceIdTemplateStore faceIdTemplates,        IEnumerable<IUserDataPurger> purgers)
         : base(db, auditWriter, sessions, pepper, configuration)
     {
         _faceTemplates = faceTemplates;
+        _faceIdTemplates = faceIdTemplates;
         _purgers = purgers;
     }
 
@@ -403,6 +412,15 @@ public class UserAdminController : AuthControllerBase
      * 为什么不像 create-account 那样要求操作者二次口令：
      *   与 delete-user / freeze-user 保持一致 —— 那两者也不要求。
      *   若只在这里加严，就会出现"注销账号比拿掉人脸更松"这种自相矛盾的权限阶梯。
+     *
+     * 2026-10-20 起**同时清理两条链路**（第二因子 + 纯人脸登录），并各写一条审计。
+     *   起因：只清 2FA 时，本方法的说明与用户看到的结果都是"人脸已拿掉"，
+     *   而 FaceId 模板还活着 —— 于是"人脸出问题就找管理员重置"这条恢复路径是断的：
+     *   模板被冒录时，管理员清了第二因子，冒录者仍能用「用户名 + 人脸」登录。
+     *   写两条记录而不是一条，是为了让 FACE_TEMPLATE_RESET 的历史口径（只代表第二因子）
+     *   不被改写；哈希链按写入顺序串联，多写一条不影响可验证性。
+     *   二次口令仍然**不要求**：扩展到 FaceId 之后它依旧是"降级"而不是"注销"，
+     *   上面那条权限阶梯的论证不变 —— 别按"删得更多就该更严"来改。
      */
     [HttpPost("reset-face")]
     public async Task<IActionResult> ResetFace([FromBody] ResetFaceRequest req)
@@ -432,7 +450,7 @@ public class UserAdminController : AuthControllerBase
                 Success = false,
                 Code = BusinessCode.ForbiddenTarget,
                 Message = isSelf
-                    ? "不能重置自己的人脸模板。请到账号设置里自助删除（需输入当前口令）。"
+                    ? "不能重置自己的人脸。请到账号设置里自助删除（两套都要删，均需输入当前口令）。"
                     : $"当前身份「{UserRoles.Label(admin!.Role)}」不能重置"
                         + $"「{UserRoles.Label(user.Role)}」账号的人脸。"
             };
@@ -441,20 +459,46 @@ public class UserAdminController : AuthControllerBase
             return BadRequest(denied);
         }
 
+        // 两条链路一起清。管理员的心智是"把这个人的脸拿掉"，不是"清掉第二因子那一套"。
         var removed = await _faceTemplates.DeleteByUserIdAsync(user.Id);
+        var faceIdRemoved = await _faceIdTemplates.DeleteByUserIdAsync(user.Id);
 
         var response = new ApiResponse
         {
             Success = true,
             Code = BusinessCode.Ok,
-            Message = removed > 0
-                ? $"已重置「{user.Username}」的人脸模板（删除 {removed} 张），该账号不再需要刷脸登录"
-                : $"「{user.Username}」原本就没有录入人脸",
-            Data = new { Username = user.Username, Removed = removed }
+            Message = ResetFaceMessage(user.Username, removed, faceIdRemoved),
+            // Removed 的语义**保持不变**：只数第二因子的那套模板。
+            // 既有探针（face_second_factor_probe 的 removed == 1）与历史审计 bag 都按这个口径，
+            // 把 FaceId 的张数并进来等于悄悄改了别人的读数。
+            Data = new { Username = user.Username, Removed = removed, FaceIdRemoved = faceIdRemoved }
         };
         await _auditWriter.WriteAsync(admin!.Id, admin.Username, action, statusBefore, requestLog, response,
             statusBefore, user.Username, AuditResult.Success);
+
+        // **第二条独立记录**，不并入上面那条：见方法头注释里"历史口径"那段。
+        // 即使 faceIdRemoved == 0 也写 —— 审计回答的是"管理员做过这个动作"，
+        // 只记非零会让"重置过、但对方本就没录"从流水里彻底消失。
+        await _auditWriter.WriteAsync(admin!.Id, admin.Username, AuditAction.FaceIdTemplateReset,
+            statusBefore, requestLog, response, statusBefore, user.Username, AuditResult.Success);
+
         return Ok(response);
+    }
+
+    /// <summary>
+    /// 重置人脸的结果说明。**两套要分别说清**：旧文案只说"不再需要刷脸登录"，
+    /// 而开过 FaceId 的账号当时照样能用「用户名 + 人脸」登录 —— 字面与事实不符。
+    /// </summary>
+    private static string ResetFaceMessage(string username, long removed, long faceIdRemoved)
+    {
+        if (removed == 0 && faceIdRemoved == 0)
+            return $"「{username}」原本就没有录入人脸";
+        if (faceIdRemoved == 0)
+            return $"已重置「{username}」的人脸模板（删除 {removed} 张），该账号不再需要刷脸登录";
+        if (removed == 0)
+            return $"已重置「{username}」的刷脸登录（删除 {faceIdRemoved} 张），该账号不再能用「用户名 + 人脸」登录";
+        return $"已重置「{username}」的人脸：第二因子删除 {removed} 张、刷脸登录删除 {faceIdRemoved} 张，"
+             + "两种人脸登录都已关闭";
     }
 
     /* ==================== 管理员：创建账号 ==================== */

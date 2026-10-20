@@ -258,6 +258,15 @@ public static class AuditAction
 
     /// <summary>本人删除 FaceId 模板（等于主动放弃这种登录方式）。</summary>
     public const string FaceIdTemplateDeleted = "FACEID_TEMPLATE_DELETED";
+
+    /// <summary>
+    /// 管理员重置他人的 FaceId 模板（处置类操作，与 <see cref="FaceTemplateReset"/> 同一权限出口）。
+    ///
+    /// 为什么与 2FA 那条**分开记**：<c>FACE_TEMPLATE_RESET</c> 的语义必须钉死在"第二因子"上。
+    /// 它已经被 SoD 追溯与审计周报当成"哪条链路被削弱"的依据，而两条链路本来就能独立开关；
+    /// 把 FaceId 的删除塞进同一个动作码，历史口径当场就断了。
+    /// </summary>
+    public const string FaceIdTemplateReset = "FACEID_TEMPLATE_RESET";
 }
 
 /// <summary>
