@@ -6,7 +6,7 @@
 质量闸门（多脸 / 太小 / 侧脸 / 糊）、引擎降级、口令二次确认的计次、
 模板密文落库、上限淘汰、模型作废、注销连带清理。
 
-验证十组：
+验证十一组：
   A. 状态    —— 未录入的账号：enrolled=false、引擎就绪、上限 3；无票据被拒
   B. 口令闸门—— 空口令 / 错口令（A 组计次 + 审计码）/ 口令对 ⇒ 录入成功
   C. 质量闸门—— no_face / multi_face / blurry / turned / engine_down 逐条都必须被拒，
@@ -23,6 +23,8 @@
   J. 人脸登录—— 成功签票且票据可用、审计标 SecondFactor=FACEID；
                  未录入 ⇒ 401 NOT_ENROLLED 且**不计次**；判错 ⇒ 401 MISMATCH 且**计次**；
                  不存在的账号与「不匹配」同码
+  K. 管理员重置—— 第二因子与刷脸登录**一起清**、各写一条审计且动作码不混用；
+                 重复重置（0 张）也留痕；重置后该账号刷脸登录 ⇒ 401 NOT_ENROLLED
 
 用法：
   python tools/faceid_enroll_probe.py <exe路径> <端口> [--db NAME]
@@ -541,6 +543,63 @@ def main():
         check("审计记 FACEID_MISMATCH（本组恰好多 1 条）",
               audit_reason_count("FACEID_MISMATCH") == mismatch_before + 1,
               "n=%d→%d" % (mismatch_before, audit_reason_count("FACEID_MISMATCH")))
+
+    # =====================================================================
+    # K：管理员重置人脸 —— 两套一起清、两条审计（2026-10-20 补的缺口）
+    # =====================================================================
+    print("\n[K] 管理员重置：第二因子与刷脸登录一起清，各留一条审计")
+    # 修复前这里只有一个真相：reset-face 只清 FaceTemplates，FaceIdTemplates 原样留着，
+    # 于是"人脸出问题找管理员重置"这条恢复路径是断的。本组就是盯着这条断口。
+    with backend("ok", "k_reset"):
+        st, r = login("admin", ADMIN_PW)
+        admin_ticket = (r.get("data") or {}).get("ticket", "")
+        check("（准备）admin 票据", st == 200 and bool(admin_ticket),
+              "%s %s" % (st, r.get("code")))
+
+        # PAD_USER 在 I 组 pad_off 环节已录一张，拿它当"重置前确实有模板"的对象。
+        before_tpl = len(templates(PAD_USER))
+        check("（准备）对象账号有 FaceId 模板", before_tpl == 1, "n=%d" % before_tpl)
+
+        reset_before = audit_count("FACEID_TEMPLATE_RESET")
+        reset2fa_before = audit_count("FACE_TEMPLATE_RESET")
+        st, r = call("POST", "/api/auth/reset-face", {"username": PAD_USER}, admin_ticket)
+        d = r.get("data") or {}
+        check("管理员重置人脸 ⇒ 200 OK", st == 200 and r.get("code") == "OK",
+              "%s %s" % (st, r.get("code")))
+        check("★ 响应报出刷脸登录的删除张数（faceIdRemoved）",
+              d.get("faceIdRemoved") == before_tpl,
+              "faceIdRemoved=%s" % d.get("faceIdRemoved"))
+        check("removed 语义未变（仍是第二因子张数，本组没录过 2FA ⇒ 0）",
+              d.get("removed") == 0, "removed=%s" % d.get("removed"))
+        check("★ FaceIdTemplates 真的被清（本次修复的核心）",
+              len(templates(PAD_USER)) == 0, "n=%d" % len(templates(PAD_USER)))
+        check("★ 审计记 FACEID_TEMPLATE_RESET（本组恰好多 1 条）",
+              audit_count("FACEID_TEMPLATE_RESET") == reset_before + 1,
+              "n=%d→%d" % (reset_before, audit_count("FACEID_TEMPLATE_RESET")))
+        # 两条链路的动作码必须分开：这次重置应当**各留一条**（2FA 一条、FaceId 一条）。
+        # ⚠️ 别写成"FACE_TEMPLATE_RESET 必须为 0"—— 那个码本来就会被这次调用写一条（2FA 那条），
+        #    那样断言等于自相矛盾。真正的证据是**两个码各自 +1**：
+        #    若 FaceId 的删除被塞进 FACE_TEMPLATE_RESET，FACEID_TEMPLATE_RESET 就不会涨。
+        check("★ 一次重置写两条审计：两个动作码各 +1（互不混用）",
+              audit_count("FACE_TEMPLATE_RESET") == reset2fa_before + 1
+              and audit_count("FACEID_TEMPLATE_RESET") == reset_before + 1,
+              "2FA %d→%d / FACEID %d→%d"
+              % (reset2fa_before, audit_count("FACE_TEMPLATE_RESET"),
+                 reset_before, audit_count("FACEID_TEMPLATE_RESET")))
+
+        # 再重置一次：0 张也要留痕，否则"重置过但本来没录"会从流水里消失。
+        st, r = call("POST", "/api/auth/reset-face", {"username": PAD_USER}, admin_ticket)
+        d = r.get("data") or {}
+        check("重复重置 ⇒ 0 张，仍写审计（0 也留痕）",
+              st == 200 and d.get("faceIdRemoved") == 0
+              and audit_count("FACEID_TEMPLATE_RESET") == reset_before + 2,
+              "n=%d" % audit_count("FACEID_TEMPLATE_RESET"))
+
+        # 真删而不是打标记：重置后这条登录方式必须立刻不可用。
+        st, r = call("POST", "/api/faceid/login", {"username": PAD_USER})
+        check("★ 重置后刷脸登录 ⇒ 401 FACEID_NOT_ENROLLED",
+              st == 401 and r.get("code") == "FACEID_NOT_ENROLLED",
+              "%s %s" % (st, r.get("code")))
 
     # =====================================================================
     # 汇总
