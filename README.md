@@ -112,6 +112,9 @@ AuthBaseline/
    - Visual Studio 2022 打开 `AuthBaseline.sln`；
    - 或使用 .NET CLI（`dotnet build` / `dotnet run`）。
 4. 首次打开后，NuGet 包会自动还原（MongoDB.Driver、BCrypt.Net-Next）。
+5. 可选：要用「纯人脸登录」还需下载 **ArcFace 权重**（174 MB，许可仅限非商业研究，**不随仓库分发**），
+   步骤与 sha256 见 [`AuthServer/face-models/README.md`](AuthServer/face-models/README.md)。
+   缺这个文件不影响其他功能 —— 只是纯人脸登录会 fail closed（人脸第二因子用的是 SFace，已随仓库提供）。
 
 ## 四、运行步骤
 
@@ -310,6 +313,36 @@ npm run build     # 只出浏览器产物 → ../AuthServer/wwwroot
 > **防不了**"进程被注入或调试器附加"。
 > 详见 [docs/design/FACE-AUTH-DESIGN.md](docs/design/FACE-AUTH-DESIGN.md)。
 
+### 11. 纯人脸登录（FaceId，**可选**的第二种登录方式）
+
+与上面第 10 节的「第二因子」是**两条独立链路**：第二因子是「口令 + 人脸」，这一节是
+「**用户名 + 人脸**」，全程没有口令参与。两者各自独立存储模板、各自一套特征模型，**可以同时启用**。
+同样**不录入就完全不影响使用**。
+
+| 项 | 说明 |
+|------|------|
+| 引擎 | YuNet（检测 640×480）+ ArcFace w600k_r50（512 维特征） |
+| 判定 | 余弦相似度 **≥ 0.30 通过**；`[0.25, 0.30)` 灰区（不签票、**不计失败**，提示改用口令）；`< 0.25` 计一次失败 |
+| 阈值来源 | LFW 正 3000 对 / 负 50000 对实测定档：0.30 ⇒ FAR 2e-5、TAR 98.30%（详见 [P3 报告](docs/reports/FACEID-P3-THRESHOLD-REPORT.md)） |
+| 模板 | 每人最多 3 张，AES-256-GCM 加密存**独立集合**；`modelId` 绑定引擎与权重 ⇒ 换模型后旧模板自动作废、如实告知 |
+| 计次 | 只对「明确不是本人」「活体不过」计次；**未录入 / 灰区 / 质量类 / 引擎类一律不计** |
+
+- **登录顺序**：空用户名 → 用户不存在（与「人脸不像」**同码同话术**，不给枚举额外信号）→
+  锁定/禁用（均在**采脸之前**拒绝）→ 采集识别 → 签票或计次。
+- **请求体只有用户名**：没有画面、没有特征，采集在服务端进程内完成 —— 与第二因子同一条边界，
+  「伪造一个向量直接提交」这条路在类型层面就不存在。
+- **fail-closed**：已录人脸但引擎不可用 ⇒ 503 `FACEID_ENGINE_UNAVAILABLE`，不会静默退回口令登录。
+- **降级闸门**：录入与删除都必须重新输入当前口令，口令错误按失败计次。
+
+> ⚠️ **活体判定默认关闭**。这不是遗漏：本模块要用「不同人种 / 明星各年龄段 / 双胞胎 / 特殊人群」的
+> **照片样本**做验收，而这些找不到真人，所以默认状态下**举着照片就能通过**。
+> 需要反欺骗时设 `AUTHBASELINE_FACEID_PAD_ENABLED=true`（内置 MiniFASNetV2，阈值 0.70）；
+> 多脸默认拒绝，测试照片时可设 `AUTHBASELINE_FACEID_ALLOW_MULTI_FACE=true` 放行并取最大框。
+> 界面上只显示「录入状态 / 最近录入 / 判定阈值」三项，**活体与多脸开关的真实状态请查启动日志**。
+
+> ⚠️ **口径**：LFW 3000 对上 acc@0.5 = **96.83%**、EER 1.87%、TAR@FAR=1e-4 = 97.93%。
+> 这些是**离线简单集**（正脸、光照正常）上的数字，**不是线上通过率**，更不是 PAD 或识别认证的结论。
+
 ## 七、测试用例
 
 > 以下用例均已在开发机上实测验证，全部符合预期（实测记录见第十一章第 6 节）。
@@ -320,7 +353,7 @@ npm run build     # 只出浏览器产物 → ../AuthServer/wwwroot
 
 | 命令 | 覆盖 | 说明 |
 |---|---|---|
-| `dotnet test AuthServer.Tests/AuthServer.Tests.csproj` | **81 项** | `TimeGuard`（锁定/窗口/拨钟边界）、`PasswordHasher`（`v2$` 红线、升级标记、脏数据）、`FacePose`（阈值边界与常量不变量）。不连库、不碰摄像头 |
+| `dotnet test AuthServer.Tests/AuthServer.Tests.csproj` | **210 项** | `TimeGuard`（锁定/窗口/拨钟边界）、`PasswordHasher`（`v2$` 红线、升级标记、脏数据）、`FacePose`，以及 FaceId 的纯逻辑：`FaceIdDecision`（阈值 = 通过线的三途边界）、`FaceIdQuality`（闸门顺序）、`FaceIdCodes`（计次分流）、`FaceIdOptions`（默认值与覆盖）、活体分数边界。不连库、不碰摄像头 |
 | `cd AuthClient && npm run lint` | 0 error / 0 warning | 只开"真 bug 类"规则 |
 | `python tools/privacy_scan.py --no-history --gate` | 新增命中 0 | 只对 `tools/privacy_baseline.json` 之外的新增命中失败 |
 | `python tools/face_fixture_check.py AuthServer/bin/Debug/net8.0/AuthServer.exe` | 每个 fixture 一条 | 重放录制画面，比对 `passed` / `businessCode`（需先录，见下） |
@@ -417,7 +450,7 @@ python tools/face_fixture_check.py AuthServer/bin/Debug/net8.0/AuthServer.exe
 > 鉴权失败会写入一条 `AUDIT_ACCESS_DENIED` 事件，使越权尝试可追溯。
 >
 > 控制器按业务域拆分（`AuthController` / `AccountController` / `UserAdminController` /
-> `AuditController`，共享基类 `AuthControllerBase`），但**路由路径一字未变** ——
+> `AuditController` / `FaceIdController`，共享基类 `AuthControllerBase`），但**路由路径一字未变** ——
 > 拆分只动文件边界，不动对外契约。
 
 ### 1. 认证与传输（`api/auth`）
@@ -452,7 +485,19 @@ python tools/face_fixture_check.py AuthServer/bin/Debug/net8.0/AuthServer.exe
 | POST | `/api/auth/face/delete` | 需票据 + 口令 | 删除自己的人脸模板（**真删**，不留可复原数据） |
 | GET | `/api/auth/face/preview` | 匿名（凭一次性挑战） | 识别画面：返回一帧**由服务端采集、检测并画好框**的 JPEG（状态随 `X-Face-State` / `X-Face-Score` 响应头下发）。门禁绑在挑战上 —— token 过期 / 被消费 / 采集结束即失效；**只出图像，不下发关键点坐标** |
 
-### 4. 用户管理（`api/auth`）
+### 4. 纯人脸登录（`api/faceid`）—— 可选的**第二种登录方式**
+
+> 与上一节的第二因子**完全独立**（不同集合、不同特征模型、不同控制器），可同时启用。
+> 前 3 条自助接口需要票据，其中**录入与删除都必须重新输入当前口令**；最后一条是**匿名**的登录接口。
+
+| 方法 | 路径 | 鉴权 | 说明 |
+|------|------|------|------|
+| GET | `/api/faceid/status` | 需票据 | 查询自己的录入状态（模板数 / 可用数 / 模型身份 / 判定阈值）。**只读，不写审计** |
+| POST | `/api/faceid/enroll` | 需票据 + 口令 | 录入：校验当前口令后**单步**采集（本模块无动作挑战），取第一张过闸门的帧入库 |
+| POST | `/api/faceid/delete` | 需票据 + 口令 | 删除自己的人脸模板（**真删**，不留可复原数据） |
+| POST | `/api/faceid/login` | **匿名** | 用户名 + 人脸登录。请求体 `{"username": "..."}`，**不含画面或特征**；失败时回传 `similarity` 便于判断是光线还是脸不对 |
+
+### 5. 用户管理（`api/auth`）
 
 | 方法 | 路径 | 鉴权 | 说明 |
 |------|------|------|------|
@@ -466,7 +511,7 @@ python tools/face_fixture_check.py AuthServer/bin/Debug/net8.0/AuthServer.exe
 | POST | `/api/auth/set-role` | 管理员 | 任免用户角色（含 AuditAdmin），需二次校验操作者口令 |
 | POST | `/api/auth/reset-face` | 用户管理员 | 重置（清空）指定账号的人脸模板，用于账号本人丢失人脸后的恢复；复用既有 `CanBeManagedBy` 授权出口（含自我豁免） |
 
-### 5. 审计日志
+### 6. 审计日志
 
 | 方法 | 路径 | 鉴权 | 说明 |
 |------|------|------|------|
@@ -480,7 +525,7 @@ python tools/face_fixture_check.py AuthServer/bin/Debug/net8.0/AuthServer.exe
 > ⚠️ **审计域没有任何写接口**。控制器只暴露上述 6 个 GET（其中 `sod` 是只读推导，不写库），后端不存在删除或修改审计
 > 日志的路径；界面上的「重置筛选」只是清空查询条件，与日志本体无关。
 
-### 6. 角色与权限模型
+### 7. 角色与权限模型
 
 角色为**互斥枚举**，避免出现非法权限组合：
 
@@ -585,6 +630,14 @@ python tools/face_fixture_check.py AuthServer/bin/Debug/net8.0/AuthServer.exe
 | 管理员解锁 | 200，`Locked → Enabled`，失败次数清零 |
 | 修改密码 | 200，旧密码立即失效 |
 | 审计日志落库 | 含 `statusBefore/After`、`operatorId`、时间戳 |
+
+### 7. 纯人脸登录提示「引擎不可用」
+
+先看 `AuthServer/face-models/` 里有没有 `face_recognition_arcface_w600k_r50.onnx` ——
+这个权重**不入库**（174 MB，许可仅限非商业研究），需按该目录下 `README.md` 自行下载并核对 sha256。
+
+缺文件时：`/api/faceid/status` 报 `engineReady=false`，登录与录入一律 **503（fail closed）**；
+而**人脸第二因子仍然可用**（它用 SFace，已随仓库提供）。这是两个模块刻意不共用的结果，不是故障。
 
 ## 十二、贡献指南
 
