@@ -102,4 +102,7 @@ J 组首轮 72/75：`backend()` 默认注入 `AUTHBASELINE_FACEID_STUB_IDENTITY=
 
 - P3：阈值定档（目标 FAR 1e-4）+ 2d106det 106 点精修 + **装机产物复验**（`face_release_probe.py`）。
 - 装机版仍是 P1a 产物 ⇒ `PadEnabled` 默认值、登录页页签、固定初始口令**都还没装机**，发布链需重跑。
-- 管理员 `reset-face` 目前只清 2FA 模板，不清 FaceId（合并会改既有审计语义，待定）。
+- ~~管理员 `reset-face` 目前只清 2FA 模板，不清 FaceId~~ —— **已于 2026-10-20 修复**（方案 A）：
+  该接口现在两套一起清，并各写一条审计（`FACE_TEMPLATE_RESET` / 新增 `FACEID_TEMPLATE_RESET`，
+  动作码刻意不混用）；`data.removed` 语义保持不变，另加 `data.faceIdRemoved`。
+  回归见 `faceid_enroll_probe.py` K 组。

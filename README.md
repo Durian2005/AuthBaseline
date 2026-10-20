@@ -303,7 +303,8 @@ npm run build     # 只出浏览器产物 → ../AuthServer/wwwroot
 - **模板加密存储**：AES-256-GCM 可逆加密（人脸要能还原明文才能算余弦相似度，**不是哈希**），
   AAD 绑定用户 ID；**绝不进审计、绝不导出**；注销账号时连带真删，不留生物特征孤儿。
 - **fail-closed**：已录人脸但本机引擎不可用 ⇒ **拒绝登录**（503 `FACE_ENGINE_UNAVAILABLE`），
-  不会静默退回单因子 —— 否则"弄坏摄像头"会比"删模板"更廉价。恢复路径是管理员 `reset-face`。
+  不会静默退回单因子 —— 否则"弄坏摄像头"会比"删模板"更廉价。恢复路径是管理员 `reset-face`
+  （**两套人脸一起清**：第二因子的模板与纯人脸登录的模板，各留一条审计）。
 - **失败分流（A/B 组）**：欺骗类信号（比对不符、活体不过、挑战无效、口令错）**计入**锁定计数；
   质量/配合类问题（未检测到人脸、画质太差、动作未完成）**不计次** ——
   用户不会被自己的摄像头误伤到锁号。规则钉在审计码上（`FaceCodes.IsCounted`），未登记码兜底计入。
@@ -509,7 +510,7 @@ python tools/face_fixture_check.py AuthServer/bin/Debug/net8.0/AuthServer.exe
 | POST | `/api/auth/delete-user` | 用户管理员 | 注销普通用户（管理员账号不可被注销） |
 | POST | `/api/auth/create-account` | 管理员 | 创建**普通用户 / 用户管理员 / 审计管理员**（不可建 `Admin`）；**邮箱可选**，需二次校验操作者口令 |
 | POST | `/api/auth/set-role` | 管理员 | 任免用户角色（含 AuditAdmin），需二次校验操作者口令 |
-| POST | `/api/auth/reset-face` | 用户管理员 | 重置（清空）指定账号的人脸模板，用于账号本人丢失人脸后的恢复；复用既有 `CanBeManagedBy` 授权出口（含自我豁免） |
+| POST | `/api/auth/reset-face` | 用户管理员 | 重置指定账号的**两套人脸**（第二因子模板 + 纯人脸登录模板），用于本人丢失人脸后的恢复；两条链路各写一条审计（`FACE_TEMPLATE_RESET` / `FACEID_TEMPLATE_RESET`）；复用既有 `CanBeManagedBy` 授权出口（含自我豁免） |
 
 ### 6. 审计日志
 
