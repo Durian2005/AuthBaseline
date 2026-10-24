@@ -419,6 +419,7 @@ python tools/face_fixture_check.py AuthServer/bin/Debug/net8.0/AuthServer.exe
 > 更多自动化验证脚本见 `tools/`：角色分离（`role_separation_test.py`）、
 > 时间回拨（`lockout_clock_probe.py`）、票据哈希化（`ticket_hash_probe.py`）、
 > 口令 pepper（`pepper_probe.py`）、沉睡账号（`dormant_account_probe.py`）、
+> 用户管理批量处置（`batch_action_probe.py`）、
 > 审计链独立复算（`verify_chain_independent.py`）。
 > 完整清单与分类索引见 [`tools/README.md`](tools/README.md)。
 
@@ -511,6 +512,7 @@ python tools/face_fixture_check.py AuthServer/bin/Debug/net8.0/AuthServer.exe
 | POST | `/api/auth/create-account` | 管理员 | 创建**普通用户 / 用户管理员 / 审计管理员**（不可建 `Admin`）；**邮箱可选**，需二次校验操作者口令 |
 | POST | `/api/auth/set-role` | 管理员 | 任免用户角色（含 AuditAdmin），需二次校验操作者口令 |
 | POST | `/api/auth/reset-face` | 用户管理员 | 重置指定账号的**两套人脸**（第二因子模板 + 纯人脸登录模板），用于本人丢失人脸后的恢复；两条链路各写一条审计（`FACE_TEMPLATE_RESET` / `FACEID_TEMPLATE_RESET`）；复用既有 `CanBeManagedBy` 授权出口（含自我豁免） |
+| POST | `/api/auth/batch` | 用户管理员 | **批量处置**：`action` ∈ `approve / unlock / freeze / delete / reset-face / set-role`，`usernames` 为目标列表（上限 **200**）。内部**逐条调用上方单条入口**，因此权限、自我豁免、审计语义与单条完全一致；**部分成功是正常结果**，逐条返回 `success / code / message`。业务码：全部处理完 `OK`、有成功有失败 `BATCH_PARTIAL`、一个都没处理 `BATCH_ALL_FAILED`（400）。逐条判定不整批放行，`set-role` 仍要求操作者口令且仅 `Admin` 可用 |
 
 ### 6. 审计日志
 
