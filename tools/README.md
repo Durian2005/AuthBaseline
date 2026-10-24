@@ -264,6 +264,7 @@ AuthServer/bin/Debug/net8.0/AuthServer.exe --faceid-capture <目录> [帧数=60]
 | `db_restore.py` | 从 `db_cleanup.py` 生成的备份目录恢复 | `--i-know-this-is-the-real-db` |
 | `consolidate_shards.py` | 把散落在分片里的审计记录合并回月度分片并整链重签 | 默认 dry-run，`--apply` 才写 |
 | `renumber_chain.py` | 重排序号并重签（清理已删记录的序号空洞） | 默认 dry-run，`--apply` 才写 |
+| `faceid_purge_stale_templates.py` | 删掉 `FaceIdTemplates` 里 **modelId 与当前双模型身份不符**的作废模板（换模型后必然出现；旧模板缺第二组向量，无法迁移只能重录） | 默认 dry-run（只读不拦）→ `--apply` 才要 `--i-know-this-is-the-real-db`；备份+回读核对后才删；条件收窄到 `modelId != expected`；**权重缺失时硬拒执行**；删完复核 `FaceTemplates`/`Users` 条数不变 |
 | `repair_chain.py` | 修复审计哈希链 | 默认 dry-run，`--apply` 才写 |
 
 > ⚠️ 这些脚本**不要**往通用门禁上合并 —— 它们比通用规则更严格（含备份核对、dry-run 预览），
