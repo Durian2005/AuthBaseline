@@ -36,6 +36,7 @@
 | 文件 | 作用 | 公共层 | 真实库 |
 |---|---|---|---|
 | `role_separation_test.py` | 角色分离：管账号的看不到日志、看日志的管不了账号；Admin 可建普通用户/用户管理员/审计管理员（**不可建 Admin**）且邮箱可选（**92 项**） | ✓ | — |
+| `batch_action_probe.py` | 用户管理**批量处置**（`POST /api/auth/batch`）：入口预检只记 1 条审计、部分成功是正常结果（逐条 `items` 带自己的 `code`）、逐条权限（越权冻结管理账号 → `DORMANT_PROTECTED_ROLE`；UserAdmin 改角色 → `FORBIDDEN_ROLE`）、自我豁免、名称归一去重、每目标单独一条审计、结束后哈希链可独立复算（**58 项**） | ✓ | — |
 | `sod_detect_probe.py` | 职责分离**绕过检测层**：admin 造审计管理员 → 借它读审计必须报 `ATTRIBUTED`；造号不用 → `DORMANT`；自助改密 → `SEALED`；admin 打同接口 403 且留痕；接口结论与 `sod_trace.py` 独立复算**逐链对账**（**50 项**） | ✓ | — |
 | `lockout_clock_probe.py` | 锁定能否靠拨钟解开、失败计数窗口（3 分钟内 3 次）、未锁定阶段拨钟的留痕与加固后还剩哪些边界（**40 项**） | ✓ | — |
 | `ticket_hash_probe.py` | 会话票据哈希化（存储安全 S1）（**27 项**） | ✓ | — |
