@@ -55,6 +55,17 @@ public sealed record FaceIdEngineStatus(bool Ready, string Message)
 }
 
 /// <summary>
+/// 一张脸的**一对**特征：主模型（ArcFace，512 维）+ 第二模型（SFace，128 维）。
+///
+/// 为什么必须是"一对"而不是两个独立方法：
+///   两条特征必须来自**同一张 112×112 对齐图**。分成两次调用就要求调用方自己保证
+///   "两次传的是同一帧、同一个脸框"，而那个约束没有任何东西在检查 —— 一旦错位，
+///   AND 会拿 A 的脸和 B 的脸做比较，结果既不是通过也不是不通过，而是随机。
+///   收成一个返回值，"同源"就成了类型层面的性质。
+/// </summary>
+public sealed record FaceIdFeaturePair(double[] Primary, double[] Second);
+
+/// <summary>
 /// 纯人脸登录引擎。所有实现都必须满足两条：
 ///   1) 采集、检测、特征提取**全在本进程内**完成，不接受外部传入的任何画面或特征；
 ///   2) 线程安全 —— 登录/录入两条路径可能并发调用，而 OpenCV 的
@@ -94,8 +105,13 @@ public interface IFaceIdEngine
     /// </summary>
     double? Sharpness(FaceIdFrame frame, FaceIdBox box);
 
-    /// <summary>在**指定的一帧与一张脸**上提特征。返回 null 表示该帧不可用。</summary>
-    double[]? Feature(FaceIdFrame frame, FaceIdBox box);
+    /// <summary>
+    /// 在**指定的一帧与一张脸**上提特征，返回一对（主模型 + 第二模型）。
+    ///
+    /// 返回 null 表示该帧不可用（对齐失败 / 关键点退化 / 任一模型未加载）——
+    /// **不返回"只有一半"的值**：半个特征没法做 AND，只能被误当成一次单模型判定。
+    /// </summary>
+    FaceIdFeaturePair? Feature(FaceIdFrame frame, FaceIdBox box);
 
     /// <summary>两个特征的余弦相似度。特征**不做 L2 归一化**存储，归一化在这里做。</summary>
     double Similarity(double[] a, double[] b);

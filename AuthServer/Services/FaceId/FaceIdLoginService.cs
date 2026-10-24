@@ -19,6 +19,13 @@ namespace AuthServer.Services.FaceId;
  *   ③ **早停**。一旦某帧已达到 Pass，立刻停止采集 —— 登录是交互路径，
  *      多跑几帧只会让用户多等一秒，不会改变结论。
  *
+ *   ④ **双模型 AND（阶段 2）**：每帧出**一对**特征（ArcFace 512 + SFace 128），
+ *      两个模型**各自**对全部模板取最大余弦，再交给 FaceIdDecision.ClassifyPair 相与。
+ *      ⚠️ 作用单元是"各自取 max 后 AND"，不是"逐副本两模型都过" —— 后者线上并不存在，
+ *         两种写法会给出不同数字（见 ClassifyPair 的注释）。
+ *      ⚠️ 早停必须**同时**看两个分数：只看主模型会让"主模型够、SFace 不够"的帧
+ *         提前结束采集，把一次本来还有救的登录判死。
+ *
  * ⚠️ 照片能不能过，由 FaceIdOptions.PadEnabled 决定，默认**关**。
  *    本项目要做"不同人种 / 明星各年龄段 / 双胞胎"的照片测试，找不到真人配合，
  *    所以默认不拦照片；开启后走与录入同一套活体判定。
@@ -28,7 +35,8 @@ public sealed record FaceIdLoginOutcome(
     string BusinessCode,
     string Message,
     string Diagnostic,
-    double? Similarity);
+    double? Similarity,
+    double? SFaceSimilarity = null);
 
 public sealed class FaceIdLoginService
 {
@@ -49,6 +57,7 @@ public sealed class FaceIdLoginService
     public bool Enabled => _opt.Enabled;
     public double Threshold => _opt.Threshold;
     public double GrayBand => _opt.GrayBand;
+    public double SFaceThreshold => _opt.SFaceThreshold;
 
     /// <summary>
     /// 对一个**已经确定存在的账号**做一次人脸登录。
@@ -89,6 +98,7 @@ public sealed class FaceIdLoginService
         var padRejected = 0;
         var compared = 0;
         var best = double.NegativeInfinity;
+        var bestSFace = double.NegativeInfinity;
         var diagnostics = new List<string>(3);
 
         try
@@ -150,14 +160,19 @@ public sealed class FaceIdLoginService
                 }
 
                 compared++;
+                // 两个模型**各自**取模板 max（不是逐副本相与）—— 口径见类头 ④。
                 foreach (var template in features)
                 {
-                    var sim = _engine.Similarity(feature, template);
+                    var sim = _engine.Similarity(feature.Primary, template.Primary);
                     if (sim > best) best = sim;
+
+                    var simSFace = _engine.Similarity(feature.Second, template.Second);
+                    if (simSFace > bestSFace) bestSFace = simSFace;
                 }
 
-                // 早停：够 Pass 了就不必再采。
-                if (best >= _opt.Threshold) break;
+                // 早停：**两个**分数都够了才停。只看主模型会让"主模型够、SFace 不够"
+                // 的帧提前结束采集，把一次本来还有救的登录判死（类头 ④）。
+                if (best >= _opt.Threshold && bestSFace >= _opt.SFaceThreshold) break;
             }
         }
         finally
@@ -169,6 +184,7 @@ public sealed class FaceIdLoginService
         var trace = $"frames={framesRead} compared={compared} worst={worst}"
             + $" pad_rejected={padRejected}"
             + (double.IsNegativeInfinity(best) ? string.Empty : $" best_sim={best:F4}")
+            + (double.IsNegativeInfinity(bestSFace) ? string.Empty : $" best_sface={bestSFace:F4}")
             + " | " + string.Join(" ; ", diagnostics);
 
         if (double.IsNegativeInfinity(best))
@@ -186,21 +202,24 @@ public sealed class FaceIdLoginService
             return Finish(code, trace, null);
         }
 
-        var decision = FaceIdDecision.Classify(best, _opt.Threshold, _opt.GrayBand);
+        // AND：主模型的阈值/灰区 + 第二模型的通过线（见 FaceIdDecision.ClassifyPair）。
+        var decision = FaceIdDecision.ClassifyPair(
+            best, bestSFace, _opt.Threshold, _opt.GrayBand, _opt.SFaceThreshold);
         return decision switch
         {
-            // 通过：控制器据此签票。相似度一并回传，便于审计留痕（只进审计，不进响应体）。
-            FaceIdVerdict.Pass => new FaceIdLoginOutcome(true, string.Empty, "登录成功", trace, best),
-            FaceIdVerdict.GrayZone => Finish(BusinessCode.FaceIdGrayZone, trace, best),
-            _ => Finish(BusinessCode.FaceIdMismatch, trace, best)
+            // 通过：控制器据此签票。两个相似度一并回传，便于审计留痕（只进审计，不进响应体）。
+            FaceIdVerdict.Pass => new FaceIdLoginOutcome(true, string.Empty, "登录成功", trace, best, bestSFace),
+            FaceIdVerdict.GrayZone => Finish(BusinessCode.FaceIdGrayZone, trace, best, bestSFace),
+            _ => Finish(BusinessCode.FaceIdMismatch, trace, best, bestSFace)
         };
     }
 
     private static FaceIdLoginOutcome Fail(string businessCode, string diagnostic) =>
         Finish(businessCode, diagnostic, null);
 
-    private static FaceIdLoginOutcome Finish(string businessCode, string diagnostic, double? similarity) =>
-        new(false, businessCode, FaceIdCodes.MessageFor(businessCode), diagnostic, similarity);
+    private static FaceIdLoginOutcome Finish(string businessCode, string diagnostic,
+        double? similarity, double? sfaceSimilarity = null) =>
+        new(false, businessCode, FaceIdCodes.MessageFor(businessCode), diagnostic, similarity, sfaceSimilarity);
 
     private void SleepBetweenFrames()
     {

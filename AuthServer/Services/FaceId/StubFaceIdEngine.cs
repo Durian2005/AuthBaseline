@@ -17,7 +17,8 @@ namespace AuthServer.Services.FaceId;
  * 特征由"呈现身份"字符串的 SHA-256 确定性派生 ——
  * 同一个身份两次派生出的向量逐位相同，所以"录入 → 验证"的余弦正好是 1.0；
  * 换一个身份则两个向量近乎正交。这正是真引擎里"本人 / 非本人"的语义。
- * 派生维度取 512，与 ArcFace 真实输出一致（模板里记的 dim 因此两种引擎通用）。
+ * 派生两路：主模型 512 维（ArcFace）、第二模型 128 维（SFace），各自用不同的盐，
+ * 与真实引擎的两条输出维度一致（模板里记的 dim/dim2 因此两种引擎通用）。
  *
  * ⚠️ 派生必须走"无符号整数 → [-1,1) 线性映射"，**不能**把 4 个字节直接
  *    `BitConverter.ToSingle` 转 float（P0-5 单测钉住，改前先读 Derive 的注释）：
@@ -121,12 +122,21 @@ public sealed class StubFaceIdEngine : IFaceIdEngine
         return new FaceIdBox { X = x, Y = y, W = w, H = h, Points = pts, Score = 0.99 };
     }
 
-    public double[]? Feature(FaceIdFrame frame, FaceIdBox box)
+    public FaceIdFeaturePair? Feature(FaceIdFrame frame, FaceIdBox box)
     {
         // low_quality：模拟"这一帧不可用"（对齐失败/画面质量不足），
         // 上层据此走"不计次"的质量分支。
         if (string.Equals(_opt.StubBehavior, "low_quality", StringComparison.Ordinal)) return null;
-        return Derive(_opt.StubIdentity);
+
+        // sface_mismatch：**只让第二模型对不上**（主模型仍然对得上）。
+        // 这条分支是 AND 落地的唯一"活证据"：如果判定被写成"主模型说了算"，
+        // 这个行为会**通过**登录 —— 而正确实现必须拒绝。没有它，
+        // "两个模型都参与判定"这句话只能靠读代码相信。
+        var secondIdentity = string.Equals(_opt.StubBehavior, "sface_mismatch", StringComparison.Ordinal)
+            ? _opt.StubIdentity + "#impostor"
+            : _opt.StubIdentity;
+
+        return new FaceIdFeaturePair(Derive(_opt.StubIdentity), DeriveSecond(secondIdentity));
     }
 
     /// <summary>
@@ -155,12 +165,40 @@ public sealed class StubFaceIdEngine : IFaceIdEngine
     /// 换成均匀映射后：不可能产出非有限值；同身份余弦 = 1.0（双精度 epsilon 内）；
     /// 实测 190 个跨身份组合 |cos| 最大 0.12、均值 0.038。
     /// </remarks>
-    internal static double[] Derive(string identity)
+    internal static double[] Derive(string identity) => Derive(identity, 512, "#");
+
+    /// <summary>
+    /// 第二模型（SFace，128 维）的派生。与 <see cref="Derive"/> 同一套映射、**不同的盐**。
+    ///
+    /// 为什么要换盐而不是"取前 128 维"：两条链路的特征必须是**两个独立空间**的样本，
+    /// 取前缀等于让它们共享同一批哈希字节 —— 那样"两个模型独立投票"就成了假象，
+    /// 一旦将来有人把维度调成相同，两条链路会立刻退化成同一个模型的两次调用。
+    /// </summary>
+    internal static double[] DeriveSecond(string identity) => Derive(identity, 128, "#sface#");
+
+    /// <summary>
+    /// 从身份字符串确定性派生 dim 维特征：SHA-256(identity#i) 取 32 字节，
+    /// 每 4 字节按**无符号**整数读出后线性映射到 [-1,1)，每块 8 个坐标。
+    /// </summary>
+    /// <remarks>
+    /// 为什么不是"每 4 字节直接转 float"（`BitConverter.ToSingle`）——
+    /// 这条弯路 P0-5 的单测已经踩过并钉住，改动前务必读完：
+    ///   ① **NaN 污染**：哈希字节按 IEEE-754 单精度解释时，约 0.8% 的字节组
+    ///      会落在 NaN/Inf 编码区。向量里只要有一个 NaN，点积整体变 NaN，
+    ///      "同身份余弦 1.0"的承诺崩塌，本人被 Mismatch 拒在门外。
+    ///   ② **量级失控**：float32 位模式横跨约 1e-38~1e38，余弦被少数极端
+    ///      坐标主导。实测 190 个跨身份组合里 |cos| 最大 0.36 —— 对默认
+    ///      阈值 0.50 虽仍未越界，但"近乎正交"的注释已经是假的，
+    ///      而 P3 一旦把阈值往下调，假引擎就会开始假阳性。
+    /// 换成均匀映射后：不可能产出非有限值；同身份余弦 = 1.0（双精度 epsilon 内）；
+    /// 实测 190 个跨身份组合 |cos| 最大 0.12、均值 0.038。
+    /// </remarks>
+    private static double[] Derive(string identity, int dim, string salt)
     {
-        var feature = new double[512];
-        for (int i = 0; i < 64; i++)
+        var feature = new double[dim];
+        for (int i = 0; i < dim / 8; i++)
         {
-            var block = SHA256.HashData(Encoding.UTF8.GetBytes($"{identity}#{i}"));
+            var block = SHA256.HashData(Encoding.UTF8.GetBytes($"{identity}{salt}{i}"));
             for (int j = 0; j < 8; j++)
             {
                 var u = BitConverter.ToUInt32(block, j * 4);

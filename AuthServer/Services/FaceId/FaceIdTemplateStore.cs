@@ -84,9 +84,12 @@ public sealed class FaceIdTemplateStore : IUserDataPurger
     ///
     /// 上限是**安全参数**而不是性能参数：模板越多，"总有一张碰巧命中"的概率越大。
     /// 本模块是唯一登录因子，所以默认只留 3 张（详见 FaceIdTemplate 的注释）。
+    ///
+    /// ⚠️ 一对向量**必须同时**落库（cipher + cipher2）。只写一半等于造出一张
+    ///    "只能单模型比对"的模板，而它在状态接口里和正常模板长得一模一样。
     /// </summary>
     public async Task<(long Count, long PurgedForeign, long Evicted)> AddAsync(
-        string userId, string username, double[] feature)
+        string userId, string username, FaceIdFeaturePair feature)
     {
         long purged = 0;
         var foreign = await Collection.Find(t => t.UserId == userId && t.ModelId != _model.ModelId)
@@ -99,7 +102,8 @@ public sealed class FaceIdTemplateStore : IUserDataPurger
             purged = del.DeletedCount;
         }
 
-        var (cipher, nonce, tag) = _crypto.Encrypt(feature, Aad(userId));
+        var (cipher, nonce, tag) = _crypto.Encrypt(feature.Primary, Aad(userId));
+        var (cipher2, nonce2, tag2) = _crypto.Encrypt(feature.Second, AadSecond(userId));
         await Collection.InsertOneAsync(new FaceIdTemplate
         {
             UserId = userId,
@@ -107,9 +111,13 @@ public sealed class FaceIdTemplateStore : IUserDataPurger
             Cipher = cipher,
             Nonce = nonce,
             Tag = tag,
-            Dim = feature.Length,
+            Dim = feature.Primary.Length,
+            Cipher2 = cipher2,
+            Nonce2 = nonce2,
+            Tag2 = tag2,
+            Dim2 = feature.Second.Length,
             ModelId = _model.ModelId,
-            Version = 1,
+            Version = 2,
             CreatedAt = DateTime.UtcNow
         });
 
@@ -133,24 +141,28 @@ public sealed class FaceIdTemplateStore : IUserDataPurger
     }
 
     /// <summary>
-    /// 读出该账号**当前模型可用**的模板特征。
+    /// 读出该账号**当前模型可用**的模板特征（每张 = 一对）。
     /// 模型不符的跳过（计入 <c>foreign</c>）；解密失败的跳过（计入 <c>unreadable</c>）。
     /// 这两个计数必须分开：前者是"该重新录"，后者是"本机密钥/密文出事了"。
+    ///
+    /// 任一组读不出来 ⇒ 整张模板计入 unreadable 并跳过，**不返回半对**。
+    /// 理由同 AddAsync：半对模板只会在 AND 里制造一次"另一个模型恒不过"的假拒。
     /// </summary>
-    public async Task<(List<double[]> Features, int Foreign, int Unreadable)> LoadFeaturesAsync(string userId)
+    public async Task<(List<FaceIdFeaturePair> Features, int Foreign, int Unreadable)> LoadFeaturesAsync(string userId)
     {
         var docs = await Collection.Find(t => t.UserId == userId).ToListAsync();
-        var features = new List<double[]>(docs.Count);
+        var features = new List<FaceIdFeaturePair>(docs.Count);
         int foreign = 0, unreadable = 0;
 
         foreach (var doc in docs)
         {
             if (!_model.Matches(doc.ModelId)) { foreign++; continue; }
-            if (doc.Dim != _model.Dim) { unreadable++; continue; }
+            if (doc.Dim != _model.Dim || doc.Dim2 != _model.SFaceDim) { unreadable++; continue; }
 
-            var feature = _crypto.Decrypt(doc.Cipher, doc.Nonce, doc.Tag, doc.Dim, Aad(userId));
-            if (feature is null) unreadable++;
-            else features.Add(feature);
+            var primary = _crypto.Decrypt(doc.Cipher, doc.Nonce, doc.Tag, doc.Dim, Aad(userId));
+            var second = _crypto.Decrypt(doc.Cipher2, doc.Nonce2, doc.Tag2, doc.Dim2, AadSecond(userId));
+            if (primary is null || second is null) { unreadable++; continue; }
+            features.Add(new FaceIdFeaturePair(primary, second));
         }
         return (features, foreign, unreadable);
     }
@@ -171,6 +183,14 @@ public sealed class FaceIdTemplateStore : IUserDataPurger
 
     /// <summary>附加认证数据：把密文绑定到账号，使模板不可跨账号搬运。</summary>
     private static string Aad(string userId) => "AuthBaselineFaceIdTemplate|" + userId;
+
+    /// <summary>
+    /// 第二组密文的 AAD。**刻意与第一组不同**：
+    /// 两组密文如果共用同一份 AAD，把它们互换位置后解密仍然成功 —— 于是
+    /// "512 维那一组"与"128 维那一组"的身份就只剩长度差异在守（而长度是明文可改的）。
+    /// 这里差一个后缀，互换立刻变成认证失败。
+    /// </summary>
+    private static string AadSecond(string userId) => Aad(userId) + "|sface";
 
     // ── IUserDataPurger：账号注销时由用户管理域遍历调用 ──
     // 刻意通过接口登记，而不是让 UserAdminController 直接引用本类：

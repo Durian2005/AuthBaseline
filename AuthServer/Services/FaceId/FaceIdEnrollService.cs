@@ -47,6 +47,7 @@ public sealed class FaceIdEnrollService
     public bool Enabled => _opt.Enabled;
     public FaceIdEngineStatus EngineStatus => _engine.Status;
     public double Threshold => _opt.Threshold;
+    public double SFaceThreshold => _opt.SFaceThreshold;
     public int MaxTemplates => _opt.MaxTemplates;
     public string ModelId => _store.ModelId;
     public bool PadEnabled => _opt.PadEnabled;
@@ -102,7 +103,7 @@ public sealed class FaceIdEnrollService
         var padRejected = 0;
         double? padBest = null;
         var diagnostics = new List<string>(3);
-        double[]? feature = null;
+        FaceIdFeaturePair? feature = null;
 
         try
         {

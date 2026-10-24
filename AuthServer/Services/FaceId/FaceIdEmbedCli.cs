@@ -3,11 +3,12 @@ using OpenCvSharp;
 namespace AuthServer.Services.FaceId;
 
 /**
- * 嵌入导出 CLI：`AuthServer --faceid-embed <图片路径> [更多图片...]`
+ * 嵌入导出 CLI：`AuthServer --faceid-embed [--sface] <图片路径> [更多图片...]`
  *
  * 用途只有一个：**P0 Stage 0 对照实验** —— 让 Python 参考管线（cv2 + onnxruntime）
  * 与本引擎对同一张图各算一次嵌入，比对余弦。没有它，"C# 管线与参考实现等价"
- * 这件事只能靠嘴说。
+ * 这件事只能靠嘴说。阶段 2 起两条管线各有一套预处理，`--sface` 用来单独复核
+ * 第二模型（SFace）那条，避免"只验了主模型就宣布双双等价"。
  *
  * 与人脸 2FA 的 FaceFixtureCli 同思路：子命令必须在 CreateBuilder **之前**截住
  * （WebApplication.CreateBuilder 会消费命令行参数；且这条命令只跑引擎，
@@ -31,9 +32,14 @@ public static class FaceIdEmbedCli
         var paths = args.Skip(1).Where(a => !a.StartsWith('-')).ToArray();
         if (paths.Length == 0)
         {
-            Console.Error.WriteLine("usage: AuthServer --faceid-embed <image...>");
+            Console.Error.WriteLine("usage: AuthServer --faceid-embed [--sface] <image...>");
             return 2;
         }
+
+        // `--sface` 导出**第二模型**的向量，否则导出主模型。
+        // 为什么用开关而不是"一次输出两行"：调用方（Python 参考管线）按
+        // "输入顺序 = 输出顺序、一行一张图"来配对，多一行会让序号映射整体错位。
+        var wantSecond = args.Any(a => string.Equals(a, "--sface", StringComparison.OrdinalIgnoreCase));
 
         var opt = new FaceIdOptions();
         opt.ApplyEnvironmentOverrides();
@@ -67,14 +73,15 @@ public static class FaceIdEmbedCli
                 continue;
             }
 
-            var feature = engine.Feature(frame, box);
-            if (feature is null)
+            var pair = engine.Feature(frame, box);
+            if (pair is null)
             {
                 Console.Error.WriteLine($"feature failed: {path}");
                 failed++;
                 continue;
             }
 
+            var feature = wantSecond ? pair.Second : pair.Primary;
             var line = string.Join(",", feature.Select(f =>
                 f.ToString("R", System.Globalization.CultureInfo.InvariantCulture)));
             Console.WriteLine($"{i}\t{feature.Length}\t{line}");

@@ -62,8 +62,22 @@ public class FaceIdStatusResponse
     /// <summary>每人模板上限（安全参数，不是性能参数）。</summary>
     public int MaxTemplates { get; set; }
 
-    /// <summary>当前判定阈值（P3 定档前只是起点）。</summary>
+    /// <summary>
+    /// 主模型（ArcFace）的判定阈值 —— 通过线本身（P3 定档 0.30）。
+    /// ⚠️ 阶段 2 起判定是**两个模型相与**，只报这一个数会让界面少说一半：
+    ///    通过还需要 <see cref="SfaceThreshold"/> 那条线。
+    /// </summary>
     public double Threshold { get; set; }
+
+    /// <summary>
+    /// 第二模型（SFace）的通过线（阶段 2 定档 0.46，独立标定，与 2FA 的 0.50 不同）。
+    /// 与 <see cref="Threshold"/> 一起构成 AND：两个都要过才签票。
+    ///
+    /// ⚠️ 属性名刻意写作 `SfaceThreshold`（而不是 SFaceThreshold）：默认的 camelCase
+    ///    策略只小写**首字母**，`SFace...` 会序列化成 `sFace...`，前端写 `sface...`
+    ///    就永远读到 undefined 且不报错。
+    /// </summary>
+    public double SfaceThreshold { get; set; }
 
     /// <summary>当前模型身份（模板与它绑定；换模型 ⇒ 旧模板作废）。</summary>
     public string ModelId { get; set; } = string.Empty;

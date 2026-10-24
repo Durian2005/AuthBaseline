@@ -66,4 +66,50 @@ public static class FaceIdDecision
         if (similarity >= threshold - band) return FaceIdVerdict.GrayZone;
         return FaceIdVerdict.Mismatch;
     }
+
+    /// <summary>
+    /// 双模型（ArcFace + SFace）的 **AND** 判定。
+    ///
+    /// 规则（阶段 2 落地口径，见 docs/reports/FACEID-SFACE-THRESHOLD-CALIBRATION.md）：
+    ///   通过 ⇔ `arcSim >= arcThreshold` **且** `sfaceSim >= sfaceThreshold`
+    ///
+    /// 四格真值表（按主模型的结论分岔，第二模型**只否决"通过"**）：
+    ///   主模型 Pass   + SFace Pass ⇒ **Pass**
+    ///   主模型 Pass   + SFace 否决 ⇒ **Mismatch**（计次；这是 AND 的唯一新增拒识来源）
+    ///   主模型 Gray   + 任意       ⇒ **GrayZone**（不计次）
+    ///   主模型 Mismatch + 任意     ⇒ **Mismatch**
+    ///
+    /// 为什么第二模型**只能否决通过、不能把灰区降级成计次**（这一条最容易写错）：
+    ///   灰区的唯一作用是"把边界上的本人挪出计次窗口"。若让 SFace 的否决也作用于灰区，
+    ///   那么一个主模型 0.28（原本 GrayZone、不计次）的本人会因 SFace 低分变成计次失败 ——
+    ///   通过集合没变（都没过），**却凭空多了一条把本人推向锁号的路径**。
+    ///   攻击者一个字节都没多拿到，本人却更容易被锁。所以否决只作用于 Pass。
+    ///
+    /// 为什么第二模型**没有**灰区（本函数唯一"不对称"的地方）：
+    ///   灰区宽度必须由**该模型的本人分布**标出来。主模型的 0.05 是从 LFW 本人分布上
+    ///   量出来的；SFace 侧**没有做过这项标定**，照搬 0.05 会凭空造出一条"试了不锁"的
+    ///   地带 —— 而撞脸样本在 SFace 上能摸到 0.40 附近（标定报告 §四：0.40 以下就有
+    ///   探针能过），那正是最不该给免费试错机会的区间。
+    ///   ⇒ 已知代价：AND 的 TAR 95.87%，约 4% 的本人会在主模型通过后被 SFace 否决
+    ///     并计一次失败。多张模板取 max 已把它摊薄，但这条成本是**真实的**，
+    ///     不许在文档里抹掉；要消掉它必须先补 SFace 本人分布的标定。
+    ///
+    /// ⚠️ AND 的**作用单元**是"两模型各自取模板 max 之后相与"，不是"任一副本两模型都过"。
+    ///    线上没有逐副本比对这一步，调用方必须先把 max 取完再进来。
+    /// ⚠️ NaN ⇒ 所有 `>=` 都不成立 ⇒ 走不到 Pass（fail closed）。
+    /// </summary>
+    /// <param name="arcSimilarity">主模型（ArcFace）对全部模板取的最大余弦。</param>
+    /// <param name="sfaceSimilarity">第二模型（SFace）对全部模板取的最大余弦。</param>
+    public static FaceIdVerdict ClassifyPair(
+        double arcSimilarity, double sfaceSimilarity,
+        double arcThreshold, double grayBand, double sfaceThreshold)
+    {
+        // 主模型没过 ⇒ 结论与单模型完全一致（灰区/明确不是本人），第二模型不参与。
+        // 这一句就是"否决只作用于 Pass"的实现，不要把它改写成先判 SFace。
+        if (!(arcSimilarity >= arcThreshold))
+            return Classify(arcSimilarity, arcThreshold, grayBand);
+
+        // 主模型过了：这时才轮到第二模型行使否决权。
+        return sfaceSimilarity >= sfaceThreshold ? FaceIdVerdict.Pass : FaceIdVerdict.Mismatch;
+    }
 }

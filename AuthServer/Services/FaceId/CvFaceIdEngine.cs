@@ -19,12 +19,18 @@ namespace AuthServer.Services.FaceId;
  *      画面尺寸与 `Create` 预设不符时 OpenCV 直接抛异常（不是自动缩放）。
  *      ⇒ 所以 `Create` 时用的尺寸必须与摄像头采集尺寸一致（见 FaceIdOptions.CaptureWidth/Height）。
  *
- *   ② **ArcFace 的预处理是 (x-127.5)/128 + RGB 序，与 SFace 的 scale=1.0 完全不同。**
- *      参考实现（insightface python 包的 ArcFaceONNX 封装）为：
- *        BlobFromImage(aligned, scale=1/128, size=112x112, mean=127.5, swapRB=true, crop=false)
- *      其中 swapRB=true 负责 BGR→RGB（ArcFace 训练于 RGB）。scale/mean 换一个数值
- *      就会掉到另一条支路（SFace 上实测过：换缩放 ⇒ cos≈0.13）。
- *      这条与 ① 的对齐一起，构成 P0 Stage 0 对照实验的验证对象。
+ *   ② **两套预处理，共用同一张对齐图。**
+ *      ArcFace（主）：BlobFromImage(aligned, scale=1/128, size=112x112, mean=127.5, swapRB=true)
+ *      SFace（次）  ：BlobFromImage(aligned, scale=1.0,   size=112x112, mean=0,     swapRB=true)
+ *      swapRB=true 负责 BGR→RGB（两个模型都训练于 RGB）。ArcFace 换 scale/mean 就掉到
+ *      另一条支路（实测 cos≈0.13）；SFace 则**绝不能除 255** —— 它吃原始 0–255 的 RGB，
+ *      多除一个 255 就是同一种"彻底另一条支路"。
+ *      ⚠️ SFace 这里用的是 **ArcFace 的五点对齐图**，不是 SFace 自己的 dst 五点 ——
+ *         0.46 这个阈值就是在"ARCFACE_DST 对齐 → 两条预处理"这套管线上标出来的
+ *         （见 .workbuddy/tmp/faceid-quant/sface_threshold.py:111-123 与
+ *         docs/reports/FACEID-SFACE-THRESHOLD-CALIBRATION.md）。改成 SFace 自己的对齐
+ *         等于换了管线，全部标定数字作废。2FA 模块用的是它自己那套 dst 五点 ⇒
+ *         两个模块的"对齐"**刻意不同源**，不要"统一"。
  *
  *   ③ **对齐必须用 LMEDS，不能用默认的 RANSAC。** 5 个点做相似变换时 RANSAC 会给出
  *      一个错解（2FA 的 SFace 上实测对齐图最大差 178 灰阶），LMEDS 才与
@@ -45,6 +51,7 @@ public sealed class CvFaceIdEngine : IFaceIdEngine, IDisposable
 
     private FaceDetectorYN? _detector;
     private Net? _recognizer;
+    private Net? _secondRecognizer;
     private VideoCapture? _camera;
     private FaceIdEngineStatus _status = FaceIdEngineStatus.Down("尚未初始化");
 
@@ -74,11 +81,14 @@ public sealed class CvFaceIdEngine : IFaceIdEngine, IDisposable
         {
             var detectorPath = EnsureAsciiModel(_opt.ResolveDetector());
             var recognizerPath = EnsureAsciiModel(_opt.ResolveRecognizer());
+            var secondPath = EnsureAsciiModel(_opt.ResolveSFace());
 
-            if (!File.Exists(detectorPath) || !File.Exists(recognizerPath))
+            // 第二模型缺失 ⇒ 整体不可用（fail closed），**绝不**退回单模型：
+            // 静默降级等于在用户不知情时把安全强度砍半，而界面上仍显示"已就绪"。
+            if (!File.Exists(detectorPath) || !File.Exists(recognizerPath) || !File.Exists(secondPath))
             {
                 _status = FaceIdEngineStatus.Down("人脸模型文件缺失");
-                Console.WriteLine($"[FaceId] 引擎不可用：模型缺失（{recognizerPath}）");
+                Console.WriteLine($"[FaceId] 引擎不可用：模型缺失（{recognizerPath} / {secondPath}）");
                 return;
             }
 
@@ -89,11 +99,12 @@ public sealed class CvFaceIdEngine : IFaceIdEngine, IDisposable
             _detector = FaceDetectorYN.Create(detectorPath, string.Empty,
                 new Size(_opt.CaptureWidth, _opt.CaptureHeight), 0.6f, 0.3f, 5000);
             _recognizer = CvDnn.ReadNetFromOnnx(recognizerPath);
+            _secondRecognizer = CvDnn.ReadNetFromOnnx(secondPath);
 
             _status = FaceIdEngineStatus.Up();
             Console.WriteLine($"[FaceId] 引擎就绪 · OpenCV {Cv2.GetVersionString()} · "
                 + $"检测 {_opt.CaptureWidth}x{_opt.CaptureHeight} · 阈值 {_opt.Threshold:F2}"
-                + $"（灰区 ±{_opt.GrayBand:F2}）");
+                + $"（灰区 ±{_opt.GrayBand:F2}）· 并联 SFace 通过线 {_opt.SFaceThreshold:F2}");
         }
         catch (Exception ex)
         {
@@ -262,12 +273,12 @@ public sealed class CvFaceIdEngine : IFaceIdEngine, IDisposable
 
     // ────────────────────────────────────────────── 特征
 
-    public double[]? Feature(FaceIdFrame frame, FaceIdBox box)
+    public FaceIdFeaturePair? Feature(FaceIdFrame frame, FaceIdBox box)
     {
         if (frame.Backing is not Mat mat) return null;
         lock (_modelLock)
         {
-            if (_recognizer is null) return null;
+            if (_recognizer is null || _secondRecognizer is null) return null;
 
             var src = new Point2f[5];
             for (int i = 0; i < 5; i++) src[i] = new Point2f((float)box.Points[i * 2], (float)box.Points[i * 2 + 1]);
@@ -284,18 +295,31 @@ public sealed class CvFaceIdEngine : IFaceIdEngine, IDisposable
             using var aligned = new Mat();
             Cv2.WarpAffine(mat, aligned, m, new Size(112, 112));
 
-            // ② 特征：scale=1/128 / mean=127.5 / swapRB=true —— 一个字都不能改（见类头 ②）
-            using Mat blob = CvDnn.BlobFromImage(aligned, 1.0 / 128.0, new Size(112, 112),
-                new Scalar(127.5, 127.5, 127.5), true, false);
-            _recognizer.SetInput(blob);
-            using Mat output = _recognizer.Forward();
+            // ② 主模型：scale=1/128 / mean=127.5 / swapRB=true —— 一个字都不能改（见类头 ②）
+            var primary = Forward(aligned, 1.0 / 128.0, new Scalar(127.5, 127.5, 127.5), _recognizer);
 
-            int n = (int)output.Total();
-            if (n == 0) return null;
-            var feature = new double[n];
-            for (int i = 0; i < n; i++) feature[i] = output.At<float>(0, i);
-            return feature;
+            // ② 第二模型：scale=1.0 / mean=0 / swapRB=true —— **绝不除 255**（见类头 ②）
+            var second = Forward(aligned, 1.0, new Scalar(0, 0, 0), _secondRecognizer);
+
+            // 任一模型没吐特征 ⇒ 整帧作废。只回一半会让上层拿不到 AND 的另一半，
+            // 而"少一半"这件事在类型上又看不出来（数组短了而已）。
+            if (primary is null || second is null) return null;
+            return new FaceIdFeaturePair(primary, second);
         }
+    }
+
+    /// <summary>一次前向，把输出摊平成 double[]。空输出返回 null。</summary>
+    private static double[]? Forward(Mat aligned, double scale, Scalar mean, Net net)
+    {
+        using Mat blob = CvDnn.BlobFromImage(aligned, scale, new Size(112, 112), mean, true, false);
+        net.SetInput(blob);
+        using Mat output = net.Forward();
+
+        int n = (int)output.Total();
+        if (n == 0) return null;
+        var feature = new double[n];
+        for (int i = 0; i < n; i++) feature[i] = output.At<float>(0, i);
+        return feature;
     }
 
     /// <summary>
@@ -361,6 +385,8 @@ public sealed class CvFaceIdEngine : IFaceIdEngine, IDisposable
             _detector = null;
             _recognizer?.Dispose();
             _recognizer = null;
+            _secondRecognizer?.Dispose();
+            _secondRecognizer = null;
         }
     }
 }

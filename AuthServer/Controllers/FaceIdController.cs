@@ -70,6 +70,7 @@ public class FaceIdController : AuthControllerBase
                 EnrolledAt = await _templates.LastEnrolledAtAsync(user.Id),
                 MaxTemplates = _enroll.MaxTemplates,
                 Threshold = _enroll.Threshold,
+                SfaceThreshold = _enroll.SFaceThreshold,
                 ModelId = _templates.ModelId,
                 EngineReady = engine.Ready,
                 EngineMessage = engine.Ready ? string.Empty : engine.Message,
@@ -200,6 +201,7 @@ public class FaceIdController : AuthControllerBase
                 Evicted = outcome.Evicted,
                 ModelId = _templates.ModelId,
                 Threshold = _enroll.Threshold,
+                SfaceThreshold = _enroll.SFaceThreshold,
                 EnrolledAt = DateTime.UtcNow
             }
         };
@@ -375,9 +377,10 @@ public class FaceIdController : AuthControllerBase
             };
 
             // 审计里记"第二因子 = FACEID"，让审计员能区分"口令登录"与"人脸登录"；
-            // 相似度只进审计（对用户没有意义，对事后判断"是不是擦边通过"有用）。
+            // 两个模型的相似度都只进审计（对用户没有意义，对事后判断"是不是擦边通过"
+            // 以及"是不是 SFace 那一票否决的"有用）。
             await _auditWriter.WriteAsync(user.Id, user.Username, AuditAction.LoginSuccess, statusBefore,
-                new { req.Username, Similarity = outcome.Similarity },
+                new { req.Username, Similarity = outcome.Similarity, SFaceSimilarity = outcome.SFaceSimilarity },
                 new
                 {
                     user.Username,
@@ -402,14 +405,22 @@ public class FaceIdController : AuthControllerBase
             Message = lockMessage ?? outcome.Message,
             Data = new
             {
-                // 相似度回传给界面：本人看到"0.83 还差一点"就知道是光线问题，
-                // 而"0.12"说明脸根本不对。它不构成可用的攻击信息（本来就能反复试）。
+                // 两个分数都回传给界面：本人看到"0.83 还差一点"就知道是光线问题；
+                // 而"主模型 0.81 / SFace 0.39"这种组合说明是第二模型否掉的 ——
+                // 界面上给出的是"没通过"，不会替用户解释成"脸不对"。
+                // 它不构成可用的攻击信息（本来就能反复试）。
+                //
+                // ⚠️ 键名刻意写成小写 sfaceSimilarity：默认的 camelCase 策略只把**首字母**
+                //    小写，`SFaceSimilarity` 会变成 `sFaceSimilarity` —— 少一个字母的客户端
+                //    就永远读到 undefined，而且不会报错（探针第一次就是这么红的）。
                 Similarity = outcome.Similarity,
+                sfaceSimilarity = outcome.SFaceSimilarity,
                 LockoutEnd = lockMessage is null ? (DateTime?)null : user.LockoutEnd
             }
         };
         await _auditWriter.WriteAsync(user.Id, user.Username, action, statusBefore,
-            new { req.Username, Similarity = outcome.Similarity }, body, statusBefore, user.Username,
+            new { req.Username, Similarity = outcome.Similarity, SFaceSimilarity = outcome.SFaceSimilarity },
+            body, statusBefore, user.Username,
             AuditResult.Failed, lockMessage is null ? auditReason : AuditReason.AccountLocked);
         return Unauthorized(body);
     }

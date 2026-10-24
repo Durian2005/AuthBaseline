@@ -62,16 +62,48 @@ public class FaceIdTemplate
     [BsonElement("dim")]
     public int Dim { get; set; }
 
+    // ── 第二特征模型（当前为 SFace，128 维）────────────────────────
+    //
+    // 一张模板 = **一对**同源向量：ArcFace 512 维（上面的 cipher）+ SFace 128 维（下面这组）。
+    // 判定是两者的 AND（"两模型各自取模板 max 后再相与"），所以两者必须**同时**录、同时存、
+    // 同时删 —— 少一半就没有 AND 可言，只剩一次静默的单模型降级。
+    //
+    // 为什么用**独立**的密文字段而不是把两个向量拼进同一个 cipher：
+    //   ① 拼接方案要额外存"切分点"，那个数字一旦与密文对不上，解出来的是两个半截向量，
+    //      却能通过认证标签 —— 认证失败与长度错配混成同一种故障；
+    //   ② 主字段 cipher 的语义保持不变（仍是 512×4=2048 字节），
+    //      存储层与探针里既有的断言不用重写，出问题时也更容易判断是哪一组坏的。
+
+    /// <summary>第二模型（SFace）的 AES-GCM 密文。</summary>
+    [BsonElement("cipher2")]
+    public byte[] Cipher2 { get; set; } = Array.Empty<byte>();
+
+    /// <summary>第二模型的 nonce。与第一组**各自独立随机**，绝不复用。</summary>
+    [BsonElement("nonce2")]
+    public byte[] Nonce2 { get; set; } = Array.Empty<byte>();
+
+    /// <summary>第二模型的认证标签。</summary>
+    [BsonElement("tag2")]
+    public byte[] Tag2 { get; set; } = Array.Empty<byte>();
+
+    /// <summary>第二模型的特征维度（SFace 2021dec = 128）。</summary>
+    [BsonElement("dim2")]
+    public int Dim2 { get; set; }
+
     /// <summary>
     /// 录入时的模型身份（<see cref="AuthServer.Services.FaceId.FaceIdModelIdentity.ModelId"/>）。
     /// 与当前模型不一致 ⇒ 该模板作废（跳过，不参与比对），并在状态里如实报告。
+    /// ⚠️ 该串**同时**包含两条模型的身份：只记主模型等于允许"半新半旧"的向量配对。
     /// </summary>
     [BsonElement("modelId")]
     public string ModelId { get; set; } = string.Empty;
 
-    /// <summary>加密方案版本（将来换算法时区分新老密文）。</summary>
+    /// <summary>
+    /// 加密方案版本。1 = 单向量（历史，已随 modelId 变更整体作废）；
+    /// 2 = 双向量（cipher + cipher2）。
+    /// </summary>
     [BsonElement("version")]
-    public int Version { get; set; } = 1;
+    public int Version { get; set; } = 2;
 
     /// <summary>录入时刻（UTC）。</summary>
     [BsonElement("createdAt")]

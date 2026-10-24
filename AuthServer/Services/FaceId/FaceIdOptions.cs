@@ -14,7 +14,9 @@ namespace AuthServer.Services.FaceId;
  * 与 <see cref="AuthServer.Services.Face.FaceOptions"/>（人脸 2FA）是两套**独立**配置：
  *   模块之间不共享任何实例，后续删除其中任一个模块都不影响另一个。
  *   两个模块可以共用同一个 YuNet 检测模型文件（那只是一个数据文件，不是代码），
- *   特征模型则完全不同：2FA 用 SFace，本模块用 ArcFace（w600k_r50，Glint360K 训练）。
+ *   特征模型也开始有重叠：本模块以 ArcFace（w600k_r50，Glint360K 训练）为主，
+ *   并**并联**一条 SFace 做 AND 判定（原因为性能问题，见 SFaceModel 的注释）。
+ *   共用权重文件 ≠ 共用代码：两条链路的加载、预处理、比对各自独立，零 import。
  */
 public class FaceIdOptions
 {
@@ -74,6 +76,49 @@ public class FaceIdOptions
     /// </summary>
     public string RecognizerModel { get; set; } = "face-models/face_recognition_arcface_w600k_r50.onnx";
 
+    // ── 第二特征模型（SFace）—— 与主模型**同时**判定（AND） ──────────
+
+    /**
+     * 为什么要在 ArcFace 之外再加一条 SFace 并联：
+     *   阶段 0 的量化结论是"阈值、多模板、TTA 都救不了双胞胎"，但**撞脸**可以 ——
+     *   ArcFace 在 40 对撞脸探针上有 2 对误过（0.30 阈值），而两模型各自取模板 max
+     *   再 AND 后是 **0/4**。原因是 SFace 的分数天花板低：它对撞脸给出的绝对相似度
+     *   天然偏低，于是"两个都过"这件事在撞脸上几乎不发生。
+     *
+     * ⚠️ AND **救不了同卵双胞胎**（仍 7/9 通过）。这是模型能力边界，不是参数问题，
+     *    界面与文档必须照实写"同卵双胞胎不可分"，不能用这个改动暗示已解决。
+     *
+     * ⚠️ AND 的**作用单元**是"两模型各自取模板 max 后相与"，不是"任一副本两模型都过"。
+     *    线上没有"逐副本比对"这一步（每人 ≤3 张模板，逐张取 max），
+     *    两种写法在评估上会得到不同的数字，实现必须按前者的口径。
+     */
+
+    /// <summary>
+    /// 第二特征模型（SFace 2021dec，128 维）。与 2FA 模块**共用同一个权重文件**
+    /// （数据不是代码），但两条链路各自独立加载、互不引用。
+    /// ⚠️ 文件缺失 ⇒ 本模块引擎不可用（fail closed 503），**不会**静默退回单模型 ——
+    ///    静默降级等于在用户不知情时把安全强度砍半。
+    /// </summary>
+    public string SFaceModel { get; set; } = "face-models/face_recognition_sface_2021dec.onnx";
+
+    /// <summary>
+    /// 第二模型（SFace）的通过线 —— 与主模型阈值**各自标定，互不换算**。
+    ///
+    /// 0.46 是独立夹逼出来的，**绝不能沿用 2FA 的 0.50**：
+    ///   沿用 0.50 ⇒ 并联后的 TAR 从 97.87% 掉到 92.67%（−5.2pp，白拒 5% 的本人）；
+    ///   0.46 只掉 2.0pp，且 LFW 1500 正 / 1500 负上 FAR 仍为 0。
+    ///   区间来源：撞脸侧下限 0.40（低于它两组撞脸各有 1 个探针能过）、
+    ///             LFW 侧上限 0.451（零误识边界）⇒ 可行区间 [0.451, 0.66]，取 0.46。
+    ///   详见 docs/reports/FACEID-SFACE-THRESHOLD-CALIBRATION.md。
+    ///
+    /// ⚠️ 可测的最小非零 FAR = 1/1500 = 6.7e-4，所以这里的"0"只能表述为"≤6.7e-4"。
+    /// ⚠️ 撞脸侧只有 2 个探针/向，置信度弱于 LFW 侧 —— 不要把它当成撞脸 FAR 的线上估计。
+    /// </summary>
+    public double SFaceThreshold { get; set; } = 0.46;
+
+    /// <summary>第二模型输出维度（SFace 2021dec = 128）。</summary>
+    public int SFaceDim { get; set; } = 128;
+
     // ── 活体判定（PAD，P1b） ────────────────────────────────────────
 
     /// <summary>
@@ -128,10 +173,14 @@ public class FaceIdOptions
 
     /// <summary>
     /// 假引擎行为开关（仅测试用）：
-    /// ok | mismatch | no_face | low_quality | engine_down | multi_face | blurry | turned。
+    /// ok | mismatch | no_face | low_quality | engine_down | multi_face | blurry | turned | sface_mismatch。
     ///
     /// 后三个是 P1 为**录入质量闸门**补的：多脸 / 糊 / 侧脸这三条分支在有真摄像头的
     /// 机器上也难稳定复现，而它们恰恰是最该被回归钉住的（前两条涉及隐私与可用性）。
+    ///
+    /// `sface_mismatch` 是阶段 2（AND）补的：**只让第二模型对不上**，主模型仍然对得上。
+    /// 它是"两个模型都真的参与判定"的唯一可执行证据 —— 若判定被写成主模型说了算，
+    /// 这条分支会通过登录。
     /// </summary>
     public string StubBehavior { get; set; } = "ok";
 
@@ -215,6 +264,14 @@ public class FaceIdOptions
                 System.Globalization.CultureInfo.InvariantCulture, out var g))
             GrayBand = g;
 
+        // 第二模型的通过线单独可调：标定脚本要在同一个二进制上扫一整条曲线，
+        // 改配置文件做不到（安装目录会被覆盖安装冲掉）。
+        var sfaceThreshold = Environment.GetEnvironmentVariable("AUTHBASELINE_FACEID_SFACE_THRESHOLD");
+        if (!string.IsNullOrWhiteSpace(sfaceThreshold)
+            && double.TryParse(sfaceThreshold.Trim(), System.Globalization.NumberStyles.Float,
+                System.Globalization.CultureInfo.InvariantCulture, out var st))
+            SFaceThreshold = st;
+
         var stub = Environment.GetEnvironmentVariable("AUTHBASELINE_FACEID_STUB_IDENTITY");
         if (stub is not null) StubIdentity = stub.Trim();
 
@@ -265,6 +322,7 @@ public class FaceIdOptions
     /// <summary>把模型路径解析成绝对路径（相对路径按 exe 所在目录）。</summary>
     public string ResolveDetector() => Resolve(DetectorModel);
     public string ResolveRecognizer() => Resolve(RecognizerModel);
+    public string ResolveSFace() => Resolve(SFaceModel);
     public string ResolvePadModel() => Resolve(PadModel);
 
     private static string Resolve(string path) =>

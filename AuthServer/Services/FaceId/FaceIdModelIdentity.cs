@@ -12,11 +12,17 @@ namespace AuthServer.Services.FaceId;
  *   只会表现为"这个人有时能进、有时进不去"，这是最难归因的一类故障。
  *
  * 身份怎么算：
- *   · 假引擎 → `stub:<dim>`（假引擎的特征来自用户名哈希，与真模型空间无关）
- *   · 真引擎 → `cv:<权重文件名>:<sha256 前 16 位>:<dim>`
+ *   · 假引擎 → `stub:<dim>+<sfaceDim>`（假引擎的特征来自用户名哈希，与真模型空间无关）
+ *   · 真引擎 → `cv:<主模型名>:<sha256 前 16 位>:<dim>+<次模型名>:<sha256 前 16 位>:<sfaceDim>`
  *     取哈希而不是只看文件名：换一个同名但不同批次的权重，是最常见的"静默换模型"方式。
  *
- * ⚠️ 哈希在**启动时算一次**（174MB ≈ 数百毫秒）。这是刻意的代价：
+ * 为什么身份串**必须同时**包含两条模型：
+ *   模板里存的是**一对**向量（ArcFace 512 + SFace 128），判定是两者的 AND。
+ *   只把主模型写进身份 ⇒ 换了 SFace 权重后老模板仍被判"可用"，
+ *   于是 AND 的一半来自旧空间、一半来自新空间 —— 得分合法但毫无意义，
+ *   表现同样是"有人有时能进、有时进不去"，最难归因。
+ *
+ * ⚠️ 哈希在**启动时算一次**（ArcFace 174MB + SFace 37MB ≈ 数百毫秒）。这是刻意的代价：
  *    模型文件不在仓库里、由装机流程下载，只核对文件名等于没有核对。
  */
 public sealed class FaceIdModelIdentity
@@ -27,35 +33,46 @@ public sealed class FaceIdModelIdentity
     /// <summary>特征维度（模板解密后校验用）。</summary>
     public int Dim { get; }
 
+    /// <summary>第二模型（SFace）的特征维度（模板第二组密文解密后校验用）。</summary>
+    public int SFaceDim { get; }
+
     /// <summary>给人读的一行说明，启动日志里打印。</summary>
     public string Description { get; }
 
     public FaceIdModelIdentity(FaceIdOptions opt)
     {
         Dim = opt.EmbeddingDim <= 0 ? 512 : opt.EmbeddingDim;
+        SFaceDim = opt.SFaceDim <= 0 ? 128 : opt.SFaceDim;
 
         if (opt.UseStubEngine)
         {
             // 假引擎：身份里必须带 stub 前缀，防止"用假引擎录的模板"在真引擎下被误认为可用。
-            ModelId = $"stub:{Dim}";
-            Description = $"假引擎 · {Dim} 维";
+            ModelId = $"stub:{Dim}+{SFaceDim}";
+            Description = $"假引擎 · {Dim}+{SFaceDim} 维";
             return;
         }
 
-        var path = opt.ResolveRecognizer();
+        var primary = Describe(opt.ResolveRecognizer(), Dim);
+        var second = Describe(opt.ResolveSFace(), SFaceDim);
+
+        ModelId = $"cv:{primary.Id}+{second.Id}";
+        Description = $"{primary.Desc} + {second.Desc}";
+    }
+
+    /// <summary>
+    /// 单个模型的身份片段：`<文件名>:<指纹>:<维度>`，文件缺失时指纹位写 `missing`。
+    ///
+    /// 缺失仍给一个**可区分**的值，而不是抛异常：模型缺失时引擎本来就不可用
+    /// （fail closed 503），这里抛出去只会把一个"可选模块"的问题升级成启动失败。
+    /// </summary>
+    private static (string Id, string Desc) Describe(string path, int dim)
+    {
         var name = Path.GetFileName(path);
         if (!File.Exists(path))
-        {
-            // 模型缺失时引擎本来就不可用（fail closed）。这里仍给一个可区分的身份，
-            // 避免"文件缺失"与"文件被换成同名旧版"混成同一种状态。
-            ModelId = $"cv:{name}:missing:{Dim}";
-            Description = $"{name} · 文件缺失";
-            return;
-        }
+            return ($"{name}:missing:{dim}", $"{name} · 文件缺失");
 
         var fingerprint = Fingerprint(path);
-        ModelId = $"cv:{name}:{fingerprint}:{Dim}";
-        Description = $"{name} · sha256:{fingerprint} · {Dim} 维";
+        return ($"{name}:{fingerprint}:{dim}", $"{name} · sha256:{fingerprint} · {dim} 维");
     }
 
     /// <summary>模板里记的模型身份是否与当前模型一致。</summary>
