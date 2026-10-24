@@ -119,4 +119,96 @@ public class FaceIdDecisionTests
         Assert.True(gray[^1] < 0.30, "上沿（阈值本身）必须不含，0.30 是 Pass");
         Assert.True(gray[^1] > 0.2997, "最后一个灰区样本应贴近上沿");
     }
+
+    // ══════════════════════════════ 四、双模型 AND（阶段 2：ArcFace 0.30 + SFace 0.46）
+
+    // 定档依据：docs/reports/FACEID-SFACE-THRESHOLD-CALIBRATION.md
+    //   主模型 0.30（P3 定档，灰区 0.05）· SFace 0.46（独立夹逼，区间 [0.451, 0.66]）
+    private const double Arc = 0.30, Band = 0.05, Sf = 0.46;
+
+    /// <summary>
+    /// ★ 四格真值表。这是 AND 的**全部**语义，必须逐格钉住：
+    ///   主过 + 次过 ⇒ Pass；主过 + 次否 ⇒ Mismatch；
+    ///   主灰 + 任意 ⇒ GrayZone；主否 + 任意 ⇒ Mismatch。
+    ///
+    /// 其中"主灰 + 次否 ⇒ GrayZone"这一格最容易写错成 Mismatch ——
+    /// 那样通过集合不变（都没过），却凭空多一条把本人推向锁号的路径。
+    /// </summary>
+    [Theory(DisplayName = "★ AND 真值表（arc 0.30 / sface 0.46）")]
+    [InlineData(0.80, 0.90, FaceIdVerdict.Pass)]        // 双过
+    [InlineData(0.30, 0.46, FaceIdVerdict.Pass)]        // 两条线本身都含
+    [InlineData(0.80, 0.46, FaceIdVerdict.Pass)]
+    [InlineData(0.80, 0.4599, FaceIdVerdict.Mismatch)]  // ★ 主过、次差一丝 ⇒ 否决（计次）
+    [InlineData(0.95, 0.20, FaceIdVerdict.Mismatch)]    // ★ 主模型很确定也没用
+    [InlineData(0.27, 0.90, FaceIdVerdict.GrayZone)]    // 主灰、次很确定 ⇒ 仍是灰区
+    [InlineData(0.27, 0.10, FaceIdVerdict.GrayZone)]    // ★ 主灰、次否决 ⇒ 灰区（不计次）
+    [InlineData(0.20, 0.90, FaceIdVerdict.Mismatch)]    // 主明确否，次再高也不算
+    [InlineData(0.20, 0.10, FaceIdVerdict.Mismatch)]
+    public void ClassifyPair_TruthTable(double arcSim, double sfaceSim, FaceIdVerdict expected)
+    {
+        Assert.Equal(expected, FaceIdDecision.ClassifyPair(arcSim, sfaceSim, Arc, Band, Sf));
+    }
+
+    /// <summary>
+    /// ★ 第二模型的否决**只作用于 Pass**，不得把灰区降级成计次。
+    ///
+    /// 这是本组断言里最重要的一条：它把"灰区不计次"这条既有的用户保护
+    /// 与"新增一票否决"这两件事的边界固定下来。反过来说，如果哪天有人为了
+    /// "更安全"把否决作用到灰区，就会有一条断言在这里红掉，逼他先解释
+    /// "为什么愿意让边界上的本人更容易被锁"。
+    /// </summary>
+    [Fact(DisplayName = "★ 第二模型否决不作用于灰区（灰区仍不计次）")]
+    public void ClassifyPair_VetoDoesNotDowngradeGrayZone()
+    {
+        foreach (var arcSim in new[] { 0.25, 0.26, 0.27, 0.28, 0.29, 0.2999 })
+        {
+            Assert.Equal(FaceIdVerdict.GrayZone,
+                FaceIdDecision.ClassifyPair(arcSim, 0.0, Arc, Band, Sf));
+            Assert.Equal(FaceIdVerdict.GrayZone,
+                FaceIdDecision.ClassifyPair(arcSim, 0.99, Arc, Band, Sf));
+        }
+    }
+
+    /// <summary>
+    /// AND 的通过集合**必须**是单模型通过集合的子集 —— 加一个模型只能更严，不能更松。
+    /// 扫一遍两条轴：任何一对分数只要 AND 判 Pass，单独主模型判必须也是 Pass。
+    /// （反向不成立：主模型 Pass 的地方 AND 可能否决，这正是新增的安全性。）
+    /// </summary>
+    [Fact(DisplayName = "★ AND 的 Pass 集合 ⊆ 主模型 Pass 集合（只严不松）")]
+    public void ClassifyPair_NeverLooserThanSingleModel()
+    {
+        for (int i = 0; i <= 200; i++)
+        {
+            double arcSim = -1.0 + i * 0.01;
+            var single = FaceIdDecision.Classify(arcSim, Arc, Band);
+            for (int j = 0; j <= 200; j++)
+            {
+                double sfSim = -1.0 + j * 0.01;
+                if (FaceIdDecision.ClassifyPair(arcSim, sfSim, Arc, Band, Sf) == FaceIdVerdict.Pass)
+                    Assert.Equal(FaceIdVerdict.Pass, single);
+            }
+        }
+    }
+
+    /// <summary>
+    /// SFace 这一票是**真的一票**：固定主模型为"远远通过"，SFace 只要差一点点就翻成 Mismatch。
+    /// 它防的是"AND 让主模型两次参与、SFace 从没被比较"这种实现错误 ——
+    /// 那样所有断言都可能照过，而线上等于没加第二个模型。
+    /// </summary>
+    [Fact(DisplayName = "★ SFace 反对票确实能推翻主模型的通过")]
+    public void ClassifyPair_SFaceVetoOverridesStrongArcface()
+    {
+        Assert.Equal(FaceIdVerdict.Pass, FaceIdDecision.ClassifyPair(0.99, 0.46, Arc, Band, Sf));
+        Assert.Equal(FaceIdVerdict.Mismatch, FaceIdDecision.ClassifyPair(0.99, 0.45, Arc, Band, Sf));
+    }
+
+    /// <summary>NaN 从任何一侧进来都不能变成 Pass（fail closed）。</summary>
+    [Fact(DisplayName = "AND：任一侧 NaN ⇒ 不通过")]
+    public void ClassifyPair_NaN_NeverPasses()
+    {
+        Assert.NotEqual(FaceIdVerdict.Pass,
+            FaceIdDecision.ClassifyPair(double.NaN, 0.99, Arc, Band, Sf));
+        Assert.NotEqual(FaceIdVerdict.Pass,
+            FaceIdDecision.ClassifyPair(0.99, double.NaN, Arc, Band, Sf));
+    }
 }

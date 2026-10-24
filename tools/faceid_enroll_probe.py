@@ -6,7 +6,7 @@
 质量闸门（多脸 / 太小 / 侧脸 / 糊）、引擎降级、口令二次确认的计次、
 模板密文落库、上限淘汰、模型作废、注销连带清理。
 
-验证十一组：
+验证十二组：
   A. 状态    —— 未录入的账号：enrolled=false、引擎就绪、上限 3；无票据被拒
   B. 口令闸门—— 空口令 / 错口令（A 组计次 + 审计码）/ 口令对 ⇒ 录入成功
   C. 质量闸门—— no_face / multi_face / blurry / turned / engine_down 逐条都必须被拒，
@@ -23,6 +23,8 @@
   J. 人脸登录—— 成功签票且票据可用、审计标 SecondFactor=FACEID；
                  未录入 ⇒ 401 NOT_ENROLLED 且**不计次**；判错 ⇒ 401 MISMATCH 且**计次**；
                  不存在的账号与「不匹配」同码
+  L. 双模型 AND—— 主模型对得上、只有 SFace 对不上 ⇒ 必须 401（且计次）；
+                 同一张模板两模型都对得上 ⇒ 200（对照组）。防止判定被写成"主模型说了算"
   K. 管理员重置—— 第二因子与刷脸登录**一起清**、各写一条审计且动作码不混用；
                  重复重置（0 张）也留痕；重置后该账号刷脸登录 ⇒ 401 NOT_ENROLLED
 
@@ -305,6 +307,18 @@ def main():
         check("nonce 12 字节 / tag 16 字节",
               len(doc.get("nonce") or b"") == 12 and len(doc.get("tag") or b"") == 16,
               "nonce=%d tag=%d" % (len(doc.get("nonce") or b""), len(doc.get("tag") or b"")))
+        # ★ 阶段 2：一张模板 = 一对向量。第二组（SFace 128 维）必须**同时**落库，
+        #   少一半就等于造出一张只能单模型比对的模板，而它在状态接口里长得完全正常。
+        check("★ 第二组密文长度 = 128 × 4 = 512", len(doc.get("cipher2") or b"") == 512,
+              "len=%d" % len(doc.get("cipher2") or b""))
+        check("★ 第二组 nonce 12 / tag 16",
+              len(doc.get("nonce2") or b"") == 12 and len(doc.get("tag2") or b"") == 16,
+              "nonce2=%d tag2=%d" % (len(doc.get("nonce2") or b""), len(doc.get("tag2") or b"")))
+        check("★ 两组 nonce 不复用（各自独立随机）",
+              doc.get("nonce") != doc.get("nonce2"), "同一 nonce ⇒ GCM 致命误用")
+        check("★ dim2 = 128 且 version = 2（双向量格式）",
+              doc.get("dim2") == 128 and doc.get("version") == 2,
+              "dim2=%s version=%s" % (doc.get("dim2"), doc.get("version")))
         check("模型身份随模板落库（stub:*）",
               str(doc.get("modelId", "")).startswith("stub:"), str(doc.get("modelId")))
         check("模板文档里没有明文字段（feature / vector / embedding）",
@@ -543,6 +557,63 @@ def main():
         check("审计记 FACEID_MISMATCH（本组恰好多 1 条）",
               audit_reason_count("FACEID_MISMATCH") == mismatch_before + 1,
               "n=%d→%d" % (mismatch_before, audit_reason_count("FACEID_MISMATCH")))
+
+    # =====================================================================
+    # L：双模型 AND —— 第二模型的一票否决必须真的生效（阶段 2）
+    # =====================================================================
+    print("\n[L] 双模型 AND：主模型对得上、只有 SFace 对不上 ⇒ 必须拒绝")
+    # 为什么起三个后端：假引擎的行为在**启动时**读取，而这里要的正是"同一张模板、
+    # 同一帧画面、只有第二模型那一半不同"。三段分别是：
+    #   L1 ok            → 建号 + 录入（两条向量都派生自 AND_USER）
+    #   L2 sface_mismatch → 主模型仍派生自 AND_USER（余弦 1.0），第二模型派生自别的身份
+    #   L3 ok            → **对照**：同一张模板、同一帧，两个模型都对得上 ⇒ 必须成功
+    # 若判定被写成"主模型说了算"，L2 会返回 200 —— 这一步就是专门防它的。
+    AND_USER = "faceidand"
+    AND_PW = "Faceidand12345"
+
+    with backend("ok", "l_enroll", {"AUTHBASELINE_FACEID_STUB_IDENTITY": AND_USER}):
+        st, r = login("admin", ADMIN_PW)
+        admin_ticket = (r.get("data") or {}).get("ticket", "")
+        st, r = call("POST", "/api/auth/create-account", {
+            "username": AND_USER, "password": AND_PW, "role": "User",
+            "email": "", "operatorPassword": ADMIN_PW}, admin_ticket)
+        check("建 AND 专用账号", st == 200 and r.get("code") == "OK", "%s %s" % (st, r.get("code")))
+
+        st, r = login(AND_USER, AND_PW)
+        ticket = (r.get("data") or {}).get("ticket", "")
+        check("（准备）AND 账号口令登录", st == 200 and bool(ticket), "%s %s" % (st, r.get("code")))
+        st, r = enroll(ticket, AND_PW)
+        check("（准备）录入一对向量", st == 200 and r.get("code") == "OK", "%s %s" % (st, r.get("code")))
+        check("★ 库里是双向量（cipher2 = 512 字节）",
+              len(templates(AND_USER)) == 1
+              and len(templates(AND_USER)[0].get("cipher2") or b"") == 512,
+              "n=%d" % len(templates(AND_USER)))
+
+    with backend("sface_mismatch", "l_and",
+                 {"AUTHBASELINE_FACEID_STUB_IDENTITY": AND_USER}):
+        mismatch_before = audit_reason_count("FACEID_MISMATCH")
+        st, r = call("POST", "/api/faceid/login", {"username": AND_USER})
+        check("★ 只有 SFace 对不上 ⇒ 401 FACEID_MISMATCH（AND 生效）",
+              st == 401 and r.get("code") == "FACEID_MISMATCH", "%s %s" % (st, r.get("code")))
+        d = r.get("data") or {}
+        check("★ 回传两个分数：主模型 ≥0.30、SFace <0.46",
+              isinstance(d.get("similarity"), (int, float))
+              and isinstance(d.get("sfaceSimilarity"), (int, float))
+              and d["similarity"] >= 0.30 and d["sfaceSimilarity"] < 0.46,
+              "arc=%s sface=%s" % (d.get("similarity"), d.get("sfaceSimilarity")))
+        du = probe_db["Users"].find_one({"username": AND_USER})
+        check("★ SFace 否决计一次失败（不是灰区、不计次那条路）",
+              (du or {}).get("failedLoginAttempts", 0) == 1,
+              "failed=%s" % (du or {}).get("failedLoginAttempts"))
+        check("审计记 FACEID_MISMATCH（恰好多 1 条）",
+              audit_reason_count("FACEID_MISMATCH") == mismatch_before + 1,
+              "n=%d→%d" % (mismatch_before, audit_reason_count("FACEID_MISMATCH")))
+
+    with backend("ok", "l_control", {"AUTHBASELINE_FACEID_STUB_IDENTITY": AND_USER}):
+        st, r = call("POST", "/api/faceid/login", {"username": AND_USER})
+        check("★ 对照：同一张模板、两个模型都对得上 ⇒ 200 并签票",
+              st == 200 and bool((r.get("data") or {}).get("ticket")),
+              "%s %s" % (st, r.get("code")))
 
     # =====================================================================
     # K：管理员重置人脸 —— 两套一起清、两条审计（2026-10-20 补的缺口）

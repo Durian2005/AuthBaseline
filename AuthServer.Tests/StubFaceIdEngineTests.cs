@@ -40,7 +40,7 @@ public class StubFaceIdEngineTests
     /// 刻意不走 internal 的 Derive —— 探针将来用的就是这条公开路径，
     /// 测它就够了；也给生产代码少开一扇 InternalsVisibleTo 的门。
     /// </summary>
-    private static double[] FeatureOf(string identity)
+    private static FaceIdFeaturePair FeatureOf(string identity)
     {
         var engine = New("ok", identity);
         Assert.Null(engine.TryOpen());          // 不开摄像头就读不到帧（Close 语义见下）
@@ -81,10 +81,14 @@ public class StubFaceIdEngineTests
 
         var feature = engine.Feature(frame, box);
         Assert.NotNull(feature);
-        Assert.Equal(512, feature.Length);
-        Assert.All(feature, v => Assert.True(double.IsFinite(v)));
+        // 一对：主模型 512（ArcFace）+ 第二模型 128（SFace）。
+        Assert.Equal(512, feature.Primary.Length);
+        Assert.Equal(128, feature.Second.Length);
+        Assert.All(feature.Primary, v => Assert.True(double.IsFinite(v)));
+        Assert.All(feature.Second, v => Assert.True(double.IsFinite(v)));
 
-        Assert.Equal(1.0, engine.Similarity(feature, feature), 9);
+        Assert.Equal(1.0, engine.Similarity(feature.Primary, feature.Primary), 9);
+        Assert.Equal(1.0, engine.Similarity(feature.Second, feature.Second), 9);
     }
 
     /// <summary>Close 之后读不到帧 —— 桌面端"关页面即释放摄像头"依赖这个语义。</summary>
@@ -151,23 +155,42 @@ public class StubFaceIdEngineTests
     [Fact(DisplayName = "★ Derive 确定性：同身份两次派生逐位相同")]
     public void Derive_SameIdentity_BitwiseStable()
     {
-        Assert.True(FeatureOf("dio").SequenceEqual(FeatureOf("dio")));
+        Assert.True(FeatureOf("dio").Primary.SequenceEqual(FeatureOf("dio").Primary));
+        Assert.True(FeatureOf("dio").Second.SequenceEqual(FeatureOf("dio").Second));
     }
 
     /// <summary>
     /// ★ 派生向量必须**全有限**且落在 [-1,1]：这是 NaN 事故的回归闸门
-    /// （见文件头 ②：曾经约 0.8% 的坐标是 NaN）。
+    /// （见文件头 ②：曾经约 0.8% 的坐标是 NaN）。两条派生都要断 ——
+    /// 第二模型是后来加的，最容易只测了旧的。
     /// </summary>
-    [Fact(DisplayName = "★ Derive 输出：512 维全有限且值域 [-1,1]")]
+    [Fact(DisplayName = "★ Derive 输出：512 维与 128 维都全有限且值域 [-1,1]")]
     public void Derive_Output_AllFiniteInRange()
     {
-        var feature = FeatureOf("dio");
-        Assert.Equal(512, feature.Length);
-        Assert.All(feature, v =>
+        var pair = FeatureOf("dio");
+        Assert.Equal(512, pair.Primary.Length);
+        Assert.Equal(128, pair.Second.Length);
+        foreach (var v in pair.Primary.Concat(pair.Second))
         {
             Assert.True(double.IsFinite(v));
             Assert.InRange(v, -1.0, 1.0);
-        });
+        }
+    }
+
+    /// <summary>
+    /// ★ 第二模型的派生**不是**主模型的前缀。
+    ///
+    /// 为什么这条值得单独钉：如果两条派生共用同一批哈希字节，那么"两个模型独立投票"
+    /// 就只是字面意义 —— 一旦将来维数调成相同，两条链路会立刻退化成同一个模型调两次，
+    /// 而 AND 会看起来仍然在工作（分数还一样高）。换盐是防止这件事的唯一手段，
+    /// 所以这里直接断言"取前 128 个坐标也对不上"。
+    /// </summary>
+    [Fact(DisplayName = "★ 第二模型派生不是主模型前缀（换盐生效）")]
+    public void DeriveSecond_NotPrefixOfPrimary()
+    {
+        var pair = FeatureOf("dio");
+        var prefix = pair.Primary.Take(pair.Second.Length).ToArray();
+        Assert.False(prefix.SequenceEqual(pair.Second));
     }
 
     /// <summary>
@@ -181,16 +204,52 @@ public class StubFaceIdEngineTests
     {
         var engine = New("ok", "dio");
         var self = FeatureOf("dio");
-        Assert.Equal(1.0, engine.Similarity(self, self), 9);
+        Assert.Equal(1.0, engine.Similarity(self.Primary, self.Primary), 9);
+        Assert.Equal(1.0, engine.Similarity(self.Second, self.Second), 9);
 
         // 一组固定身份：确定性派生 ⇒ 这些数字永远不变，断言因此不会flaky。
         var others = new[] { "admin", "auditadmin", "user1", "zhangsan", "lisi",
                              "wangwu", "zhaoliu", "aaa", "bbb", "ccc" };
         foreach (var other in others)
         {
-            var cos = engine.Similarity(self, FeatureOf(other));
+            var cos = engine.Similarity(self.Primary, FeatureOf(other).Primary);
             Assert.True(Math.Abs(cos) < 0.2, $"{other} 与 dio 的余弦 {cos:F4} 超过 0.2");
+
+            // 第二模型同样要"近乎正交"：否则 AND 的第二票会变成噪声票 ——
+            // 它要么恒过（形同废除），要么恒挂（谁都登不进）。
+            var cosS = engine.Similarity(self.Second, FeatureOf(other).Second);
+            Assert.True(Math.Abs(cosS) < 0.2, $"{other} 与 dio 的 SFace 余弦 {cosS:F4} 超过 0.2");
         }
+    }
+
+    // ────────────────────────────────── 五、sface_mismatch：AND 的"活证据"
+
+    /// <summary>
+    /// ★ `sface_mismatch` 行为：**主模型对得上、第二模型对不上**。
+    ///
+    /// 这条分支存在的唯一目的是让"两个模型都真的参与判定"可以被**执行**验证：
+    /// 若有人把 AND 写成"主模型说了算"，这个行为会通过登录。
+    /// 所以这里必须断两件事 —— 主模型余弦确为 1.0（不是它导致拒绝），
+    /// 第二模型余弦确实远低于通过线。
+    /// </summary>
+    [Fact(DisplayName = "★ sface_mismatch：主模型 1.0、第二模型近正交")]
+    public void SFaceMismatch_PrimarySameSecondDifferent()
+    {
+        var engine = New("sface_mismatch", "dio");
+        Assert.Null(engine.TryOpen());
+        var frame = engine.ReadFrame();
+        Assert.NotNull(frame);
+        var box = engine.DetectLargest(frame);
+        Assert.NotNull(box);
+
+        var pair = engine.Feature(frame, box);
+        Assert.NotNull(pair);
+
+        var ok = FeatureOf("dio");
+        Assert.Equal(1.0, engine.Similarity(pair!.Primary, ok.Primary), 9);
+
+        var cosS = engine.Similarity(pair.Second, ok.Second);
+        Assert.True(Math.Abs(cosS) < 0.2, $"第二模型余弦 {cosS:F4} 不够低，AND 的回归会形同虚设");
     }
 
     // ────────────────────────────────────────── 四、Similarity 数学边界

@@ -128,12 +128,13 @@ public class FaceIdModelIdentityTests
 {
     private static FaceIdOptions StubOptions() => new() { Engine = "stub", EmbeddingDim = 512 };
 
-    [Fact(DisplayName = "假引擎 ⇒ 身份带 stub 前缀且含维度")]
+    [Fact(DisplayName = "假引擎 ⇒ 身份带 stub 前缀且含两条维度")]
     public void StubIdentity_IsPrefixed()
     {
         var id = new FaceIdModelIdentity(StubOptions());
-        Assert.Equal("stub:512", id.ModelId);
+        Assert.Equal("stub:512+128", id.ModelId);
         Assert.Equal(512, id.Dim);
+        Assert.Equal(128, id.SFaceDim);
     }
 
     /// <summary>
@@ -159,24 +160,61 @@ public class FaceIdModelIdentityTests
         Assert.False(cv.Matches(stub.ModelId));
     }
 
-    [Theory(DisplayName = "Matches：空 / null / 不同值一律不匹配")]
+    [Theory(DisplayName = "Matches：空 / null / 旧格式 / 不同值一律不匹配")]
     [InlineData(null, false)]
     [InlineData("", false)]
     [InlineData("stub:128", false)]
-    [InlineData("stub:512", true)]
+    // ★ 旧格式（单模型）不再匹配：它代表的是一张"只有一半"的模板 ——
+    // 允许它匹配，AND 就会拿一条不存在的第二向量去比。
+    [InlineData("stub:512", false)]
+    [InlineData("stub:512+128", true)]
     public void Matches_IsStrict(string? stored, bool expected)
     {
         Assert.Equal(expected, new FaceIdModelIdentity(StubOptions()).Matches(stored));
     }
 
-    /// <summary>维度配置非法（0 或负数）时回落到 512，而不是让模板校验静默失效。</summary>
-    [Theory(DisplayName = "非法维度 ⇒ 回落到 512")]
+    /// <summary>维度配置非法（0 或负数）时回落到默认值，而不是让模板校验静默失效。</summary>
+    [Theory(DisplayName = "非法维度 ⇒ 回落到 512+128")]
     [InlineData(0)]
     [InlineData(-1)]
     public void InvalidDim_FallsBackTo512(int dim)
     {
         var id = new FaceIdModelIdentity(new FaceIdOptions { Engine = "stub", EmbeddingDim = dim });
         Assert.Equal(512, id.Dim);
-        Assert.Equal("stub:512", id.ModelId);
+        Assert.Equal("stub:512+128", id.ModelId);
+    }
+
+    /// <summary>
+    /// ★ 真引擎的身份必须**同时**纳入两个模型。
+    ///
+    /// 只记主模型的话，"换了 SFace 权重"不会让老模板作废 ⇒ AND 的一半来自旧特征空间、
+    /// 一半来自新空间，得分合法但毫无意义（表现仍是"有人有时能进有时进不去"）。
+    /// 这里用不存在的文件名构造"missing"身份，正好可以在没有模型文件的机器上验证
+    /// 这条组合规则：只改第二模型的名字，身份就必须变。
+    /// </summary>
+    [Fact(DisplayName = "★ cv 身份同时纳入两个模型（只换第二模型也必须作废）")]
+    public void CvIdentity_CoversBothModels()
+    {
+        var both = new FaceIdModelIdentity(new FaceIdOptions
+        {
+            Engine = "cv",
+            RecognizerModel = "face-models/__arc_a__.onnx",
+            SFaceModel = "face-models/__sface_a__.onnx"
+        });
+
+        Assert.StartsWith("cv:", both.ModelId);
+        Assert.Contains("__arc_a__.onnx:missing:512", both.ModelId);
+        Assert.Contains("__sface_a__.onnx:missing:128", both.ModelId);
+
+        var other = new FaceIdModelIdentity(new FaceIdOptions
+        {
+            Engine = "cv",
+            RecognizerModel = "face-models/__arc_a__.onnx",   // 主模型不变
+            SFaceModel = "face-models/__sface_b__.onnx"       // 只换第二模型
+        });
+
+        Assert.NotEqual(both.ModelId, other.ModelId);
+        Assert.False(both.Matches(other.ModelId));
+        Assert.False(other.Matches(both.ModelId));
     }
 }
