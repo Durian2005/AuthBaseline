@@ -10,6 +10,7 @@ import { formatDateTime, formatDuration } from '../utils/format'
 import CreateAccountDialog from '../components/users/CreateAccountDialog.vue'
 import SetRoleDialog from '../components/users/SetRoleDialog.vue'
 import FreezeAccountDialog from '../components/users/FreezeAccountDialog.vue'
+import BatchDialog from '../components/users/BatchDialog.vue'
 import { dormantText, roleLabelOf } from '../utils/userDisplay'
 import { now } from '../composables/clock'
 
@@ -69,7 +70,80 @@ function lockLeft(lockoutEnd) {
   return Math.max(0, Math.ceil((end - now.value) / 1000))
 }
 
+/* ---------------- 批量多选 ----------------
+ * 选择集合只存**用户名**、不存对象：用户列表每 20 秒轮询一次，
+ * 存对象的话刷新后引用就失效了，而"勾选状态跨刷新保留"恰恰是批量操作的基本要求 ——
+ * 谁也不想勾到一半被轮询清空。
+ *
+ * canBatch 是后端 CanBeManagedBy 的**前端镜像**，只用于把不可处置的行置灰。
+ * 真正的边界在后端（批量接口逐条鉴权），两者不一致时以后端为准 ——
+ * 所以这里宁可宽松，也不要在前端替用户决定"哪些能选"。
+ */
+/* 多选模式：默认关闭。
+ * 常驻复选框会让"看一眼用户列表"这件最常做的事多一层视觉噪声，
+ * 而批量处置是低频操作 —— 所以把它的成本挪到"显式开启"这一步。
+ * 关闭时必须清空已选：否则隐藏的选择会在下次开启时"复活"，
+ * 用户看到的勾是上次的、以为是自己刚勾的。 */
+const multiSelect = ref(false)
+
+const selected = ref(new Set())
+const selectedNames = computed(() => [...selected.value])
+
+function canBatch(u) {
+  if (!u) return false
+  if (isSelf(u)) return false
+  if (session.isRoleAdmin) return true
+  return u.role === 'User' || u.role === 'UserAdmin'
+}
+
+const selectableUsers = computed(() => filteredUsers.value.filter(canBatch))
+const allSelected = computed(
+  () => selectableUsers.value.length > 0 && selectableUsers.value.every((u) => selected.value.has(u.username))
+)
+
+function toggleOne(username) {
+  const next = new Set(selected.value)
+  if (next.has(username)) next.delete(username)
+  else next.add(username)
+  selected.value = next
+}
+
+function toggleAll() {
+  if (allSelected.value) {
+    selected.value = new Set()
+    return
+  }
+  selected.value = new Set(selectableUsers.value.map((u) => u.username))
+}
+
+function clearSelection() {
+  selected.value = new Set()
+}
+
+/** 进出多选模式。退出时连带关掉批量弹窗并清空已选，回到"纯浏览"状态。 */
+function toggleMultiSelect() {
+  multiSelect.value = !multiSelect.value
+  if (!multiSelect.value) {
+    batchOpen.value = false
+    clearSelection()
+  }
+}
+
+/** 批量弹窗开关。关闭时清空选择 —— 留着会让人以为还选中着。 */
+const batchOpen = ref(false)
+
+function openBatch() {
+  if (selected.value.size === 0) return
+  batchOpen.value = true
+}
+
+function closeBatch() {
+  batchOpen.value = false
+  clearSelection()
+}
+
 async function run(action, username) {
+
   busyUser.value = username
   try {
     const res = await session[action](username)
@@ -395,6 +469,32 @@ onMounted(() => {
               {{ f.label }}
             </button>
           </div>
+
+          <!-- 多选开关：与上面的状态筛选是两类东西（那是单选筛选、这是模式开关），
+               所以刻意不放进同一组 segmented，避免被读成"选了多选就不能选锁定" -->
+          <button
+            type="button"
+            class="btn btn--sm multi-toggle"
+            :class="{ 'is-on': multiSelect }"
+            :aria-pressed="multiSelect"
+            :title="multiSelect ? '退出多选：清空已选并隐藏勾选框' : '进入多选：批量审批、冻结、注销等'"
+            @click="toggleMultiSelect"
+          >
+            {{ multiSelect ? '退出多选' : '多选' }}
+          </button>
+        </div>
+      </div>
+
+      <!-- 批量操作条：只在有选中时出现，不常驻占用版面 -->
+      <div v-if="multiSelect && selected.size > 0" class="batch-bar">
+        <span class="batch-bar__count">
+          已选 <strong>{{ selected.size }}</strong> 个账号
+        </span>
+        <div class="batch-bar__actions">
+          <button type="button" class="btn btn--sm btn--primary" @click="openBatch">
+            批量处理
+          </button>
+          <button type="button" class="btn btn--sm" @click="clearSelection">取消选择</button>
         </div>
       </div>
 
@@ -402,18 +502,36 @@ onMounted(() => {
         <table class="table table--dense">
           <thead>
             <tr>
+              <th v-if="multiSelect" style="width: 34px">
+                <input
+                  type="checkbox"
+                  :checked="allSelected"
+                  :disabled="selectableUsers.length === 0"
+                  :title="allSelected ? '取消全选' : '全选可处置账号'"
+                  @change="toggleAll"
+                />
+              </th>
               <th style="width: 20%">用户名</th>
               <th style="width: 110px">角色</th>
               <th style="width: 150px">邮箱</th>
               <th style="width: 90px">状态</th>
               <th style="width: 76px">失败次数</th>
               <th style="width: 140px">锁定截止</th>
-              <th>注册时间</th>
+              <th style="width: 106px">注册时间</th>
               <th style="width: 230px">操作</th>
             </tr>
           </thead>
           <tbody>
             <tr v-for="u in filteredUsers" :key="u.id">
+              <td v-if="multiSelect" class="pick">
+                <input
+                  type="checkbox"
+                  :checked="selected.has(u.username)"
+                  :disabled="!canBatch(u)"
+                  :title="canBatch(u) ? `选择「${u.username}」` : '当前身份不能处置该账号'"
+                  @change="toggleOne(u.username)"
+                />
+              </td>
               <td>
                 <div class="name">
                   <span class="selectable">{{ u.username }}</span>
@@ -449,7 +567,7 @@ onMounted(() => {
                 </span>
                 <span v-else>{{ u.lockoutEnd ? formatDateTime(u.lockoutEnd) : '—' }}</span>
               </td>
-              <td class="table__mono">{{ formatDateTime(u.createdAt) }}</td>
+              <td class="table__mono nowrap">{{ formatDateTime(u.createdAt) }}</td>
               <td>
                 <div class="row-actions">
                   <button
@@ -696,6 +814,11 @@ onMounted(() => {
          角色任免是系统内权限最高的操作，需二次校验操作者本人口令。 -->
     <SetRoleDialog v-model:target="roleTarget" />
   </div>
+  <BatchDialog
+    :usernames="batchOpen ? selectedNames : []"
+    :users="session.users"
+    @close="closeBatch"
+  />
 </template>
 
 <style scoped>
@@ -879,4 +1002,54 @@ onMounted(() => {
   flex-shrink: 0;
 }
 
+/* ---------- 批量多选 ---------- */
+/* 时间类单元格不折行：折起来会把日期劈成 "2026-10-" 和 "05" 两段，比溢出更难读 */
+.nowrap {
+  white-space: nowrap;
+}
+
+/* 多选开关：关闭时是普通次级按钮，开启时填主色 —— 模式状态要一眼可辨，
+   不能靠"复选框列有没有出现"这种间接线索让人猜 */
+.multi-toggle {
+  border-color: var(--c-border);
+}
+.multi-toggle.is-on {
+  background: var(--c-primary);
+  border-color: var(--c-primary);
+  color: var(--c-on-primary);
+}
+.multi-toggle.is-on:hover:not(:disabled) {
+  background: var(--c-primary-hover);
+  border-color: var(--c-primary-hover);
+}
+
+.pick {
+  width: 34px;
+  text-align: center;
+}
+.pick input {
+  cursor: pointer;
+}
+.pick input:disabled {
+  cursor: not-allowed;
+  opacity: 0.35;
+}
+.batch-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-2);
+  padding: 8px 12px;
+  margin-bottom: var(--sp-2);
+  border-radius: var(--radius-md, 8px);
+  border: 0.5px solid var(--color-border-info, rgba(133, 183, 235, 0.4));
+  background: var(--color-background-info, rgba(133, 183, 235, 0.08));
+}
+.batch-bar__count {
+  font-size: 13px;
+}
+.batch-bar__actions {
+  display: flex;
+  gap: 8px;
+}
 </style>

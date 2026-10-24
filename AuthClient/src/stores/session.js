@@ -488,6 +488,7 @@ export const useSessionStore = defineStore('session', () => {
     resetFace: admin.resetFace,
     createAccount: admin.createAccount,
     setRole: admin.setRole,
+    batchAction: admin.batchAction,
     startAdminPolling: admin.startAdminPolling,
     stopAdminPolling: admin.stopAdminPolling,
 

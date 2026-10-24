@@ -272,6 +272,20 @@ export const api = {
   deleteUser: (username) => request('/auth/delete-user', { method: 'POST', body: { username } }),
 
   /**
+   * 批量处置：对多个账号执行**同一个**动作。
+   *
+   * 返回 `{ total, ok, failed, items: [{ username, success, code, message }] }`。
+   * 后端是逐条执行的 —— 部分成功是正常结果，不是错误：
+   * 无权处置的目标会被拒、其余照做，因此调用方**必须**看 items，
+   * 不能只看 HTTP 200 就当作"全都成了"。
+   *
+   * 全部失败时后端返回 400 + 同样的 items 明细，所以这里不额外抛错，
+   * 由 `batchAction` 统一处理两种形态。
+   */
+  batch: (action, usernames, params = {}) =>
+    request('/auth/batch', { method: 'POST', body: { action, usernames, ...params } }),
+
+  /**
    * 管理员创建账号（普通用户 / 用户管理员 / 审计管理员）。
    *
    * 与 register 的区别：不发验证码、建号即启用。

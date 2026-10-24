@@ -193,9 +193,39 @@ export function useAdminDomain(core) {
     return res
   }
 
+  /**
+   * 批量处置：对多个账号执行**同一个**动作。
+   *
+   * 与上面六个单条动作的关系：后端就是循环调用它们，不是另一套业务。
+   * 因此这里也只刷新一次清单，而不是每条结果都 refresh ——
+   * 20 个目标会打出 20 轮请求，还会让列表在眼前连续跳 20 次。
+   *
+   * 返回 `{ message, summary, allFailed? }`：
+   *   · summary = { total, ok, failed, items[] }，部分成功是正常结果；
+   *   · 全部失败时后端返回 400 + 完整明细，这里**不当作异常抛出** ——
+   *     管理员要看的是"N 个为什么都没做成"，而不是一句"操作失败"。
+   *     真正的异常（网络断开、无权限）仍然照抛，由调用方提示。
+   */
+  async function batchAction(action, usernames, params = {}) {
+    try {
+      const res = await api.batch(action, usernames, params)
+      markOnline()
+      await refreshUsers()
+      await refreshDormant({ silent: true })
+      return { message: res?.message ?? '操作完成', summary: res?.data ?? null }
+    } catch (err) {
+      if (err?.code === 'BATCH_ALL_FAILED' && err.data) {
+        markOnline()
+        await refreshUsers()
+        await refreshDormant({ silent: true })
+        return { message: err.message || '全部未处理', summary: err.data, allFailed: true }
+      }
+      throw err
+    }
+  }
+
   /** 用户列表里包含自己时，同步回本地会话状态（例如角色被别处调整） */
-  function syncSelfFromUsers() {
-    if (!currentUser.value) return
+  function syncSelfFromUsers() {    if (!currentUser.value) return
     const me = users.value.find((u) => u.username === currentUser.value.username)
     if (!me) return
     currentUser.value = {
@@ -252,6 +282,7 @@ export function useAdminDomain(core) {
     resetFace,
     createAccount,
     setRole,
+    batchAction,
     reset,
     // 轮询开关
     startAdminPolling: () => adminPoller.start(),
