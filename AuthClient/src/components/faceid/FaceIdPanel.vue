@@ -46,6 +46,18 @@ const modelMismatch = computed(
   () => !!status.value && status.value.templateCount > 0 && status.value.usableCount === 0
 )
 
+/**
+ * 阈值那一行的悬浮说明。
+ * 为什么不把它塞进可见文本：卡片刻意只留三项基础状态，把 AND 的机制写进正文
+ * 会把日常界面变成一份说明书；但"两个数是什么意思"必须能查到，否则那两个数
+ * 看起来像是范围（0.30–0.46），恰好把语义说反了。
+ */
+const thresholdTitle = computed(() =>
+  status.value?.sfaceThreshold != null
+    ? '主模型（ArcFace）/ 第二模型（SFace）：两个都达到才通过（AND）'
+    : '判定阈值'
+)
+
 function errorText(err) {
   return err instanceof ApiError ? err.message : err?.message || '操作失败'
 }
@@ -151,7 +163,14 @@ async function submit() {
       </div>
       <div class="sec__row">
         <span class="sec__label">判定阈值</span>
-        <span class="sec__value">{{ status?.threshold != null ? status.threshold.toFixed(2) : '—' }}</span>
+        <!-- 阶段 2 起判定是两个模型相与（AND）：只显示一个数会让用户以为"过一个就行"。
+             主模型（ArcFace）/ 第二模型（SFace）并排给出，第二个数缺失时退回单值。 -->
+        <span class="sec__value" :title="thresholdTitle">
+          {{ status?.threshold != null ? status.threshold.toFixed(2) : '—' }}
+          <template v-if="status?.sfaceThreshold != null">
+            / {{ status.sfaceThreshold.toFixed(2) }}
+          </template>
+        </span>
       </div>
 
       <!-- 模板与模型绑定：换了权重，旧模板不能再比，必须明确告诉用户"重新录" -->
