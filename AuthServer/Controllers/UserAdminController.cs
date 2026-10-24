@@ -823,6 +823,210 @@ public class UserAdminController : AuthControllerBase
         return Ok(response);
     }
 
+    /* ==================== 批量处置 ==================== */
+
+    /**
+     * 批量处置：对多个账号执行**同一个**动作（approve / unlock / freeze / delete / reset-face / set-role）。
+     *
+     * 三条设计取向，都是"批量"特有的坑：
+     *
+     *   ① **逐条执行、逐条留痕，不做整体事务。**
+     *      批量操作最常见的失败原因是"选多了"（勾到一个自己够不到的上级，或勾到自己）。
+     *      整批回滚只会让人反复试，而且事后答不出"到底哪些没做"。
+     *      每个目标写一条与单条接口**逐字一致**的审计 ——
+     *      所以「谁被处置了」在哈希链里仍然可以独立还原，不因为走了批量就变成一条模糊的汇总。
+     *
+     *   ② **权限不放宽：批量不是一条新的授权路径，它只是循环调用单条入口。**
+     *      每个目标仍然各自过 RequireUserAdminAsync + CanBeManagedBy（含自我豁免）。
+     *      前端把无权行置灰只是提前告知，不是安全边界 —— 手敲请求一样会被拒并留痕。
+     *
+     *   ③ **入口先做一次预检，一个目标都不进循环也能拒绝。**
+     *      否则操作者本身没有权限时，一次误点会往审计链里刷进 N 条同样的拒绝记录，
+     *      把真正的越权尝试淹掉。预检通过后，被调用的 Action 内部仍会再鉴权一次 ——
+     *      重复但无害，换来的是"批量与单条行为完全一致"这个更值钱的保证。
+     *
+     * 为什么不做成通用的"批量编辑"（多字段一起改）：
+     *   六种动作的前置校验、审计码、副作用全不相同，揉进一个函数就是六套授权规则
+     *   挤在一处，判错一次即越权。这里的 switch 只**分派**，不复制任何业务逻辑。
+     */
+    [HttpPost("batch")]
+    public async Task<IActionResult> Batch([FromBody] BatchRequest req)
+    {
+        // 动作名与用户名都走 Norm（Trim + 转小写）：前端传什么大小写都不影响分派，
+        // 也不会因为一个多余空格就多出一条"用户不存在"。
+        var action = Norm(req.Action);
+        var targets = (req.Usernames ?? new List<string>())
+            .Select(Norm)
+            .Where(u => !string.IsNullOrEmpty(u))
+            .Distinct(StringComparer.Ordinal)
+            .ToList();
+
+        if (targets.Count == 0)
+        {
+            return BadRequest(new ApiResponse
+            {
+                Success = false,
+                Code = BusinessCode.EmptyFields,
+                Message = "请至少选择一个账号"
+            });
+        }
+
+        if (!BatchAction.Known(action))
+        {
+            return BadRequest(new ApiResponse
+            {
+                Success = false,
+                Code = BusinessCode.BatchUnknownAction,
+                Message = $"不支持的批量动作「{req.Action}」"
+            });
+        }
+
+        // 单次上限：不是为了防刷（本接口有票据鉴权），而是避免"一次全选"跑成超时 ——
+        // 半途超时的话前端拿不到逐条明细，等于什么都没说清楚。
+        if (targets.Count > MaxBatchTargets)
+        {
+            return BadRequest(new ApiResponse
+            {
+                Success = false,
+                Code = BusinessCode.BatchTooMany,
+                Message = $"一次最多处理 {MaxBatchTargets} 个账号（本次 {targets.Count} 个）"
+            });
+        }
+
+        // 预检：级别由动作决定（改角色只属于 Admin）。target 传空 ——
+        // 这里拒绝的是"操作者没这个权限"，不是"某个目标不可处置"，两者在审计里不该混成一条。
+        var auditCode = BatchAction.AuditCodeOf(action);
+        var (admin, deny) = BatchAction.RequiresAdmin(action)
+            ? await RequireAdminAsync(auditCode, string.Empty)
+            : await RequireUserAdminAsync(auditCode, string.Empty);
+        if (deny != null) return deny;
+
+        var items = new List<BatchItemResult>(targets.Count);
+        foreach (var name in targets)
+        {
+            // 分派到单条入口。刻意不在这里重写业务：一旦重写，
+            // "批量"与"单条"就会慢慢长出两套行为，而这正是最难发现的越权来源。
+            IActionResult one = action switch
+            {
+                BatchAction.Approve => await Approve(new ApproveRequest { Username = name }),
+                BatchAction.Unlock => await Unlock(new UnlockRequest { Username = name }),
+                BatchAction.Freeze => await FreezeUser(new FreezeUserRequest { Username = name, Reason = req.Reason }),
+                BatchAction.Delete => await DeleteUser(new DeleteUserRequest { Username = name }),
+                BatchAction.ResetFace => await ResetFace(new ResetFaceRequest { Username = name }),
+                BatchAction.SetRole => await SetRole(new SetRoleRequest
+                {
+                    Username = name,
+                    Role = req.Role,
+                    OperatorPassword = req.OperatorPassword
+                }),
+                _ => throw new InvalidOperationException($"未分派的批量动作：{action}")
+            };
+
+            var (ok, code, message) = ReadApiResult(one);
+            items.Add(new BatchItemResult { Username = name, Success = ok, Code = code, Message = message });
+        }
+
+        var okCount = items.Count(i => i.Success);
+        var failed = items.Count - okCount;
+        var summary = new BatchResult { Total = items.Count, Ok = okCount, Failed = failed, Items = items };
+
+        // 全部没做成 ⇒ 用 400 表达"这次批量没有产生任何效果"，但**明细照给** ——
+        // 否则前端只能显示一句"失败"，管理员还得逐个重点一遍才知道为什么。
+        if (okCount == 0)
+        {
+            return BadRequest(new ApiResponse<BatchResult>
+            {
+                Success = false,
+                Code = BusinessCode.BatchAllFailed,
+                Message = $"{failed} 个账号均未处理，原因见明细",
+                Data = summary
+            });
+        }
+
+        return Ok(new ApiResponse<BatchResult>
+        {
+            Success = true,
+            Code = failed == 0 ? BusinessCode.Ok : BusinessCode.BatchPartial,
+            Message = failed == 0 ? $"已处理 {okCount} 个账号" : $"成功 {okCount} 个，未处理 {failed} 个",
+            Data = summary
+        });
+    }
+
+    /// <summary>单次批量上限。超过即整体拒绝，不做"截断前 N 个"（静默丢目标比报错更坏）。</summary>
+    private const int MaxBatchTargets = 200;
+
+    /// <summary>
+    /// 批量动作名的**唯一**清单。前端只认这几个字符串，后端也只分派这几个 ——
+    /// 表外的名字一律 400，不做"猜一个最像的动作"。
+    /// </summary>
+    private static class BatchAction
+    {
+        public const string Approve = "approve";
+        public const string Unlock = "unlock";
+        public const string Freeze = "freeze";
+        public const string Delete = "delete";
+        public const string ResetFace = "reset-face";
+        public const string SetRole = "set-role";
+
+        public static bool Known(string action) => action
+            is Approve or Unlock or Freeze or Delete or ResetFace or SetRole;
+
+        /// <summary>改角色是唯一收窄到 Admin 的动作（后端单条接口用 RequireAdminAsync）。</summary>
+        public static bool RequiresAdmin(string action) => action == SetRole;
+
+        /// <summary>
+        /// 预检用的审计码：取该动作**真实**对应的码，而不是统一成一个 BATCH。
+        /// 理由是拒绝记录要能回答"他当时想做什么" —— 想注销和想解冻是两件不同的事。
+        /// </summary>
+        public static string AuditCodeOf(string action) => action switch
+        {
+            Approve => AuditAction.Approve,
+            Unlock => AuditAction.Unlock,
+            Freeze => AuditAction.DormantFreeze,
+            Delete => AuditAction.DeleteUser,
+            ResetFace => AuditAction.FaceIdTemplateReset,
+            SetRole => AuditAction.SetRole,
+            _ => AuditAction.DeleteUser
+        };
+    }
+
+    /// <summary>
+    /// 从单条入口返回的 <see cref="IActionResult"/> 里取出 (是否成功, 业务码, 话术)。
+    ///
+    /// 为什么不直接判 HTTP 状态：六个入口把失败分别落在 400 / 401 / 403 / 404，
+    /// 而批量只关心"这一条做没做成"。单条被调用时状态码语义不变，
+    /// 这里只是把两种 ApiResponse 形态统一成三元组。
+    /// </summary>
+    private static (bool Ok, string Code, string Message) ReadApiResult(IActionResult result)
+    {
+        if (result is ObjectResult obj && obj.Value != null)
+        {
+            switch (obj.Value)
+            {
+                case ApiResponse plain:
+                    return (plain.Success, plain.Code, plain.Message);
+                case ApiResponse<UserResponse> typed:
+                    return (typed.Success, typed.Code, typed.Message);
+                default:
+                    // 将来若新增别的 ApiResponse<T>，用反射兜底而不是再加一臂 ——
+                    // 漏一个分支的表现是"明明成功却报失败"，比慢一点糟得多。
+                    var t = obj.Value.GetType();
+                    if (t.IsGenericType && t.GetGenericTypeDefinition() == typeof(ApiResponse<>))
+                    {
+                        var ok = t.GetProperty(nameof(ApiResponse.Success))?.GetValue(obj.Value) is true;
+                        var code = t.GetProperty(nameof(ApiResponse.Code))?.GetValue(obj.Value) as string ?? string.Empty;
+                        var msg = t.GetProperty(nameof(ApiResponse.Message))?.GetValue(obj.Value) as string ?? string.Empty;
+                        return (ok, code, msg);
+                    }
+                    break;
+            }
+        }
+
+        // 走到这里说明返回结构变了（不是 ObjectResult 或不是 ApiResponse）。
+        // 报失败而不是猜成功：批量里"把没做的事说成做了"是最坏的一种错。
+        return (false, BusinessCode.Ok, "无法识别的返回结构");
+    }
+
     /* ==================== 查询 ==================== */
 
     /**

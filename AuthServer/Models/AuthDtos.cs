@@ -132,6 +132,60 @@ public class SetRoleRequest
     public string OperatorPassword { get; set; } = string.Empty;
 }
 
+/// <summary>
+/// 批量处置：对多个账号执行**同一个**动作。
+///
+/// 为什么是"一个动作 × 多个目标"而不是"多个字段一起改"：
+///   六种动作的前置校验、审计码、副作用（吊销票据 / 清两套人脸模板 / 改状态）
+///   全不相同。把它们揉进一个通用的"批量编辑"入口，等于把六套授权规则
+///   塞进一个函数，判错一次就是越权。所以这里只做**分派**，业务仍然走单条入口。
+///
+/// 执行语义（已定，不要改）：
+///   · **逐条执行、逐条留痕**。无权处置的目标（含操作者自己）被拒、其余照做，
+///     不做整批回滚 —— 批量最常见的失败原因是"选多了"，回滚只会让人反复试，
+///     而且事后答不出"到底哪些没做"。
+///   · 每个目标写一条与单条接口**逐字一致**的审计，
+///     因此「谁被处置了」在哈希链里仍可独立还原。
+/// </summary>
+public class BatchRequest
+{
+    /// <summary>
+    /// 动作名，取值见 <c>UserAdminController.BatchAction</c>：
+    /// approve / unlock / freeze / delete / reset-face / set-role。
+    /// </summary>
+    public string Action { get; set; } = string.Empty;
+
+    /// <summary>目标账号用户名清单。去空白、去重、转小写后执行。</summary>
+    public List<string> Usernames { get; set; } = new();
+
+    /// <summary>冻结原因（仅 freeze 使用，可空）。</summary>
+    public string Reason { get; set; } = string.Empty;
+
+    /// <summary>目标角色（仅 set-role 使用）。</summary>
+    public string Role { get; set; } = string.Empty;
+
+    /// <summary>操作者口令（仅 set-role 使用，与单条接口同一要求：二次确认）。</summary>
+    public string OperatorPassword { get; set; } = string.Empty;
+}
+
+/// <summary>批量里**单个目标**的结果。码与话术取自该目标实际走的那条单条接口。</summary>
+public class BatchItemResult
+{
+    public string Username { get; set; } = string.Empty;
+    public bool Success { get; set; }
+    public string Code { get; set; } = string.Empty;
+    public string Message { get; set; } = string.Empty;
+}
+
+/// <summary>批量处置的汇总。前端据此显示"成功 N / 未处理 M"并可展开看每条原因。</summary>
+public class BatchResult
+{
+    public int Total { get; set; }
+    public int Ok { get; set; }
+    public int Failed { get; set; }
+    public List<BatchItemResult> Items { get; set; } = new();
+}
+
 public class LoginResult
 {
     public string Username { get; set; } = string.Empty;

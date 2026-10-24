@@ -33,6 +33,22 @@ public static class BusinessCode
     /// <summary>成功。所有正常返回都用它。</summary>
     public const string Ok = "OK";
 
+    // ── 批量处置 ────────────────────────────────────────────────
+    // 批量不是第七种业务能力，而是六种既有动作的多次调用；
+    // 这四个码只描述"这一次批量调用整体怎么样"，单条结果沿用各动作自己的码。
+
+    /// <summary>部分成功：至少一条执行、至少一条被拒。明细在 data.items 里。</summary>
+    public const string BatchPartial = "BATCH_PARTIAL";
+
+    /// <summary>一条都没做成。整体 success=false，明细仍在 data.items 里。</summary>
+    public const string BatchAllFailed = "BATCH_ALL_FAILED";
+
+    /// <summary>动作名不在允许清单内（防止前端笔误被静默当成某个动作执行）。</summary>
+    public const string BatchUnknownAction = "BATCH_UNKNOWN_ACTION";
+
+    /// <summary>目标数量超过单次上限。</summary>
+    public const string BatchTooMany = "BATCH_TOO_MANY";
+
     // ── 通用校验 ────────────────────────────────────────────────
     public const string EmptyFields = "EMPTY_FIELDS";
     public const string NotFound = "NOT_FOUND";
