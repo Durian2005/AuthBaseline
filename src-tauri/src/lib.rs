@@ -21,6 +21,12 @@ use tauri::{Manager, RunEvent, State, WindowEvent};
 use tauri_plugin_shell::process::{CommandChild, CommandEvent};
 use tauri_plugin_shell::ShellExt;
 
+/// 一次性口令（哈希链）的客户端计算。**纯函数，不碰网络、不碰磁盘、不持有状态**。
+///
+/// 放在壳里而不是前端，是因为它需要「用完即擦的内存」与「不阻塞渲染线程」，
+/// 这两件事在 JS 侧都做不到（详见该模块顶部注释）。
+mod otp;
+
 /// sidecar 名称，对应 src-tauri/binaries/authserver-<target-triple>[.exe]
 const SIDECAR_NAME: &str = "authserver";
 
@@ -124,7 +130,7 @@ pub fn run() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
-        .invoke_handler(tauri::generate_handler![get_backend_url])
+        .invoke_handler(tauri::generate_handler![get_backend_url, otp::otp_compute])
         .setup(|app| {
             let port = pick_free_port().ok_or_else(|| {
                 std::io::Error::new(

@@ -24,7 +24,100 @@ tauri-plugin-shell = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
+# ---- 一次性口令（哈希链）的客户端计算，见 src/otp.rs ----
+# 为什么是这几个 crate 而不是手写：
+#   · pbkdf2 / sha2 是 RustCrypto 的参考实现，带 SHA-NI 加速（100k 次约数十毫秒）；
+#   · 密码学原语一律不手写 —— 省下来的是几十行代码，赔进去的是"常数时间/边界处理"的整套保证。
+# 版本钉住主版本：这些 crate 的 0.x 之间 API 会变（`pbkdf2_hmac` 的签名就变过一次）。
+pbkdf2 = "0.12"
+sha2 = "0.10"
+base64 = "0.22"
+# 擦除口令与链根的缓冲。JS 的 String 不可变、擦不掉，这是放在 Rust 侧的主要理由之一。
+zeroize = "1"
+# 续期时生成新种子。用 getrandom 而不是 rand：只需要"填满 20 字节"，不引入整棵 PRNG 树。
+getrandom = "0.2"
+
 [profile.release]
 # 体积优先（生成的安装包更小），同时保持可接受的构建速度
 opt-level = "s"
 strip = true
+
+# ══════════════════════════════════════════════════════════════════════════
+# 密码学栈的编译档位（**这几行是性能判据的一部分，别当噪音删掉**）
+#
+# 背景：登录耗时判据是「客户端计算带来的增量 < 200 ms」。
+# 而 `pbkdf2_hmac::<Sha256>` 与 `Sha256::digest` 都是**泛型函数** ——
+# 它们的机器码在**调用方 crate**（也就是本包）里单态化，不在 sha2 里。
+# 所以「只给依赖开优化」解决不了问题：真正跑在内层循环里的那份代码
+# 仍按本包的档位生成。实测同一条 100k PBKDF2 + 1000 次 H（含续期的一条新链）：
+#
+#     本包 opt-level 0（仅优化依赖）  441 ms   ← 开发态会直接超标
+#     本包 opt-level 1               25.7 ms
+#     release（主档 "s"）            48.8 ms
+#     release + 下面这几行            30.9 ms
+#
+# 取舍：
+#   · 开发档给本包 1 档而不是 3 档 —— 保留完整调试信息与行号，栈回溯仍可读；
+#   · 依赖侧另外提到 3 档并关掉 debug-assertions / overflow-checks：
+#     那两个检查对第三方密码学实现没有意义，而本包自己的代码**仍然全开**，
+#     那里才是能写出越界的地方；
+#   · 发布档主档仍是 `opt-level = "s"`（体积优先），只给这几个几 KB 的 crate 单独提档。
+# ══════════════════════════════════════════════════════════════════════════
+[profile.dev]
+opt-level = 1
+
+[profile.release.package.sha2]
+opt-level = 3
+[profile.release.package.pbkdf2]
+opt-level = 3
+[profile.release.package.hmac]
+opt-level = 3
+[profile.release.package.digest]
+opt-level = 3
+[profile.release.package.block-buffer]
+opt-level = 3
+[profile.release.package.crypto-common]
+opt-level = 3
+[profile.release.package.generic-array]
+opt-level = 3
+[profile.release.package.cpufeatures]
+opt-level = 3
+[profile.release.package.typenum]
+opt-level = 3
+
+[profile.dev.package.sha2]
+opt-level = 3
+debug-assertions = false
+overflow-checks = false
+[profile.dev.package.pbkdf2]
+opt-level = 3
+debug-assertions = false
+overflow-checks = false
+[profile.dev.package.hmac]
+opt-level = 3
+debug-assertions = false
+overflow-checks = false
+[profile.dev.package.digest]
+opt-level = 3
+debug-assertions = false
+overflow-checks = false
+[profile.dev.package.block-buffer]
+opt-level = 3
+debug-assertions = false
+overflow-checks = false
+[profile.dev.package.crypto-common]
+opt-level = 3
+debug-assertions = false
+overflow-checks = false
+[profile.dev.package.generic-array]
+opt-level = 3
+debug-assertions = false
+overflow-checks = false
+[profile.dev.package.cpufeatures]
+opt-level = 3
+debug-assertions = false
+overflow-checks = false
+[profile.dev.package.typenum]
+opt-level = 3
+debug-assertions = false
+overflow-checks = false
