@@ -1,5 +1,6 @@
 import { computed, ref } from 'vue'
 import { api } from '../../api/client'
+import { PURPOSE, confirmCredential } from '../../api/otp'
 import { createPoller } from '../../composables/poller'
 import { ROLES } from '../roles'
 
@@ -168,8 +169,28 @@ export function useAdminDomain(core) {
    * 该账号用不了「忘记密码」）。但需要操作者（管理员）本人的登录口令
    * 做二次确认 —— 后端在建号之前会再验一次，三种角色一视同仁。
    */
+  /**
+   * 二次确认凭据（P7 起的形态）。
+   *
+   * 界面上一字未变：仍然要求管理员"再输一次口令"。变的是这份口令**去了哪里** ——
+   * 它只在本机参与派生，出门的是一格一次性链值（换回一张绑定用途+目标的确认凭据）。
+   *
+   * P8 删掉了原来的 `?? { operatorPassword: password }` 回退：那一行是"没链就把口令
+   * 原样送上网络"，而服务端已经没有接收它的字段了。留着它不会报错，只会让请求里
+   * 多出一个没人看的明文口令 —— 比报错更糟。
+   */
+  async function confirm(purpose, target, password) {
+    return confirmCredential({
+      purpose,
+      target,
+      username: currentUser.value?.username,
+      password
+    })
+  }
+
   async function createAccount(username, password, roleValue, operatorPassword, email) {
-    const res = await api.createAccount(username, password, roleValue, operatorPassword, email)
+    const credential = await confirm(PURPOSE.CREATE_ACCOUNT, username, operatorPassword)
+    const res = await api.createAccount(username, password, roleValue, credential, email)
     markOnline()
     await refreshUsers()
     return res
@@ -182,7 +203,8 @@ export function useAdminDomain(core) {
    * 操作者自己的会话不受影响，刷新列表即可。
    */
   async function setRole(username, roleValue, operatorPassword) {
-    const res = await api.setRole(username, roleValue, operatorPassword)
+    const credential = await confirm(PURPOSE.SET_ROLE, username, operatorPassword)
+    const res = await api.setRole(username, roleValue, credential)
     markOnline()
     // 如果被改的是自己（后端已禁止，这里只是兜底），同步一下本地角色
     if (username === currentUser.value?.username) {
@@ -208,7 +230,8 @@ export function useAdminDomain(core) {
    */
   async function batchAction(action, usernames, params = {}) {
     try {
-      const res = await api.batch(action, usernames, params)
+      const payload = await prepareBatchParams(action, usernames, params)
+      const res = await api.batch(action, usernames, payload)
       markOnline()
       await refreshUsers()
       await refreshDormant({ silent: true })
@@ -222,6 +245,30 @@ export function useAdminDomain(core) {
       }
       throw err
     }
+  }
+
+  /**
+   * 批量的确认凭据：**每个目标换一张**。
+   *
+   * 为什么不共用一张：确认凭据在签发时绑定了用途 + 目标，它的全部意义就在于
+   * "这次确认是针对这个人的"。拿一张绑定 alice 的票去改 bob 的角色，
+   * 等于把"确认"退化成"点过一次按钮就可以授权任意多次"。
+   *
+   * 代价是每个目标各消耗一格链值。链长 1000、续期是静默的，所以这在配额上无感；
+   * 换来的是批量与单条走**完全相同**的授权路径（后端就是循环调用单条 SetRole）。
+   */
+  async function prepareBatchParams(action, usernames, params) {
+    if (action !== 'set-role' || !params.operatorPassword) return params
+
+    const confirmTokens = {}
+    for (const name of usernames) {
+      const { confirmToken } = await confirm(PURPOSE.SET_ROLE, name, params.operatorPassword)
+      confirmTokens[name] = confirmToken
+    }
+
+    // 口令**不**随请求出门（服务端已经没有 operatorPassword 字段了）。
+    const { operatorPassword, ...rest } = params
+    return { ...rest, confirmTokens }
   }
 
   /** 用户列表里包含自己时，同步回本地会话状态（例如角色被别处调整） */

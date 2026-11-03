@@ -214,6 +214,21 @@ export async function transportInfo() {
   }
 }
 
+/**
+ * 把「二次确认凭据」展开进请求体。
+ *
+ * 六个敏感接口的确认字段有两种形态，**互斥且只出现一个**：
+ *   · `{ operatorPassword }` / `{ password }`  —— 旧路径，口令原样送到服务端；
+ *   · `{ confirmToken }`                       —— 新路径，只送一张一次性凭据。
+ *
+ * 为什么由调用方传对象、而不是在这里判断"用哪种"：
+ *   判断需要知道"这个账号有没有链"，那是客户端策略（见 api/otp.js）。
+ *   本文件只负责**发请求**，把策略混进来会让两条路径的分流点从一个变成七个。
+ */
+function confirmBody(credential) {
+  return credential && typeof credential === 'object' ? credential : {}
+}
+
 export const api = {
   /** 注册：邮箱验证通过后才真正建号（email/code 在老流程下可为空串） */
   register: (username, password, email, code) =>
@@ -230,8 +245,29 @@ export const api = {
       body: { username, email, code, newPassword }
     }),
 
-  login: (username, password) =>
-    request('/auth/login', { method: 'POST', body: { username, password } }),
+  /* ---------------- 登录（唯一一条路：链值） ----------------
+   * P8 删掉了 `login(username, password)`。它不是"暂时不用"，而是**不该存在**：
+   * 只要这个函数还在，就总会有人为了图省事把口令直接 POST 出去，
+   * 而那正是这套改造要消灭的行为。现在想登录，只有 `loginOtp`。
+   */
+
+  /** 取一次登录/再认证所需的公开参数（R / k / N / 迭代次数）。匿名可用。 */
+  otpChallenge: (username) =>
+    request('/auth/login/challenge', { method: 'POST', body: { username } }),
+
+  /** 链值登录。`nextChain` 只在余量低时携带（`{ r, head }`），否则传 null。 */
+  loginOtp: ({ username, otpCode, challengeToken, nextChain }) =>
+    request('/auth/login', {
+      method: 'POST',
+      body: { username, otpCode, challengeToken, nextChain }
+    }),
+
+  /** 敏感操作前用一格链值换一张一次性确认凭据。需要票据（它替换的是"再输一次口令"）。 */
+  otpReconfirm: ({ purpose, target, otpCode }) =>
+    request('/auth/reconfirm', { method: 'POST', body: { purpose, target, otpCode } }),
+
+  /** 本人链状态（剩余格数 / 代数 / 是否该续期）。只读，不下发 R 与 v。 */
+  otpStatus: (signal) => request('/auth/otp/status', { signal }),
 
   /**
    * 纯人脸登录（与口令登录并列的第二种方式，不是第二因子）。
@@ -243,10 +279,11 @@ export const api = {
   /** 登出：吊销服务端票据。前端随后清空本地副本 */
   logout: () => request('/auth/logout', { method: 'POST' }),
 
-  changePassword: (username, oldPassword, newPassword) =>
+  /** 改密（旧凭据 = 链值）。服务端据此重建链，`newPassword` 是**新**口令。 */
+  changePasswordOtp: ({ username, oldOtpCode, oldChallengeToken, newPassword }) =>
     request('/auth/change-password', {
       method: 'POST',
-      body: { username, oldPassword, newPassword }
+      body: { username, oldOtpCode, oldChallengeToken, newPassword }
     }),
 
   approve: (username) => request('/auth/approve', { method: 'POST', body: { username } }),
@@ -294,20 +331,20 @@ export const api = {
    * operatorPassword 是操作者本人的登录口令 —— 后端要求二次确认身份，
    * 仅凭会话票据不足以发起这种高权限操作。
    */
-  createAccount: (username, password, role, operatorPassword, email) =>
+  createAccount: (username, password, role, credential, email) =>
     request('/auth/create-account', {
       method: 'POST',
-      body: { username, password, role, operatorPassword, email }
+      body: { username, password, role, email, ...confirmBody(credential) }
     }),
 
   /**
    * 变更他人角色 —— "指定某位管理员为审计管理员"就是调它。
    * role 取 'User' | 'UserAdmin' | 'AuditAdmin'（后端拒绝 'Admin'）。
    */
-  setRole: (username, role, operatorPassword) =>
+  setRole: (username, role, credential) =>
     request('/auth/set-role', {
       method: 'POST',
-      body: { username, role, operatorPassword }
+      body: { username, role, ...confirmBody(credential) }
     }),
 
   getUsers: (signal) => request('/auth/users', { signal }),
@@ -371,15 +408,16 @@ export const api = {
     `${API_ROOT}/auth/face/preview?token=${encodeURIComponent(challengeToken)}`,
 
   /** 录入第一步：验当前口令 → 换一张动作挑战（动作由服务端随机决定） */
-  faceEnrollStart: (password) =>
-    request('/auth/face/enroll', { method: 'POST', body: { password } }),
+  faceEnrollStart: (credential) =>
+    request('/auth/face/enroll', { method: 'POST', body: confirmBody(credential) }),
 
   /** 录入第二步：提交挑战，服务端采集一帧并写入模板 */
   faceEnrollComplete: (challengeToken) =>
     request('/auth/face/enroll/complete', { method: 'POST', body: { challengeToken } }),
 
   /** 删除本人全部人脸模板。需当前口令 —— 这是"降级通道"上唯一的闸门 */
-  faceDelete: (password) => request('/auth/face/delete', { method: 'POST', body: { password } }),
+  faceDelete: (credential) =>
+    request('/auth/face/delete', { method: 'POST', body: confirmBody(credential) }),
 
   /**
    * 管理员重置他人人脸（处置类，与注销同一个权限出口）。
@@ -400,12 +438,12 @@ export const api = {
   faceIdStatus: (signal) => request('/faceid/status', { signal }),
 
   /** 录入 / 更换 FaceId 模板。只需当前口令 —— 采集与提特征全在服务端完成 */
-  faceIdEnroll: (password) =>
-    request('/faceid/enroll', { method: 'POST', body: { password } }),
+  faceIdEnroll: (credential) =>
+    request('/faceid/enroll', { method: 'POST', body: confirmBody(credential) }),
 
   /** 删除本人全部 FaceId 模板（需当前口令） */
-  faceIdDelete: (password) =>
-    request('/faceid/delete', { method: 'POST', body: { password } })
+  faceIdDelete: (credential) =>
+    request('/faceid/delete', { method: 'POST', body: confirmBody(credential) })
 }
 
 export { API_ROOT }

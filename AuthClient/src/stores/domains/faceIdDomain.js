@@ -1,5 +1,6 @@
 import { ref } from 'vue'
 import { api } from '../../api/client'
+import { PURPOSE, confirmCredential } from '../../api/otp'
 
 /**
  * 纯人脸登录（FaceId）自助域：状态查询、录入、删除。
@@ -18,7 +19,16 @@ import { api } from '../../api/client'
  * @param {object} core 共享上下文：{ markOnline, fail }
  */
 export function useFaceIdDomain(core) {
-  const { markOnline, fail } = core
+  const { currentUser, markOnline, fail } = core
+
+  /** 二次确认凭据。与 faceDomain 那份是同一条策略 —— 只有换票，没有"交口令"这个分支。 */
+  async function confirm(purpose, password) {
+    return confirmCredential({
+      purpose,
+      username: currentUser.value?.username,
+      password
+    })
+  }
 
   /**
    * 本人 FaceId 状态：
@@ -56,7 +66,7 @@ export function useFaceIdDomain(core) {
   async function enrollFaceId(password) {
     faceIdBusy.value = true
     try {
-      const res = await api.faceIdEnroll(password)
+      const res = await api.faceIdEnroll(await confirm(PURPOSE.FACE_ID_ENROLL, password))
       await refreshFaceIdStatus()
       return res
     } catch (err) {
@@ -77,7 +87,7 @@ export function useFaceIdDomain(core) {
   async function removeFaceId(password) {
     faceIdBusy.value = true
     try {
-      const res = await api.faceIdDelete(password)
+      const res = await api.faceIdDelete(await confirm(PURPOSE.FACE_ID_DELETE, password))
       await refreshFaceIdStatus()
       return res
     } catch (err) {

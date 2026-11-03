@@ -1,6 +1,7 @@
 import { defineStore } from 'pinia'
 import { computed, ref, watch } from 'vue'
 import { ApiError, api, getTicket, setTicket, transportInfo } from '../api/client'
+import * as otp from '../api/otp'
 import { now } from '../composables/clock'
 import { useToastStore } from './toast'
 import { ROLES, ROLE_LABELS } from './roles'
@@ -155,13 +156,14 @@ export const useSessionStore = defineStore('session', () => {
   // 这样"谁能改会话状态"从参数列表就看得出来，不必通读全文。
   const admin = useAdminDomain({ currentUser, persist, isAdmin, markOnline, fail })
   const audit = useAuditDomain({ isAuditAdmin, markOnline, fail })
-  // 人脸域不需要 currentUser / persist：后端用**票据**判定"本人是谁"，
-  // 前端连用户名都不用传（请求体里根本没有这个字段）。
-  const face = useFaceDomain({ markOnline, fail })
+  // 人脸域的**业务请求**里没有用户名（后端用票据判定本人是谁），
+  // 但它需要 currentUser 做一件事：敏感操作前要按"操作者是谁"去取一次链参数、
+  // 算出一格链值换成确认凭据 —— 那是 P7 起的二次确认形态，与票据各管一段。
+  const face = useFaceDomain({ currentUser, markOnline, fail })
 
   // 纯人脸登录（FaceId）是**独立的第二登录方式**，与 face（第二因子）互不引用。
   // 拆成两个域的直接收益：两张卡片各有自己的 busy / status，操作其一不会锁住另一张。
-  const faceId = useFaceIdDomain({ markOnline, fail })
+  const faceId = useFaceIdDomain({ currentUser, markOnline, fail })
 
   /**
    * 登录第二因子（人脸）的**待完成挑战**。非 null 表示"口令已通过、还差人脸"。
@@ -251,6 +253,7 @@ export const useSessionStore = defineStore('session', () => {
     // 先落票据再改状态：后续刷新用户/日志都依赖它，
     // 顺序反了会在管理员登录后立刻打出 401 请求。
     setTicket(data.ticket)
+
     currentUser.value = {
       username: data.username,
       status: data.status,
@@ -281,22 +284,48 @@ export const useSessionStore = defineStore('session', () => {
     audit.startIntrusionPolling()
   }
 
+  /* ==================== 第一因子：只有一条路 ==================== */
+
   /**
-   * 口令登录。
+   * 登录。
    *
-   * 两种可能的结局：
-   *   · 该账号**没有**录入人脸（或人脸模块关闭）⇒ 直接签发票据，一步完成；
-   *   · 该账号**已录入**人脸 ⇒ 后端返回 `FACE_REQUIRED` + 一张动作挑战，
-   *     **不带任何票据**。此时必须走 <see cref="loginFace"> 才能建立会话。
+   * 第一因子**只有链值**：口令在本机折叠成一格，出门的只有那一格。
+   * P8 之前这里有两条路（算不出来就退回口令），那条回退已经被删掉 ——
+   * 它不是"暂时用不上"，而是"只要还在，就总有一天会被当成省事的入口"。
    *
-   * 也就是说"要不要刷脸"由服务端按库里的模板决定，前端不做判断 ——
-   * 前端一旦自己判断，就会出现"界面以为不用刷、后端却拒绝"的不一致。
+   * 于是本地算不出来（桌面壳没起来 / IPC 被拒 / Rust 入参校验没过）不再是一个
+   * 可以静默绕过的分支，而是一个**必须让用户看见**的故障：救不回来的话，
+   * 界面会一直停在"请重试"，而用户根本不知道该修什么。
+   *
+   * ── 挑战过期为什么重试一次 ────────────────────────────────────
+   * `OTP_CHALLENGE_INVALID` 的含义是"这张票超过 120 秒了"（打开登录页后走开了一会儿）。
+   * 它不是凭据错，重取一次参数重算就行；两轮都过期才算真失败。
+   *
+   * 之后还有第二段：**人脸第二因子**。它由服务端按库里的模板决定，与这里无关。
    */
   async function login(username, password) {
     submitting.value = true
     pendingFace.value = null
     try {
-      const res = await api.login(username, password)
+      let res
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        const built = await otp.buildLogin({ username, password })
+        try {
+          res = await api.loginOtp(built.body)
+          break
+        } catch (err) {
+          if (err?.code === 'OTP_CHALLENGE_INVALID' && attempt === 0) continue
+          throw err
+        }
+      }
+
+      if (!res) {
+        // 两轮都是"挑战过期"：作为一次真实失败抛出去，界面提示重新登录。
+        throw new ApiError('登录请求已连续失效，请重试', {
+          code: 'OTP_CHALLENGE_INVALID',
+          kind: 'api'
+        })
+      }
 
       if (res?.code === 'FACE_REQUIRED') {
         pendingFace.value = res.data ?? null
@@ -392,10 +421,30 @@ export const useSessionStore = defineStore('session', () => {
     if (!silent) toast.info('已安全退出')
   }
 
+  /**
+   * 改密。旧凭据 = 一格链值，新口令照旧要送到服务端 ——
+   * 因为链根由口令派生，服务端必须用它重算整条链（这一点绕不开）。
+   *
+   * ── 「新旧口令相同」为什么挪到这里 ──────────────────────────────
+   * 服务端已经没有"当前口令"可比：库里只有链，没有可离线比对的口令派生物。
+   * 而客户端此刻**两个明文都在手里**，比较是一行的事。
+   * 这不是放宽校验：绕过界面直接打接口把口令改成同一个值，等于"改密没生效"，
+   * 不产生任何权限变化，因此不构成安全边界（设计稿 §7.6）。
+   */
   async function changePassword(oldPassword, newPassword) {
     submitting.value = true
     try {
-      const res = await api.changePassword(currentUser.value.username, oldPassword, newPassword)
+      const username = currentUser.value.username
+
+      if (oldPassword === newPassword) {
+        throw new ApiError('新密码不能与当前密码相同', {
+          code: 'PASSWORD_REUSED',
+          kind: 'client'
+        })
+      }
+
+      const body = await otp.buildChangePassword({ username, password: oldPassword, newPassword })
+      const res = await api.changePasswordOtp(body)
       markOnline()
       return res
     } catch (err) {

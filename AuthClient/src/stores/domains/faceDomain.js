@@ -1,5 +1,6 @@
 import { ref } from 'vue'
 import { api } from '../../api/client'
+import { PURPOSE, confirmCredential } from '../../api/otp'
 
 /**
  * 人脸（可选第二因子）自助域：状态查询、录入两步、删除。
@@ -17,7 +18,21 @@ import { api } from '../../api/client'
  * @param {object} core 共享上下文：{ markOnline, fail }
  */
 export function useFaceDomain(core) {
-  const { markOnline, fail } = core
+  const { currentUser, markOnline, fail } = core
+
+  /**
+   * 二次确认凭据。这里需要 `currentUser` 的唯一原因就是它 ——
+   * 业务请求里没有用户名，但"给谁的链算一格"必须按操作者来。
+   *
+   * 返回值直接就是 `{ confirmToken }`：P8 之后没有"没链就交口令"这条岔路了。
+   */
+  async function confirm(purpose, password) {
+    return confirmCredential({
+      purpose,
+      username: currentUser.value?.username,
+      password
+    })
+  }
 
   /** 本人人脸状态：`{ enrolled, templateCount, enrolledAt, threshold, engineReady, engineMessage }` */
   const status = ref(null)
@@ -52,7 +67,7 @@ export function useFaceDomain(core) {
    * 口令由**后端**校验 —— 前端不做任何本地判定，失败原因（含计次结果）以服务端为准。
    */
   async function startEnroll(password) {
-    const res = await api.faceEnrollStart(password)
+    const res = await api.faceEnrollStart(await confirm(PURPOSE.FACE_ENROLL, password))
     challenge.value = res.data ?? null
     markOnline()
     return challenge.value
@@ -82,7 +97,7 @@ export function useFaceDomain(core) {
   async function remove(password) {
     busy.value = true
     try {
-      const res = await api.faceDelete(password)
+      const res = await api.faceDelete(await confirm(PURPOSE.FACE_DELETE, password))
       await refreshStatus()
       return res
     } catch (err) {
