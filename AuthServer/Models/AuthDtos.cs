@@ -39,13 +39,57 @@ public class ResetPasswordRequest
 public class LoginRequest
 {
     public string Username { get; set; } = string.Empty;
-    public string Password { get; set; } = string.Empty;
+
+    // P8：这里原本是 `Password`（口令明文，旧路径唯一的第一因子），已删除。
+    // 删除它才让「口令明文不上网」在**协议层面**成立 —— 之前是客户端自觉不传，
+    // 现在是服务端根本没有地方收。
+
+    /// <summary>
+    /// 哈希链的一格（<c>x_k</c>，Base64）—— **P8 起它是唯一的第一因子**。
+    ///
+    /// 口令只在本机参与 PBKDF2 → H^k 派生，出门的只有这一格。
+    ///
+    /// ⚠️ 反序列化保持宽松：旧客户端若还带着 `password` 字段，会被静默忽略，
+    ///    登录失败于"没带 otpCode"这条 400 上 —— 报错指向真正的原因，而不是"未知字段"。
+    /// </summary>
+    public string? OtpCode { get; set; }
+
+    /// <summary>
+    /// 挑战端点签发的一次性凭据。链值路径**必须**带上：
+    /// 它绑定用户名与 TTL，使"十分钟前算好的格"和"替别人提交"都失效。
+    /// </summary>
+    public string? ChallengeToken { get; set; }
+
+    /// <summary>
+    /// 续期用的新链（只在服务端判定"该续期"时才需要）。见 <see cref="OtpNextChain"/>。
+    ///
+    /// 服务端**无法验证**这条新链算不算得出格（那需要口令），只校验形状；
+    /// 真正保证"换上去的新链可用"的，是客户端算它的那一刻手里有正确的口令。
+    /// </summary>
+    public OtpNextChain? NextChain { get; set; }
 }
 
 public class ChangePasswordRequest
 {
     public string Username { get; set; } = string.Empty;
-    public string OldPassword { get; set; } = string.Empty;
+
+    // P8：这里原本是 `OldPassword`（旧口令明文），已删除。
+    // 旧凭据改为链值 `OldOtpCode`，见下。
+
+    /// <summary>
+    /// 旧凭据的链值（<c>x_k</c>，Base64）。**P8 起是唯一的身份证明**：
+    /// 本端点匿名，只能靠"算得出一格仍然有效的链值"证明你是本人。
+    /// </summary>
+    public string? OldOtpCode { get; set; }
+
+    /// <summary>
+    /// 改密用的挑战凭据（`POST /api/auth/login/challenge` 签发）。
+    ///
+    /// 与登录一样必须带：它绑定用户名与 TTL，使"十分钟前算好的格"和"替别人改密"都失效。
+    /// 本端点**匿名**（没有票据可依），所以这张挑战是"这组参数是此刻为你签发的"唯一凭据。
+    /// </summary>
+    public string? OldChallengeToken { get; set; }
+
     public string NewPassword { get; set; } = string.Empty;
 }
 
@@ -114,8 +158,17 @@ public class CreateAccountRequest
     /// </summary>
     public string Email { get; set; } = string.Empty;
 
-    /// <summary>操作者（管理员）本人的登录口令，用于二次身份确认。</summary>
-    public string OperatorPassword { get; set; } = string.Empty;
+    /// <summary>
+    /// 一次性确认凭据（`POST /api/auth/reconfirm` 的产物）。
+    ///
+    /// **P8 起是唯一的确认方式**：没有它这个请求一律 401（`OTP_CONFIRM_REQUIRED`），
+    /// 客户端据此去 `POST /api/auth/reconfirm` 换一张再来 —— 这正是原来"再输一次口令"
+    /// 那一步的等价物，只是这一回口令没有离开过本机。
+    ///
+    /// 它只能用于**签发时绑定的那个用途与那个目标**，用一次即作废，
+    /// 有效期见 <see cref="AuthServer.Services.Otp.OtpOptions.ConfirmTtlSeconds"/>。
+    /// </summary>
+    public string? ConfirmToken { get; set; }
 }
 
 /// <summary>
@@ -129,7 +182,17 @@ public class SetRoleRequest
     /// <summary>目标角色：User / UserAdmin / AuditAdmin（不接受 Admin）。</summary>
     public string Role { get; set; } = string.Empty;
 
-    public string OperatorPassword { get; set; } = string.Empty;
+    /// <summary>
+    /// 一次性确认凭据（`POST /api/auth/reconfirm` 的产物）。
+    ///
+    /// **P8 起是唯一的确认方式**：没有它这个请求一律 401（`OTP_CONFIRM_REQUIRED`），
+    /// 客户端据此去 `POST /api/auth/reconfirm` 换一张再来 —— 这正是原来"再输一次口令"
+    /// 那一步的等价物，只是这一回口令没有离开过本机。
+    ///
+    /// 它只能用于**签发时绑定的那个用途与那个目标**，用一次即作废，
+    /// 有效期见 <see cref="AuthServer.Services.Otp.OtpOptions.ConfirmTtlSeconds"/>。
+    /// </summary>
+    public string? ConfirmToken { get; set; }
 }
 
 /// <summary>
@@ -164,8 +227,16 @@ public class BatchRequest
     /// <summary>目标角色（仅 set-role 使用）。</summary>
     public string Role { get; set; } = string.Empty;
 
-    /// <summary>操作者口令（仅 set-role 使用，与单条接口同一要求：二次确认）。</summary>
-    public string OperatorPassword { get; set; } = string.Empty;
+    /// <summary>
+    /// 逐目标的确认凭据（仅 set-role 使用）：`用户名 → reconfirm 换来的 token`。
+    ///
+    /// 为什么不是"一张票放行整批"：确认凭据在签发时就绑定了**用途 + 目标**，
+    /// 那是它存在的全部意义。拿一张绑定 alice 的票去改 bob 的角色，
+    /// 等于把"确认"退化成"点过一次按钮就可以授权任意多次"。
+    /// 所以批量里每个目标各带一张 —— 服务端这边仍然是"循环调用单条 SetRole"，
+    /// 不新增第二条业务路径；缺票的那个目标回 401，其余照做（部分成功是批量的常态）。
+    /// </summary>
+    public Dictionary<string, string>? ConfirmTokens { get; set; }
 }
 
 /// <summary>批量里**单个目标**的结果。码与话术取自该目标实际走的那条单条接口。</summary>

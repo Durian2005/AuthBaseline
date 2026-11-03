@@ -27,15 +27,21 @@ public class FaceIdLoginRequest
 /// <summary>
 /// 录入 / 删除 FaceId 模板时的二次口令。
 ///
-/// **必须重新输入当前口令**，首次录入也不例外：
+/// **必须再确认一次身份**，首次录入也不例外：
 ///   纯人脸登录是"用户名 + 人脸"的完整登录方式，若拿到会话就能给自己加一张模板，
 ///   那么一个同时拿到口令与会话的人可以把自己的脸录进去，从此只需刷脸即可登录 ——
 ///   而且改口令之后**依然有效**（模板不会随改口令消失）。
 ///   这条路径的门槛因此与"改口令"同级，而不是与"看状态"同级。
 /// </summary>
-public class FaceIdPasswordRequest
+public class FaceIdConfirmRequest
 {
-    public string Password { get; set; } = string.Empty;
+    /// <summary>
+    /// 一次性确认凭据（`POST /api/auth/reconfirm` 的产物）—— **P8 起是唯一的确认方式**。
+    ///
+    /// 它只能用于**签发时绑定的那个用途与那个目标**，用一次即作废，
+    /// 有效期见 <see cref="AuthServer.Services.Otp.OtpOptions.ConfirmTtlSeconds"/>。
+    /// </summary>
+    public string? ConfirmToken { get; set; }
 }
 
 /// <summary>本人 FaceId 状态。用于账号页显示"能不能用、录了几张、为什么不能用"。</summary>

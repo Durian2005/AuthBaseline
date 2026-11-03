@@ -1,5 +1,6 @@
 using AuthServer.Models;
 using AuthServer.Services;
+using AuthServer.Services.Otp;
 using Microsoft.AspNetCore.Mvc;
 using MongoDB.Driver;
 using System.Text.Json;
@@ -24,7 +25,13 @@ public abstract class AuthControllerBase : ControllerBase
     protected readonly MongoDbService _db;
     protected readonly AuditWriter _auditWriter;
     protected readonly SessionService _sessions;
-    protected readonly PepperProvider _pepper;
+
+    /// <summary>
+    /// 一次性确认凭据的核销处。放在基类而不是三个子类各拿一份：
+    /// 「敏感操作要再确认一次」这条规则必须只有一份实现 —— 六处若各写一遍，
+    /// 迟早有一处忘了验"用途是否匹配"，而那一处正是可以从别处借票进来的缺口。
+    /// </summary>
+    protected readonly OtpConfirmStore _confirms;
     /// <summary>
     /// 沉睡判定阈值（天）。构造时从配置读一次并缓存 ——
     /// 判定会在每次返回用户列表时对每个账号跑一遍，不宜每次都去解析配置。
@@ -43,12 +50,13 @@ public abstract class AuthControllerBase : ControllerBase
     protected static readonly TimeSpan FailureWindow = TimeSpan.FromMinutes(3);
 
     protected AuthControllerBase(MongoDbService db, AuditWriter auditWriter,
-        SessionService sessions, PepperProvider pepper, IConfiguration configuration)
+        SessionService sessions, IConfiguration configuration,
+        OtpConfirmStore confirms)
     {
         _db = db;
         _auditWriter = auditWriter;
         _sessions = sessions;
-        _pepper = pepper;
+        _confirms = confirms;
         _dormantThresholdDays = DormantAccountService.ReadThreshold(configuration);
     }
 
@@ -352,6 +360,50 @@ public abstract class AuthControllerBase : ControllerBase
      * 鉴权失败时**本身也要留下审计记录** —— 这是实验二「02 看不到」的关键证据：
      * 光有拒绝响应不够，必须证明系统把这次越权尝试也记下来了。
      */
+
+    /* ==================== 敏感操作的二次确认闸门 ==================== */
+
+    /**
+     * 校验一张**一次性确认凭据**；不合格就当场给出拒绝响应（并写审计）。
+     *
+     * 调用约定：**只在请求里带了凭据时调用**。没带的情况（`null` / 空串）由调用方
+     * 走旧的口令路径 —— 那是 P5 的兼容分支，不是"另一种确认方式"。
+     * 这样分流的理由与登录的 `otpCode` 分流完全一致：
+     *   回滚时不该让一个"带着新凭据"的请求掉进旧分支，拿 Base64 当口令去比对。
+     *
+     * ── 为什么失败一律 401 而不是 400 ────────────────────────────
+     * 它与旧路径"口令不对"返回同一个状态码。客户端因此在两种模式下走同一段错误处理：
+     * 提示"请重新确认身份"，然后（新路径）重新取链值 或（旧路径）重新输口令。
+     * 若这里换成 400，前端就必须按状态码分叉，而那分叉在回滚后会立刻错位。
+     *
+     * ── 审计里为什么要记"哪一维不符" ──────────────────────────────
+     * 对外的话术必须统一（逐维解释等于告诉攻击者手里这张票是从哪来的）；
+     * 但对内必须分得开 —— 客户端把目标是 alice 的确认拿去操作 bob 这种 bug，
+     * 除了这条记录之外没有任何痕迹。
+     */
+    protected async Task<IActionResult?> DenyUnlessConfirmedAsync(string? confirmToken, User actor,
+        string purpose, string target, string action, object requestLog)
+    {
+        var status = _confirms.Consume(confirmToken, actor.Id, purpose, target);
+        if (status == OtpConfirmStatus.Ok) return null;
+
+        var statusBefore = actor.Status.ToString();
+        var resp = new ApiResponse
+        {
+            Success = false,
+            Code = BusinessCode.OtpConfirmRequired,
+            // 三种情况（过期 / 已用 / 不符）刻意为同一句话：对客户端来说补救动作是同一个
+            // `POST /api/auth/reconfirm`，没有需要区分的分支。
+            Message = "该操作需要重新确认身份（确认已过期或已使用）"
+        };
+
+        await _auditWriter.WriteAsync(actor.Id, actor.Username, action, statusBefore, requestLog,
+            // 响应袋里留具体维度：这是排查"确认用错地方"的唯一线索。
+            new { ConfirmStatus = status.ToString(), Purpose = purpose, Target = target },
+            statusBefore, target, AuditResult.Failed, AuditReason.OtpConfirmRequired);
+
+        return Unauthorized(resp);
+    }
 
     /// <summary>
     /// 需要"已登录"即可（账号自助：查询 / 录入 / 删除自己的人脸）。

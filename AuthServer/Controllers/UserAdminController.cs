@@ -2,7 +2,9 @@ using AuthServer.Models;
 using AuthServer.Services;
 using AuthServer.Services.Face;
 using AuthServer.Services.FaceId;
+using AuthServer.Services.Otp;
 using Microsoft.AspNetCore.Mvc;
+using MongoDB.Bson;
 using MongoDB.Driver;
 using System.Text.Json;
 using System.Text.RegularExpressions;
@@ -35,14 +37,19 @@ public class UserAdminController : AuthControllerBase
     /// <summary>各模块登记的个人数据清理入口（当前只有 FaceId）。见 <see cref="IUserDataPurger"/>。</summary>
     private readonly IEnumerable<IUserDataPurger> _purgers;
 
+    /// <summary>哈希链存储。本域只用它一处：新建账号时把初始口令折叠成链。</summary>
+    private readonly OtpChainStore _chains;
+
     public UserAdminController(MongoDbService db, AuditWriter auditWriter, SessionService sessions,
-        PepperProvider pepper, IConfiguration configuration, FaceTemplateStore faceTemplates,
-        FaceIdTemplateStore faceIdTemplates,        IEnumerable<IUserDataPurger> purgers)
-        : base(db, auditWriter, sessions, pepper, configuration)
+        IConfiguration configuration, FaceTemplateStore faceTemplates,
+        FaceIdTemplateStore faceIdTemplates, IEnumerable<IUserDataPurger> purgers,
+        OtpConfirmStore confirms, OtpChainStore chains)
+        : base(db, auditWriter, sessions, configuration, confirms)
     {
         _faceTemplates = faceTemplates;
         _faceIdTemplates = faceIdTemplates;
         _purgers = purgers;
+        _chains = chains;
     }
 
     /* ==================== 管理员：审核 ==================== */
@@ -605,14 +612,12 @@ public class UserAdminController : AuthControllerBase
             return BadRequest(resp);
         }
 
-        // 二次口令：创建账号是特权变更，仅凭会话不足以证明是本人操作
-        if (!PasswordHasher.Verify(req.OperatorPassword, admin.PasswordHash, _pepper.Pepper).Valid)
-        {
-            var resp = new ApiResponse { Success = false, Code = BusinessCode.InvalidCredentials, Message = "管理员口令校验失败，已拒绝创建" };
-            await _auditWriter.WriteAsync(admin.Id, admin.Username, action, operatorLabel, requestLog, resp, operatorLabel,
-                targetName, AuditResult.Failed, AuditReason.InvalidCredentials);
-            return Unauthorized(resp);
-        }
+        // 二次身份确认：创建账号是特权变更，仅凭会话不足以证明是本人操作。
+        // P8 之后只有一个办法 —— 一次性确认凭据（链值再认证的产物）。
+        // 缺凭据时一律 401 OTP_CONFIRM_REQUIRED，客户端据此去换一张再来。
+        var confirmDeny = await DenyUnlessConfirmedAsync(req.ConfirmToken, admin, OtpConfirmPurpose.CreateAccount,
+            targetName, action, requestLog);
+        if (confirmDeny != null) return confirmDeny;
 
         var existing = await _db.Users.Find(u => u.Username == targetName).FirstOrDefaultAsync();
         if (existing != null)
@@ -640,18 +645,51 @@ public class UserAdminController : AuthControllerBase
 
         var user = new User
         {
+            // Id 由服务端先定：链要用它做绑定，而"账号建好了、链没建成"会留下一个
+            // 看着正常、其实永远登不进去的账号（还会照常出现在账号列表里）。
+            Id = ObjectId.GenerateNewId().ToString(),
             Username = targetName,
-            PasswordHash = PasswordHasher.Hash(req.Password, _pepper.Pepper),
+            // 口令不落库：这次请求里的明文正好用来把链建出来。
             Status = UserStatus.Enabled,
             Role = newRole,
             // 邮箱可选：填了才绑，并直接视为已验证（管理员代填，理由见 User.EmailVerified）；
-            // 留空即 null，账号只凭口令登录 —— 登录标识是用户名，所以照样能登。
+            // 留空即 null，账号没有邮箱 ⇒ 无法自助重置口令，只能由管理员用 `--rechain` 处理。
             Email = emailBound ? email : null,
             EmailVerified = emailBound,
             FailedLoginAttempts = 0,
             CreatedAt = DateTime.UtcNow
         };
         await _db.Users.InsertOneAsync(user);
+
+        try
+        {
+            await _chains.CreateAsync(user.Id, user.Username, req.Password);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[Otp] 新建账号「{user.Username}」建链失败，回滚: {ex.Message}");
+
+            // 回滚：删掉刚插的账号。留着它等于交付一个永远登不进去的账号，
+            // 而管理员看不出任何异常 —— 界面上它就"创建成功"了。
+            try
+            {
+                await _db.Users.DeleteOneAsync(u => u.Id == user.Id);
+            }
+            catch (Exception rollbackEx)
+            {
+                Console.WriteLine($"[Otp] ⚠️ 建号回滚失败，「{user.Username}」已成为无链账号: {rollbackEx.Message}");
+            }
+
+            var failedResp = new ApiResponse
+            {
+                Success = false,
+                Code = BusinessCode.OtpRebuildFailed,
+                Message = "创建失败：认证链未能建立，请稍后重试"
+            };
+            await _auditWriter.WriteAsync(admin.Id, admin.Username, action, operatorLabel, requestLog, failedResp,
+                operatorLabel, targetName, AuditResult.Failed, AuditReason.OtpRebuildFailed);
+            return StatusCode(500, failedResp);
+        }
 
         var newLabel = $"{user.Username}·{UserRoles.Label(newRole)}";
         var response = new ApiResponse<UserResponse>
@@ -744,14 +782,10 @@ public class UserAdminController : AuthControllerBase
             return BadRequest(resp);
         }
 
-        // 二次口令：角色任免是系统内权限最高的操作
-        if (!PasswordHasher.Verify(req.OperatorPassword, admin.PasswordHash, _pepper.Pepper).Valid)
-        {
-            var resp = new ApiResponse { Success = false, Code = BusinessCode.InvalidCredentials, Message = "管理员口令校验失败，已拒绝变更" };
-            await _auditWriter.WriteAsync(admin.Id, admin.Username, action, operatorLabel, requestLog, resp, operatorLabel,
-                targetName, AuditResult.Failed, AuditReason.InvalidCredentials);
-            return Unauthorized(resp);
-        }
+        // 二次身份确认：角色任免是系统内权限最高的操作，只认一次性确认凭据（P8）。
+        var confirmDeny = await DenyUnlessConfirmedAsync(req.ConfirmToken, admin, OtpConfirmPurpose.SetRole,
+            targetName, action, requestLog);
+        if (confirmDeny != null) return confirmDeny;
 
         var target = await _db.Users.Find(u => u.Username == targetName).FirstOrDefaultAsync();
         if (target == null)
@@ -917,7 +951,12 @@ public class UserAdminController : AuthControllerBase
                 {
                     Username = name,
                     Role = req.Role,
-                    OperatorPassword = req.OperatorPassword
+                    // 每个目标一张自己的确认凭据（绑定用途+目标），
+                    // 缺票的那个目标会在 SetRole 里被 401 挡下，其余照做。
+                    ConfirmToken = req.ConfirmTokens is not null
+                                   && req.ConfirmTokens.TryGetValue(name, out var token)
+                        ? token
+                        : null
                 }),
                 _ => throw new InvalidOperationException($"未分派的批量动作：{action}")
             };

@@ -58,9 +58,12 @@ public class FaceVerifyRequest
 public class FaceEnrollRequest
 {
     /// <summary>
-    /// 当前登录口令（必填）。校验通过后才签发本轮的录入挑战。
+    /// 一次性确认凭据（`POST /api/auth/reconfirm` 的产物）—— **P8 起是唯一的确认方式**。
+    ///
+    /// 它只能用于**签发时绑定的那个用途与那个目标**，用一次即作废，
+    /// 有效期见 <see cref="AuthServer.Services.Otp.OtpOptions.ConfirmTtlSeconds"/>。
     /// </summary>
-    public string Password { get; set; } = string.Empty;
+    public string? ConfirmToken { get; set; }
 }
 
 /// <summary>
@@ -77,13 +80,19 @@ public class FaceEnrollCompleteRequest
 }
 
 /// <summary>
-/// 删除本人的人脸模板。**必须重新输入口令** ——
+/// 删除本人的人脸模板。**必须再确认一次身份** ——
 /// 这是"可选"这条设计自带的降级通道上唯一的闸门：
 /// 拿到一个有效会话的人，若能顺手把模板删掉，该账号就永久退回单因子。
 /// </summary>
 public class FaceDeleteRequest
 {
-    public string Password { get; set; } = string.Empty;
+    /// <summary>
+    /// 一次性确认凭据（`POST /api/auth/reconfirm` 的产物）—— **P8 起是唯一的确认方式**。
+    ///
+    /// 它只能用于**签发时绑定的那个用途与那个目标**，用一次即作废，
+    /// 有效期见 <see cref="AuthServer.Services.Otp.OtpOptions.ConfirmTtlSeconds"/>。
+    /// </summary>
+    public string? ConfirmToken { get; set; }
 }
 
 /// <summary>本人人脸状态。用于账号页显示"有没有录、录了几张、什么时候录的"。</summary>

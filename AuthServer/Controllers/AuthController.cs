@@ -1,6 +1,7 @@
 using AuthServer.Models;
 using AuthServer.Services;
 using AuthServer.Services.Face;
+using AuthServer.Services.Otp;
 using Microsoft.AspNetCore.Mvc;
 using MongoDB.Driver;
 using System.Text.Json;
@@ -23,14 +24,23 @@ public class AuthController : AuthControllerBase
     private readonly FaceLoginService _face;
     private readonly FacePreviewService _preview;
 
+    /// <summary>哈希链存储：仅"登录的第一因子"这一处用得上（核销一格）。</summary>
+    private readonly OtpChainStore _chains;
+
+    /// <summary>一次性挑战：消费即作废，绑定用户名与 TTL。</summary>
+    private readonly OtpChallengeStore _challenges;
+
     public AuthController(MongoDbService db, AuditWriter auditWriter, SessionService sessions,
-        PepperProvider pepper, TransportInfo transport, IConfiguration configuration, FaceLoginService face,
-        FacePreviewService preview)
-        : base(db, auditWriter, sessions, pepper, configuration)
+        TransportInfo transport, IConfiguration configuration, FaceLoginService face,
+        FacePreviewService preview, OtpChainStore chains, OtpChallengeStore challenges,
+        OtpConfirmStore confirms)
+        : base(db, auditWriter, sessions, configuration, confirms)
     {
         _transport = transport;
         _face = face;
         _preview = preview;
+        _chains = chains;
+        _challenges = challenges;
     }
 
     /// <summary>
@@ -68,49 +78,20 @@ public class AuthController : AuthControllerBase
         });
     }
 
-    /* ==================== 口令存储格式升级（pepper） ==================== */
+    /* ==================== P8：口令凭据路径已移除 ==================== */
 
     /**
-     * 把一条**旧格式**（无 pepper）的口令哈希原地重写为新格式。
-     * 仅由登录入口调用，且只在「口令已验证通过 + 库里是旧格式」时调用。
+     * 这里原先有三个东西：`TryUpgradePasswordHashAsync`（旧格式哈希升级）、
+     * `TryMigrateToChainAsync`（存量账号懒迁移）、以及登录里的口令比对分支。
      *
-     * 三条刻意的取舍：
+     * P8 一并删除，因为**前提消失了**：本版本不再保存任何口令派生物
+     * （`PasswordHash` 只在迁移期作为历史数据存在，登录路径读都不读）。
+     * 于是「升级哈希」没有对象，「迁移」改为运维工具 `--rechain` 完成，
+     * 「口令比对」没有可比的东西 —— 唯一的凭据就是链上那一格。
      *
-     * 1. **绝不影响本次登录。** 整段被 try/catch 包住，任何失败都只意味着
-     *    "这个账号下次登录再升级"，用户照常登录成功。
-     *    升级只是收紧存储形态，不该让用户因为"格式没换成功"而进不来 ——
-     *    这与 AuditService 的旁路原则是同一条思路。
-     *
-     * 2. **用 UpdateOne 只改一个字段，不用 ReplaceOne 整篇覆盖。**
-     *    user 对象是本次请求开头读出来的，中途可能已被并发修改
-     *    （例如另一个请求刚更新了 failedLoginAttempts）。整篇替换会把这些改动抹掉。
-     *
-     * 3. **审计里绝不出现口令。** request 只记"从哪种格式变成哪种格式"这一事实 ——
-     *    这条记录要留在哈希链里被反复翻看，不能因为"顺手升级"就把口令写进去。
+     * 存量账号怎么迁过来见 `OtpRechainCli`：那里仍然会用旧哈希**校验一次**明文口令，
+     * 但它的产物是一条链，而不是一个新哈希。
      */
-    private async Task TryUpgradePasswordHashAsync(User user, string password)
-    {
-        try
-        {
-            var newHash = PasswordHasher.Hash(password, _pepper.Pepper);
-
-            await _db.Users.UpdateOneAsync(u => u.Id == user.Id,
-                Builders<User>.Update.Set(u => u.PasswordHash, newHash));
-            user.PasswordHash = newHash;
-
-            // 此刻口令已验证通过，身份可信，所以操作者记该账号自己。
-            await _auditWriter.WriteAsync(user.Id, user.Username, AuditAction.PasswordHashUpgraded,
-                user.Status.ToString(),
-                new { From = PasswordHasher.LegacyFormatName, To = PasswordHasher.PepperFormatName },
-                new { Upgraded = true },
-                user.Status.ToString(), user.Username, AuditResult.Success);
-        }
-        catch (Exception ex)
-        {
-            // 旁路失败不阻断：库里仍是旧格式，下次登录会再试一次。
-            Console.WriteLine($"[Pepper] 口令哈希升级失败（不影响本次登录，下次登录会重试）: {ex.Message}");
-        }
-    }
 
     /* ==================== 登出 ==================== */
 
@@ -145,44 +126,335 @@ public class AuthController : AuthControllerBase
 
     /* ==================== 登录 ==================== */
 
+    /**
+     * 登录：**唯一**的第一因子是哈希链上的一格。
+     *
+     * ── P8 删掉了什么 ────────────────────────────────────────────
+     * 改造前这里是分流的：带 `otpCode` 走链值，不带就走口令比对。现在没有第二条路 ——
+     * 服务端不存口令派生物，也就没有东西可以拿来比。请求体里的 `password` 字段随之删除，
+     * 于是「客户端把口令传上网」这件事在本版本里第一次真正不存在（口令只在本机参与派生）。
+     *
+     * ── 为什么把空值校验留在入口 ──────────────────────────────────
+     * 链值/挑战缺失属于**请求不完整**，不是一次凭据尝试：在这里回 400，
+     * 就不会往下走到计次逻辑里 —— 否则一个写错的客户端会把自己主子的账号锁掉。
+     */
     [HttpPost("login")]
     public async Task<IActionResult> Login([FromBody] LoginRequest req)
     {
         var sanitizedUsername = Norm(req.Username);
-        // 口令绝不进入日志，请求里只保留用户名
+        // 口令与链值都绝不进入日志，请求里只保留用户名
         var requestLog = new { req.Username };
 
-        if (string.IsNullOrWhiteSpace(sanitizedUsername) || string.IsNullOrWhiteSpace(req.Password))
+        if (string.IsNullOrWhiteSpace(sanitizedUsername)
+            || string.IsNullOrWhiteSpace(req.OtpCode)
+            || string.IsNullOrWhiteSpace(req.ChallengeToken))
         {
-            var resp = new ApiResponse { Success = false, Code = BusinessCode.EmptyFields, Message = "用户名或密码不能为空" };
+            var resp = new ApiResponse { Success = false, Code = BusinessCode.EmptyFields, Message = "用户名或口令不能为空" };
             await _auditWriter.WriteAsync("anonymous", sanitizedUsername, AuditAction.LoginFailed, "N/A", requestLog, resp, "N/A",
                 sanitizedUsername, AuditResult.Failed, AuditReason.EmptyFields);
             return BadRequest(resp);
         }
 
-        var user = await _db.Users.Find(u => u.Username == sanitizedUsername).FirstOrDefaultAsync();
+        return await LoginWithChainAsync(req, sanitizedUsername, requestLog);
+    }
+
+    /* ==================== 登录：一次性口令（哈希链）分支 ==================== */
+
+    /**
+     * 第一因子 = 哈希链上的一格：`H(提交值) == v`。
+     *
+     * 顺序里的每一步都对应一种已知攻击，一步都不能省：
+     *   ① 先消费挑战：一次性、有 TTL、绑定用户名。放在最前面，
+     *      是为了"无论后面成败，这张票都不能再用"（否则重试就有了稳定通道）；
+     *   ② 再找账号：不存在 ⇒ 与"口令错"同一话术（否则这就是个账号枚举接口）；
+     *   ③ 锁定 / 待审核 / 冻结**在验链值之前**判：顺序反了，冻结账号就成了链值探针；
+     *   ④ 核销：判定与条件写在同一处（`userId + v + k` 三条件 CAS）；
+     *   ⑤ 通过后才进第二因子与 CompleteLoginAsync（清零计数 / 更新 lastLoginAt / 签票）。
+     *
+     * 链值的特殊性在于**它会消耗配额**，所以每次失败都必须计入失败次数 ——
+     * 除非它根本不是一次凭据尝试（挑战无效、并发冲突、链畸形、链用尽）。
+     */
+    private async Task<IActionResult> LoginWithChainAsync(LoginRequest req, string username, object requestLog)
+    {
+        // 空值已在入口挡住（见 Login）：这里不再重复判一次 ——
+        // 两处各写一份，迟早出现"提示话术不一样"这种没法解释的差异。
+
+        // ① 挑战：先取出（pop）再判，过期 / 已用 / 不存在一律同一个码。
+        var (challengeUsername, challengeError) = _challenges.Consume(req.ChallengeToken);
+        if (challengeError is not null || !string.Equals(challengeUsername, username, StringComparison.Ordinal))
+        {
+            // 不计次：这不是一次凭据尝试，而是"客户端手里的参数过期了"。
+            // 计入失败次数会让"打开登录页放了五分钟"变成一次失败 —— 三次就锁号。
+            var resp = new ApiResponse
+            {
+                Success = false,
+                Code = BusinessCode.OtpChallengeInvalid,
+                Message = "登录请求已失效，请重新登录"
+            };
+            await _auditWriter.WriteAsync("anonymous", username, AuditAction.LoginFailed, "N/A", requestLog, resp, "N/A",
+                username, AuditResult.Failed, AuditReason.OtpChallengeInvalid);
+            return Unauthorized(resp);
+        }
+
+        // ②③ 账号与状态闸门（与口令路径同一出口）
+        var candidate = await ResolveLoginCandidateAsync(username, requestLog);
+        if (candidate.Denial is not null) return candidate.Denial;
+
+        var user = candidate.User!;
+        var statusBefore = candidate.StatusBefore;
+
+        // ④ 核销：判定 + 条件写。这里的返回值已经是"存储层的事实"，不需要再判一次。
+        var consumed = await _chains.ConsumeAsync(user.Id, req.OtpCode);
+
+        switch (consumed.Outcome)
+        {
+            case OtpConsumeOutcome.NotEnrolled:
+                // 迁移期的存量账号：还没有链。对外与"口令错"**逐字一致**，
+                // 否则"这个账号有没有链"就成了可探测的信息。对内单独归类，便于统计迁移进度。
+                await _auditWriter.WriteAsync(user.Id, user.Username, AuditAction.LoginFailed, statusBefore,
+                    requestLog,
+                    new { Code = BusinessCode.InvalidCredentials, Step = "OTP" },
+                    statusBefore, username, AuditResult.Failed, AuditReason.OtpNotEnrolled);
+                return Unauthorized(new ApiResponse
+                {
+                    Success = false,
+                    Code = BusinessCode.InvalidCredentials,
+                    Message = "用户名或密码错误"
+                });
+
+            case OtpConsumeOutcome.Malformed:
+                // 服务端数据事故：不计次、不外露，但必须留下线索。
+                // 对外仍按统一话术，理由见 BusinessCode 里"刻意没有 OTP_CHAIN_MALFORMED"的说明。
+                Console.WriteLine($"[Otp] ⚠️ 链记录畸形，账号「{user.Username}」当前无法登录（需重建链）");
+                await _auditWriter.WriteAsync(user.Id, user.Username, AuditAction.LoginFailed, statusBefore,
+                    requestLog,
+                    new { Code = BusinessCode.InvalidCredentials, Step = "OTP", ChainMalformed = true },
+                    statusBefore, username, AuditResult.Failed, AuditReason.OtpChainMalformed);
+                return Unauthorized(new ApiResponse
+                {
+                    Success = false,
+                    Code = BusinessCode.InvalidCredentials,
+                    Message = "用户名或密码错误"
+                });
+
+            case OtpConsumeOutcome.Mismatch:
+                // 与口令错同等对待：计次、可能锁定、统一话术。差异只在审计原因码。
+                return await RejectFirstFactorAsync(user, statusBefore, requestLog, username,
+                    AuditReason.OtpChainMismatch);
+
+            case OtpConsumeOutcome.Conflict:
+                // 同一格被两个请求同时提交，另一个抢先核销成功。
+                // **不计次**：这是并发，不是猜测 —— 计入的话"手机和电脑同时登录"就会锁号。
+                var conflictResp = new ApiResponse
+                {
+                    Success = false,
+                    Code = BusinessCode.OtpChainConflict,
+                    Message = "登录请求发生并发冲突，请重试"
+                };
+                await _auditWriter.WriteAsync(user.Id, user.Username, AuditAction.LoginFailed, statusBefore,
+                    requestLog, conflictResp, statusBefore, username, AuditResult.Failed,
+                    AuditReason.OtpChainConflict);
+                return Conflict(conflictResp);
+
+            case OtpConsumeOutcome.Exhausted:
+                // 凭据是真的，链没了。必须回"需重建"，不能压成"口令错"。
+                var exhaustedResp = new ApiResponse
+                {
+                    Success = false,
+                    Code = BusinessCode.OtpChainExhausted,
+                    Message = "本账号的一次性口令已用尽，请用邮箱验证码重置口令后再登录"
+                };
+                await _auditWriter.WriteAsync(user.Id, user.Username, AuditAction.LoginFailed, statusBefore,
+                    requestLog, exhaustedResp, statusBefore, username, AuditResult.Failed,
+                    AuditReason.OtpChainExhausted);
+                return Unauthorized(exhaustedResp);
+        }
+
+        // ⑤ 消耗配额是必须可追溯的事件（§8.3 第 3 条）：审计里要能回答"这一格被什么吃掉了"。
+        // 链值本身是凭据，**绝不进日志** —— 只记下标、链长与代数。
+        var next = consumed.NewState!.Value;
+        await _auditWriter.WriteAsync(user.Id, user.Username, AuditAction.OtpConsume, statusBefore,
+            requestLog,
+            new
+            {
+                user.Username,
+                KBefore = next.K + 1,
+                KAfter = next.K,
+                ChainLength = next.Length,
+                NeedsRenewal = consumed.NeedsRenewal,
+                AtAlertLine = consumed.AtAlertLine,
+                Purpose = "LOGIN"
+            },
+            user.Status.ToString(), username, AuditResult.Success, AuditReason.OtpChainVerified);
+
+        // ── ⑥ 静默续期（§7）：**第二步写**，与上面的核销彻底解耦 ──
+        //
+        // 为什么必须分开写：若把"核销 + 换链"塞进一次原子写，换链失败会连带本次登录失败 ——
+        // 而换链是**锦上添花**：旧链还有余量，照样能登。用户不该为一次锦上添花失败而进不来。
+        // 所以这里的任何失败都只写日志与审计，登录结果早已确定。
+        if (consumed.NeedsRenewal)
+            await TryRenewChainAsync(user, consumed, req.NextChain);
+        else if (req.NextChain is not null)
+            // 没到续期点却提交了新链：忽略。这不是攻击（有口令就能自己造链），
+            // 而是**不该被允许的配额重置**——否则客户端每登一次就能把 k 刷回 N-1，
+            // 链的"有配额"这件事就名存实亡了。
+            Console.WriteLine($"[Otp] 账号「{user.Username}」在非续期窗口提交了新链，已忽略（k={next.K}/{next.Length}）");
+
+        // 警戒线：只喊，不改行为。§7.4 要求"对用户静默，但对系统不能静默"。
+        if (consumed.AtAlertLine)
+            Console.WriteLine($"[Otp] ⚠️ 账号「{user.Username}」的链已跌破警戒线（k={next.K}/{next.Length}，" +
+                              $"第 {consumed.Snapshot!.Value.Generation} 代）—— 若下次续期仍未成功，账号将无法用链值登录");
+
+        return await ContinueAfterFirstFactorAsync(user, statusBefore, requestLog, username);
+    }
+
+    /* ==================== 登录：静默续期（P4，两步写的第二步） ==================== */
+
+    /**
+     * 把链换成客户端随登录提交的新一代。
+     *
+     * ── 这一步为什么"失败也无所谓" ──────────────────────────────
+     * 它只在 `k ≤ N×5%` 时触发，此时旧链**还有余量**：换失败了大不了下次再换。
+     * 所以本方法不返回值、不影响登录结果 —— 它的全部产出是"日志 + 一条审计"。
+     *
+     * ── 为什么服务端只能收下客户端算的链 ────────────────────────
+     * 服务端没有口令，算不出新链根。它只校验形状，然后条件替换。
+     * 这带来一个必须承认的边界：形状合法但内容错的新链会把账号推进「链不可用」的状态，
+     * 而服务端无从分辨。**P8 之后这条边界的代价变大了** —— 原来的兜底是「口令路径还在，
+     * 重登一次就能再续一条」，现在没有第二条路，坏掉的链只能靠 `reset-password`
+     * （邮箱验证码 + 新口令，它会整条重建）或运维工具 `--rechain` 修复。
+     * 之所以仍然接受这个风险：新链由本机 Rust 侧用同一个确定性算法算出，
+     * `otp_p7_probe.py` 与 `otp_p7_ui_e2e.mjs` 会在装机产物上各验一遍；
+     * 而拒绝续期的代价是链变短直至用尽 —— 那是**确定会发生**的故障，比"可能坏"更差。
+     *
+     * ── 条件写为什么用"核销时读到的那一代 R" ───────────────────
+     * 两台设备可能同时续期。若这里重新去库里读 R，就可能把"对方刚换好的新链"
+     * 当成起点再覆盖一次 —— 结果是两边各自的新链互相作废，代数越滚越多。
+     * 用快照里的 R 做条件后，抢输的一方写入被拒（返回 false），旧链继续有效。
+     */
+    private async Task TryRenewChainAsync(User user, OtpConsumeResult consumed, OtpNextChain? next)
+    {
+        // 核销成功才能走到这里 ⇒ 快照必然存在。
+        var snapshot = consumed.Snapshot!.Value;
+        var length = snapshot.Length;
+
+        if (next is null || string.IsNullOrWhiteSpace(next.R) || string.IsNullOrWhiteSpace(next.Head))
+        {
+            // 客户端**没有**提交新链。不阻断登录，但必须留痕：
+            // 这是"链正在静默变短"的唯一线索，缺了它，某天登录失败时无从归因。
+            Console.WriteLine($"[Otp] 账号「{user.Username}」已到续期线（k={consumed.NewState!.Value.K}/{length}）" +
+                              "但未提交新链，本次跳过续期");
+            await WriteRenewAuditAsync(user, AuditAction.OtpRenewFailed, consumed, snapshot,
+                renewed: false, outcome: "NO_NEXT_CHAIN", errorType: null, reason: AuditReason.OtpRenewFailed);
+            return;
+        }
+
+        try
+        {
+            // 新链从满配额开始：k = N-1。链长与迭代次数**继承旧链**而不是读当前配置 ——
+            // 配置改了不该让这一次续期悄悄换掉参数（那会让同一账号的两代链不可比）。
+            var newState = new OtpChainState(next.Head, length - 1, length);
+            var replaced = await _chains.RenewAsync(
+                user.Id, snapshot.R, next.R, newState, snapshot.KdfIterations, length);
+
+            if (replaced)
+            {
+                Console.WriteLine($"[Otp] 账号「{user.Username}」链已续期：第 {snapshot.Generation} → {snapshot.Generation + 1} 代，" +
+                                  $"k 回到 {length - 1}/{length}");
+                await WriteRenewAuditAsync(user, AuditAction.OtpRenewed, consumed, snapshot,
+                    renewed: true, outcome: "RENEWED", errorType: null, reason: AuditReason.OtpRenewed);
+            }
+            else
+            {
+                // 条件未命中：别的请求刚刚换过链。**这不是错误**，旧链（或对方的新链）仍然有效。
+                Console.WriteLine($"[Otp] 账号「{user.Username}」续期未生效：种子已被并发请求换过（旧链继续有效）");
+                await WriteRenewAuditAsync(user, AuditAction.OtpRenewFailed, consumed, snapshot,
+                    renewed: false, outcome: "STALE_SEED", errorType: null, reason: AuditReason.OtpRenewFailed);
+            }
+        }
+        catch (Exception ex)
+        {
+            // 写库失败 / 形状非法（RenewAsync 会在写库前拒掉坏形状）。
+            // 一律不外抛：本次登录已经成功，续期失败最多让链少一格。
+            Console.WriteLine($"[Otp] 账号「{user.Username}」续期失败（不影响本次登录，下次登录会再试）: {ex.Message}");
+            try
+            {
+                await WriteRenewAuditAsync(user, AuditAction.OtpRenewFailed, consumed, snapshot,
+                    renewed: false, outcome: "ERROR", errorType: ex.GetType().Name,
+                    reason: AuditReason.OtpRenewFailed);
+            }
+            catch (Exception auditEx)
+            {
+                // 审计也写不进去时更不能抛：这条路径已经处在"出问题"的状态上。
+                Console.WriteLine($"[Otp] 续期失败记录也未能写入审计: {auditEx.Message}");
+            }
+        }
+    }
+
+    /**
+     * 续期结果的审计。**响应袋里只放公开参数**：种子只记前 8 位（用于"是不是同一代"的对账），
+     * 链头一个字节都不记 —— 链头是下一格的直接来源，落进审计等于把配额白送。
+     */
+    private Task WriteRenewAuditAsync(User user, string action, OtpConsumeResult consumed,
+        OtpChainSnapshot snapshot, bool renewed, string outcome, string? errorType, string reason)
+    {
+        var next = consumed.NewState!.Value;
+        return _auditWriter.WriteAsync(user.Id, user.Username, action, user.Status.ToString(),
+            new { user.Username, Purpose = "RENEW" },
+            new
+            {
+                Renewed = renewed,
+                Outcome = outcome,
+                ErrorType = errorType,
+                // 当前（旧）链的状态：k 是"还剩多少"，generation 是"第几代"
+                K = next.K,
+                ChainLength = snapshot.Length,
+                Generation = snapshot.Generation,
+                // 只留前 8 位用于对账，够区分"是不是同一代"，不足以重建任何东西
+                OldSeedPrefix = snapshot.R.Length >= 8 ? snapshot.R[..8] : snapshot.R
+            },
+            user.Status.ToString(), user.Username,
+            renewed ? AuditResult.Success : AuditResult.Failed, reason);
+    }
+
+    /* ==================== 登录：账号定位与状态闸门 ==================== */
+
+    /** 账号定位的结果。User 与 Denial 互斥：Denial 非空时 User 必为 null。 */
+    private readonly record struct LoginCandidate(User? User, string StatusBefore, IActionResult? Denial);
+
+    /**
+     * 从用户名走到"可以开始验凭据"的状态，或直接给出拒绝响应。
+     *
+     * 为什么单独抽出来：口令分支与链值分支必须**逐步一致** ——
+     * 锁定判定要用同一条时间线、冻结要先于凭据校验、待审核不能被漏掉。
+     * 各写一份的后果不是"多几行代码"，而是某些账号在其中一条路径上变成凭据探针。
+     */
+    private async Task<LoginCandidate> ResolveLoginCandidateAsync(string username, object requestLog)
+    {
+        var user = await _db.Users.Find(u => u.Username == username).FirstOrDefaultAsync();
         if (user == null)
         {
             var resp = new ApiResponse { Success = false, Code = BusinessCode.InvalidCredentials, Message = "用户名或密码错误" };
-            await _auditWriter.WriteAsync("anonymous", sanitizedUsername, AuditAction.LoginFailed, "N/A", requestLog, resp, "N/A",
-                sanitizedUsername, AuditResult.Failed, AuditReason.InvalidCredentials);
-            return Unauthorized(resp);
+            await _auditWriter.WriteAsync("anonymous", username, AuditAction.LoginFailed, "N/A", requestLog, resp, "N/A",
+                username, AuditResult.Failed, AuditReason.InvalidCredentials);
+            return new LoginCandidate(null, "N/A", Unauthorized(resp));
         }
 
         var statusBefore = user.Status.ToString();
 
-        // 锁定期间，即使正确口令也拒绝登录。
+        // 锁定期间，即使正确凭据也拒绝登录。
         // 注意判定不再直接拿墙钟比：TimeGuard 会核对"墙钟"与"锁定时的墙钟 + 真实流逝的
         // 运行时长"这两条线，背离时以单调线为准 ——
         // 于是把电脑时间往前拨 3 分钟并不会让这里放行。
         if (user.Status == UserStatus.Locked && user.LockoutEnd.HasValue)
         {
             var verdict = TimeGuard.Assess(user, TimeGuard.WallNow(), TimeGuard.UptimeMs());
-            await LogClockDriftIfAnyAsync(user, verdict, "LOGIN", sanitizedUsername);
+            await LogClockDriftIfAnyAsync(user, verdict, "LOGIN", username);
 
             if (verdict.Locked)
-                return await LockoutRejectionAsync(user, verdict, AuditAction.LoginFailed, statusBefore,
-                    requestLog, sanitizedUsername, "账号已锁定，请 ", 401);
+                return new LoginCandidate(null, statusBefore,
+                    await LockoutRejectionAsync(user, verdict, AuditAction.LoginFailed, statusBefore,
+                        requestLog, username, "账号已锁定，请 ", 401));
 
             // 锁定时间已过（按可靠时刻判断），自动恢复为启用状态
             // 失败计数与窗口锚点一并清掉：解锁后应当从 0 重新数满 3 次。
@@ -196,16 +468,16 @@ public class AuthController : AuthControllerBase
         {
             var resp = new ApiResponse { Success = false, Code = BusinessCode.PendingApproval, Message = "账号待审核，请联系管理员" };
             await _auditWriter.WriteAsync(user.Id, user.Username, AuditAction.LoginFailed, statusBefore, requestLog, resp, user.Status.ToString(),
-                sanitizedUsername, AuditResult.Failed, AuditReason.PendingApproval);
-            return Unauthorized(resp);
+                username, AuditResult.Failed, AuditReason.PendingApproval);
+            return new LoginCandidate(null, statusBefore, Unauthorized(resp));
         }
 
-        // 冻结账号（沉睡治理的产物）：直接拒绝，且**放在口令校验之前**。
+        // 冻结账号（沉睡治理的产物）：直接拒绝，且**放在凭据校验之前**。
         //
-        // 顺序很重要：若先验口令，冻结就只是"拦住知道口令的人"——
-        // 攻击者仍可对冻结账号验证口令猜测是否命中（正确口令会走到下一步，
-        // 于是错误码从"口令错"变成别的），等于给已停用的账号留了个口令探针。
-        // 先判状态 ⇒ 不论口令对错一律 ACCOUNT_DISABLED，不透出任何口令信息。
+        // 顺序很重要：若先验凭据，冻结就只是"拦住知道口令的人"——
+        // 攻击者仍可对冻结账号验证凭据猜测是否命中（正确凭据会走到下一步，
+        // 于是错误码从"口令错"变成别的），等于给已停用的账号留了个探针。
+        // 先判状态 ⇒ 不论凭据对错一律 ACCOUNT_DISABLED，不透出任何凭据信息。
         if (user.Status == UserStatus.Disabled)
         {
             var resp = new ApiResponse
@@ -215,91 +487,99 @@ public class AuthController : AuthControllerBase
                 Message = "账号已被冻结，如需恢复请联系用户管理员"
             };
             await _auditWriter.WriteAsync(user.Id, user.Username, AuditAction.LoginFailed, statusBefore, requestLog, resp,
-                user.Status.ToString(), sanitizedUsername, AuditResult.Failed, AuditReason.AccountDisabled);
-            return Unauthorized(resp);
+                user.Status.ToString(), username, AuditResult.Failed, AuditReason.AccountDisabled);
+            return new LoginCandidate(null, statusBefore, Unauthorized(resp));
         }
 
-        // 验证本身会顺带告诉我们要不要升级格式（旧格式无 pepper，通过后应当重写）。
-        // 注意这里**只判 Valid**：是否升级由下面的登录成功分支决定，失败分支一概不改库。
-        var passwordCheck = PasswordHasher.Verify(req.Password, user.PasswordHash, _pepper.Pepper);
-        if (!passwordCheck.Valid)
+        return new LoginCandidate(user, statusBefore, null);
+    }
+
+    /* ==================== 登录：第一因子失败的唯一出口 ==================== */
+
+    /**
+     * 第一因子不匹配（口令错 / 链值不符）：计次 →（可能）锁定 → 落库 → 审计。
+     *
+     * 两条路径共用同一段代码的理由与 ApplyCountedFailureAsync 相同：
+     * 各写一份，锁定锚点迟早会走偏，而"锁定什么时候到期"只能有一个答案。
+     * 唯一的差异是审计原因码 —— 它是"被猜的是哪一类凭据"的证据。
+     */
+    private async Task<IActionResult> RejectFirstFactorAsync(User user, string statusBefore, object requestLog,
+        string target, string mismatchReason)
+    {
+        // 两个时间读数只取一次，供"失败计数窗口的锚点"与"锁定锚点"共用：
+        // 分两次读会拿到两个不同步的"现在"，让本应同起点的锚点对不上。
+        var failWallNow = TimeGuard.WallNow();
+        var failUptimeMs = TimeGuard.UptimeMs();
+
+        // 计一次失败：只有落在同一个窗口（FailureWindow）内的才累加。
+        // 窗口过期时由它把计数归零、本次成为新窗口的第 1 次 ——
+        // 这里刻意不自己判"过期没有"，窗口语义只有基类那一份实现。
+        // 它同时是"还没锁定就拨钟"的唯一留痕点：拨钟不改变本次尝试的结果
+        // （不加罚、也不放过），只让"有人动过时钟"在审计里留下一条。
+        var thresholdReached = await RegisterFailedAttemptAsync(user, failWallNow, failUptimeMs, target);
+
+        string? message;
+        string code;
+        string reason;
+        UserStatus newStatus = user.Status;
+        DateTime? lockoutEnd = user.LockoutEnd;
+
+        if (thresholdReached)
         {
-            // 两个时间读数只取一次，供"失败计数窗口的锚点"与"锁定锚点"共用：
-            // 分两次读会拿到两个不同步的"现在"，让本应同起点的锚点对不上。
-            var failWallNow = TimeGuard.WallNow();
-            var failUptimeMs = TimeGuard.UptimeMs();
-
-            // 计一次失败：只有落在同一个窗口（FailureWindow）内的才累加。
-            // 窗口过期时由它把计数归零、本次成为新窗口的第 1 次 ——
-            // 这里刻意不自己判"过期没有"，窗口语义只有基类那一份实现。
-            // 它同时是"还没锁定就拨钟"的唯一留痕点：拨钟不改变本次尝试的结果
-            // （不加罚、也不放过），只让"有人动过时钟"在审计里留下一条。
-            var thresholdReached = await RegisterFailedAttemptAsync(user, failWallNow, failUptimeMs,
-                sanitizedUsername);
-
-            string? message;
-            string code;
-            string reason;
-            UserStatus newStatus = user.Status;
-            DateTime? lockoutEnd = user.LockoutEnd;
-
-            if (thresholdReached)
-            {
-                newStatus = UserStatus.Locked;
-                // 锁定时同时记下**两个**时间锚点：墙钟 + 系统运行时长。
-                // 只记墙钟的话，"现在到了没有"就还得再读一次墙钟，
-                // 而墙钟恰恰是能被拨动的那一个（拨快 3 分钟即可解锁）；
-                // 运行时长不受拨钟影响，两者一对比就知道这段时间真实过去了多久。
-                lockoutEnd = failWallNow.Add(LockoutDuration);
-                user.Status = newStatus;
-                user.LockoutEnd = lockoutEnd;
-                user.LockoutWallAt = failWallNow;
-                user.LockoutUptimeAt = failUptimeMs;
-                // 新的一轮锁定：把"已就时钟背离告警过"的标记归零，
-                // 否则上一轮留下的 true 会让这一轮的拨钟不再留痕。
-                user.LockoutDriftLogged = false;
-                message = $"连续输错 {MaxFailedAttempts} 次密码，账号已锁定 {LockoutDuration.TotalMinutes} 分钟";
-                code = BusinessCode.AccountLocked;
-                // 本次尝试既"口令错"也"触发锁定"，审计语义上按更严重的锁定归类：
-                // 审计员要能一条查询捞出"所有因口令错误而锁定的事件"。
-                reason = AuditReason.AccountLocked;
-            }
-            else
-            {
-                message = $"密码错误，还剩 {MaxFailedAttempts - user.FailedLoginAttempts} 次机会";
-                code = BusinessCode.InvalidCredentials;
-                reason = AuditReason.InvalidCredentials;
-            }
-
-            await _db.Users.ReplaceOneAsync(u => u.Id == user.Id, user);
-            var resp = new ApiResponse
-            {
-                Success = false,
-                Code = code,
-                Message = message,
-                Data = new { FailedAttempts = user.FailedLoginAttempts, LockoutEnd = lockoutEnd }
-            };
-            await _auditWriter.WriteAsync(user.Id, user.Username, AuditAction.LoginFailed, statusBefore, requestLog, resp, user.Status.ToString(),
-                sanitizedUsername, AuditResult.Failed, reason);
-            return Unauthorized(resp);
+            newStatus = UserStatus.Locked;
+            // 锁定时同时记下**两个**时间锚点：墙钟 + 系统运行时长。
+            // 只记墙钟的话，"现在到了没有"就还得再读一次墙钟，
+            // 而墙钟恰恰是能被拨动的那一个（拨快 3 分钟即可解锁）；
+            // 运行时长不受拨钟影响，两者一对比就知道这段时间真实过去了多久。
+            lockoutEnd = failWallNow.Add(LockoutDuration);
+            user.Status = newStatus;
+            user.LockoutEnd = lockoutEnd;
+            user.LockoutWallAt = failWallNow;
+            user.LockoutUptimeAt = failUptimeMs;
+            // 新的一轮锁定：把"已就时钟背离告警过"的标记归零，
+            // 否则上一轮留下的 true 会让这一轮的拨钟不再留痕。
+            user.LockoutDriftLogged = false;
+            message = $"连续输错 {MaxFailedAttempts} 次密码，账号已锁定 {LockoutDuration.TotalMinutes} 分钟";
+            code = BusinessCode.AccountLocked;
+            // 本次尝试既"凭据错"也"触发锁定"，审计语义上按更严重的锁定归类：
+            // 审计员要能一条查询捞出"所有因凭据错误而锁定的事件"。
+            reason = AuditReason.AccountLocked;
+        }
+        else
+        {
+            message = $"密码错误，还剩 {MaxFailedAttempts - user.FailedLoginAttempts} 次机会";
+            code = BusinessCode.InvalidCredentials;
+            reason = mismatchReason;
         }
 
-        // ── 旧格式口令哈希的顺手升级 ──
-        // 为什么只做在这一处：登录是全系统唯一的入口 —— 任何操作都要先拿到票据，
-        // 而票据只能由登录签发。于是"只在登录升级"就等于"全部账号迟早都会升级"，
-        // 不必把"顺手写库"这件事复制到四个验证点里去（那样回滚面也更大）。
-        // 为什么放在这里：此时口令刚刚验证通过，用它算新哈希是安全的；
-        // 而验证失败的分支已经在上面 return 掉了，不会走到这里。
-        // 放在第二因子之前：升级只依赖"口令已验过"这一个事实，与人脸无关；
-        // 若放在人脸之后，一个长期不刷脸的账号就会一直停在旧格式。
-        if (passwordCheck.NeedsUpgrade)
-            await TryUpgradePasswordHashAsync(user, req.Password);
+        await _db.Users.ReplaceOneAsync(u => u.Id == user.Id, user);
+        var resp = new ApiResponse
+        {
+            Success = false,
+            Code = code,
+            Message = message,
+            Data = new { FailedAttempts = user.FailedLoginAttempts, LockoutEnd = lockoutEnd }
+        };
+        await _auditWriter.WriteAsync(user.Id, user.Username, AuditAction.LoginFailed, statusBefore, requestLog, resp, user.Status.ToString(),
+            target, AuditResult.Failed, reason);
+        return Unauthorized(resp);
+    }
 
-        // ── 第二因子闸门 ──
-        //
-        // ⚠️ 从这里往下，**还没有**清零失败计数、**还没有**更新 lastLoginAt、
-        //    更没有签发任何票据。这三件事统一由 CompleteLoginAsync 在"整段认证全部通过"时
-        //    一次做完 —— 理由见该方法注释（否则人脸这一因子会变成一条不会触发锁定的口令探针）。
+    /* ==================== 登录：第一因子之后的统一收口 ==================== */
+
+    /**
+     * 第一因子已通过：过第二因子闸门，然后交给 CompleteLoginAsync。
+     *
+     * ⚠️ 从这里往下，**还没有**清零失败计数、**还没有**更新 lastLoginAt、
+     *    更没有签发任何票据。这三件事统一由 CompleteLoginAsync 在"整段认证全部通过"时
+     *    一次做完 —— 理由见该方法注释（否则人脸这一因子会变成一条不会触发锁定的凭据探针）。
+     *
+     * 两个第一因子路径共用它，是为了让"链值登录 + 人脸"与"口令登录 + 人脸"
+     * 走的是**同一条**第二因子链路：否则会出现"某一路绕过人脸"这种最难发现的缺口。
+     */
+    private async Task<IActionResult> ContinueAfterFirstFactorAsync(User user, string statusBefore,
+        object requestLog, string target)
+    {
         if (_face.Enabled)
         {
             var decision = await _face.AssessAsync(user);
@@ -317,7 +597,7 @@ public class AuthController : AuthControllerBase
                               + "请联系用户管理员重置你的人脸后重试。"
                 };
                 await _auditWriter.WriteAsync(user.Id, user.Username, AuditAction.FaceLoginFailed, statusBefore,
-                    requestLog, resp, user.Status.ToString(), sanitizedUsername, AuditResult.Failed,
+                    requestLog, resp, user.Status.ToString(), target, AuditResult.Failed,
                     AuditReason.FaceEngineUnavailable);
                 return StatusCode(503, resp);
             }
@@ -352,13 +632,13 @@ public class AuthController : AuthControllerBase
                 await _auditWriter.WriteAsync(user.Id, user.Username, AuditAction.FaceLoginRequired, statusBefore,
                     requestLog,
                     new { user.Username, Step = "PASSWORD_OK", ChallengeIssued = true, Action = action },
-                    user.Status.ToString(), sanitizedUsername, AuditResult.Success);
+                    user.Status.ToString(), target, AuditResult.Success);
                 return Ok(challengeResp);
             }
         }
 
         // 未录人脸（或模块关闭）⇒ 与改造前逐字一致的单因子登录。
-        return await CompleteLoginAsync(user, statusBefore, requestLog, sanitizedUsername, secondFactor: false);
+        return await CompleteLoginAsync(user, statusBefore, requestLog, target, secondFactor: false);
     }
 
     /* ==================== 登录第二阶段：人脸验证 ==================== */

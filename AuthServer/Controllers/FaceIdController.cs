@@ -1,6 +1,7 @@
 using AuthServer.Models;
 using AuthServer.Services;
 using AuthServer.Services.FaceId;
+using AuthServer.Services.Otp;
 using Microsoft.AspNetCore.Mvc;
 using MongoDB.Driver;
 
@@ -33,9 +34,10 @@ public class FaceIdController : AuthControllerBase
     private readonly FaceIdTemplateStore _templates;
 
     public FaceIdController(MongoDbService db, AuditWriter auditWriter, SessionService sessions,
-        PepperProvider pepper, IConfiguration configuration,
-        FaceIdEnrollService enroll, FaceIdLoginService login, FaceIdTemplateStore templates)
-        : base(db, auditWriter, sessions, pepper, configuration)
+        IConfiguration configuration,
+        FaceIdEnrollService enroll, FaceIdLoginService login, FaceIdTemplateStore templates,
+        OtpConfirmStore confirms)
+        : base(db, auditWriter, sessions, configuration, confirms)
     {
         _enroll = enroll;
         _login = login;
@@ -93,7 +95,7 @@ public class FaceIdController : AuthControllerBase
     ///   界面必须在此期间明确提示"请看镜头"，并在结束后给出可操作的原因。
     /// </summary>
     [HttpPost("enroll")]
-    public async Task<IActionResult> Enroll([FromBody] FaceIdPasswordRequest req)
+    public async Task<IActionResult> Enroll([FromBody] FaceIdConfirmRequest req)
     {
         const string action = AuditAction.FaceIdEnroll;
         const string failAction = AuditAction.FaceIdEnrollFailed;
@@ -116,36 +118,11 @@ public class FaceIdController : AuthControllerBase
             return StatusCode(_enroll.Enabled ? 503 : 400, resp);
         }
 
-        if (string.IsNullOrWhiteSpace(req.Password))
-        {
-            var resp = new ApiResponse
-            {
-                Success = false,
-                Code = BusinessCode.EmptyFields,
-                Message = "录入人脸需要重新输入当前口令"
-            };
-            await _auditWriter.WriteAsync(user.Id, user.Username, failAction, statusBefore, requestLog, resp,
-                statusBefore, user.Username, AuditResult.Failed, AuditReason.EmptyFields);
-            return BadRequest(resp);
-        }
-
-        if (!PasswordHasher.Verify(req.Password, user.PasswordHash, _pepper.Pepper).Valid)
-        {
-            // 这次失败就是"有人在猜这个账号的口令"，与登录时的口令错误同类 ⇒ 计次。
-            // 不计次的话，这条路径就是一条无节流的在线口令猜测通道。
-            var lockMessage = await ApplyCountedFailureAsync(user);
-            var resp = new ApiResponse
-            {
-                Success = false,
-                Code = lockMessage is null ? BusinessCode.InvalidCredentials : BusinessCode.AccountLocked,
-                Message = lockMessage ?? "口令校验失败，已拒绝录入人脸",
-                Data = new { FailedAttempts = user.FailedLoginAttempts, LockoutEnd = user.LockoutEnd }
-            };
-            await _auditWriter.WriteAsync(user.Id, user.Username, failAction, statusBefore, requestLog, resp,
-                user.Status.ToString(), user.Username, AuditResult.Failed,
-                lockMessage is null ? AuditReason.FaceIdWrongPassword : AuditReason.AccountLocked);
-            return Unauthorized(resp);
-        }
+        // 二次确认（P8）：只认一次性确认凭据。缺凭据 ⇒ 401 OTP_CONFIRM_REQUIRED，
+        // 客户端据此去换一张再来 —— 与原来"口令不对"同一个状态码，界面不必分叉。
+        var confirmDeny = await DenyUnlessConfirmedAsync(req.ConfirmToken, user, OtpConfirmPurpose.FaceIdEnroll,
+            user.Username, failAction, requestLog);
+        if (confirmDeny != null) return confirmDeny;
 
         var outcome = await _enroll.EnrollAsync(user.Id, user.Username);
         if (!outcome.Success)
@@ -227,7 +204,7 @@ public class FaceIdController : AuthControllerBase
     /// 把受害者的人脸模板删掉，让他"以为系统坏了"，同时自己仍能用口令登录。
     /// </summary>
     [HttpPost("delete")]
-    public async Task<IActionResult> Delete([FromBody] FaceIdPasswordRequest req)
+    public async Task<IActionResult> Delete([FromBody] FaceIdConfirmRequest req)
     {
         const string action = AuditAction.FaceIdTemplateDeleted;
         var (user, deny) = await RequireAuthenticatedAsync(action, "self-faceid");
@@ -236,34 +213,11 @@ public class FaceIdController : AuthControllerBase
         var requestLog = new { user = user!.Username };
         var statusBefore = user.Status.ToString();
 
-        if (string.IsNullOrWhiteSpace(req.Password))
-        {
-            var resp = new ApiResponse
-            {
-                Success = false,
-                Code = BusinessCode.EmptyFields,
-                Message = "删除人脸需要重新输入当前口令"
-            };
-            await _auditWriter.WriteAsync(user.Id, user.Username, action, statusBefore, requestLog, resp,
-                statusBefore, user.Username, AuditResult.Failed, AuditReason.EmptyFields);
-            return BadRequest(resp);
-        }
-
-        if (!PasswordHasher.Verify(req.Password, user.PasswordHash, _pepper.Pepper).Valid)
-        {
-            var lockMessage = await ApplyCountedFailureAsync(user);
-            var resp = new ApiResponse
-            {
-                Success = false,
-                Code = lockMessage is null ? BusinessCode.InvalidCredentials : BusinessCode.AccountLocked,
-                Message = lockMessage ?? "口令校验失败，已拒绝删除人脸",
-                Data = new { FailedAttempts = user.FailedLoginAttempts, LockoutEnd = user.LockoutEnd }
-            };
-            await _auditWriter.WriteAsync(user.Id, user.Username, action, statusBefore, requestLog, resp,
-                user.Status.ToString(), user.Username, AuditResult.Failed,
-                lockMessage is null ? AuditReason.FaceIdWrongPassword : AuditReason.AccountLocked);
-            return Unauthorized(resp);
-        }
+        // 二次确认（P8）：只认一次性确认凭据。缺凭据 ⇒ 401 OTP_CONFIRM_REQUIRED，
+        // 客户端据此去换一张再来 —— 与原来"口令不对"同一个状态码，界面不必分叉。
+        var confirmDeny = await DenyUnlessConfirmedAsync(req.ConfirmToken, user, OtpConfirmPurpose.FaceIdDelete,
+            user.Username, action, requestLog);
+        if (confirmDeny != null) return confirmDeny;
 
         var removed = await _enroll.DeleteAllAsync(user.Id);
         var response = new ApiResponse

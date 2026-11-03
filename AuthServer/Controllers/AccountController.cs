@@ -1,7 +1,9 @@
 using AuthServer.Models;
 using AuthServer.Services;
 using AuthServer.Services.Face;
+using AuthServer.Services.Otp;
 using Microsoft.AspNetCore.Mvc;
+using MongoDB.Bson;
 using MongoDB.Driver;
 using System.Text.Json;
 using System.Text.RegularExpressions;
@@ -21,20 +23,30 @@ namespace AuthServer.Controllers;
 public class AccountController : AuthControllerBase
 {
     private readonly VerificationService _codes;
+
+    /// <summary>哈希链存储。本控制器只在两处用到它：改密/重置后重建链。</summary>
+    private readonly OtpChainStore _chains;
+
+    /// <summary>一次性挑战。改密走链值分支时要校验它（与登录同一套顺序）。</summary>
+    private readonly OtpChallengeStore _challenges;
+
     private readonly EmailOptions _emailOptions;
     private readonly FaceLoginService _face;
     private readonly FaceTemplateStore _faceTemplates;
     private readonly FacePreviewService _preview;
 
     public AccountController(MongoDbService db, AuditWriter auditWriter, SessionService sessions,
-        PepperProvider pepper, VerificationService codes, EmailOptions emailOptions,
+        VerificationService codes, EmailOptions emailOptions,
         FaceLoginService face, FaceTemplateStore faceTemplates, FacePreviewService preview,
-        IConfiguration configuration)
-        : base(db, auditWriter, sessions, pepper, configuration)
+        IConfiguration configuration, OtpConfirmStore confirms,
+        OtpChainStore chains, OtpChallengeStore challenges)
+        : base(db, auditWriter, sessions, configuration, confirms)
     {
         _codes = codes;
         _emailOptions = emailOptions;
         _face = face;
+        _chains = chains;
+        _challenges = challenges;
         _faceTemplates = faceTemplates;
         _preview = preview;
     }
@@ -131,10 +143,16 @@ public class AccountController : AuthControllerBase
             }
         }
 
+        // Id 由**客户端生成**：账号与它的链必须一起成立，而链需要 userId。
+        // 先插账号再建链的话，中间失败就会留下一个「看起来正常、其实永远登不进去」的账号 ——
+        // 它还会照常出现在管理员的待审核列表里，谁都不知道它坏了。
+        // Mongo 允许客户端提供 ObjectId，于是这条顺序可以反过来：先定 Id、插账号、再建链，
+        // 建链失败就把账号删掉（此时它还没有任何关联数据）。
         var user = new User
         {
+            Id = ObjectId.GenerateNewId().ToString(),
             Username = sanitizedUsername,
-            PasswordHash = PasswordHasher.Hash(req.Password, _pepper.Pepper),
+            // 口令不落库：注册这一刻拿到的是**明文**，正好用它把链建出来（见下）。
             Status = UserStatus.Pending,
             // 邮件功能关闭时回退为"无邮箱的老流程"，避免外部依赖不可用就完全无法注册
             Email = emailRequired ? email : null,
@@ -144,6 +162,38 @@ public class AccountController : AuthControllerBase
         };
 
         await _db.Users.InsertOneAsync(user);
+
+        try
+        {
+            // 建链 = 把明文口令折叠成 x_N。明文只在本次调用内存在，用完即弃。
+            await _chains.CreateAsync(user.Id, user.Username, req.Password);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[Otp] 账号「{user.Username}」建链失败，回滚注册: {ex.Message}");
+
+            // 回滚：删掉刚插的账号，让这次注册"什么都没发生"。
+            // 反过来（留着账号、只报错）会造出一个永远登不进去的账号，
+            // 而用户重试注册只会撞上"用户名已存在"。
+            try
+            {
+                await _db.Users.DeleteOneAsync(u => u.Id == user.Id);
+            }
+            catch (Exception rollbackEx)
+            {
+                Console.WriteLine($"[Otp] ⚠️ 注册回滚失败，账号「{user.Username}」已成为无链账号: {rollbackEx.Message}");
+            }
+
+            var failed = new ApiResponse
+            {
+                Success = false,
+                Code = BusinessCode.OtpRebuildFailed,
+                Message = "注册失败：认证链未能建立，请稍后重试"
+            };
+            await _auditWriter.WriteAsync(user.Id, user.Username, AuditAction.Register, "N/A", requestLog, failed,
+                user.Status.ToString(), sanitizedUsername, AuditResult.Failed, AuditReason.OtpRebuildFailed);
+            return StatusCode(500, failed);
+        }
 
         var response = new ApiResponse<UserResponse>
         {
@@ -424,8 +474,26 @@ public class AccountController : AuthControllerBase
             return BadRequest(resp);
         }
 
-        // 重置成功：换口令，并一并清掉锁定与失败计数（否则改完密码仍被锁在门外）
-        user.PasswordHash = PasswordHasher.Hash(req.NewPassword, _pepper.Pepper);
+        // ── 重置口令 = 重建链（P6/P8）──
+        // 口令不再单独存一份，它**只存在于链里**（链根由它派生）。
+        // 于是"改口令"这个动作的全部内容就是"用新明文重算一条链、换掉旧的"，
+        // 没有第二个记录需要同步，也就不存在"改了一半"的中间态 ——
+        // 重建失败 = 什么都没变，用户拿旧口令照样能登进来说明这次重置没生效。
+        if (!await TryRebuildChainAsync(user, req.NewPassword, "RESET_PASSWORD", requestLog, username))
+        {
+            var rebuildFailed = new ApiResponse
+            {
+                Success = false,
+                Code = BusinessCode.OtpRebuildFailed,
+                Message = "重置失败：认证链未能重建，口令未变更，请稍后重试"
+            };
+            await _auditWriter.WriteAsync(user.Id, user.Username, failedAction, statusBefore, requestLog,
+                rebuildFailed, user.Status.ToString(), username, AuditResult.Failed, AuditReason.OtpRebuildFailed);
+            return StatusCode(500, rebuildFailed);
+        }
+
+        // 链已换新 ⇒ 顺带清掉锁定与失败计数（否则改完口令仍被锁在门外）。
+        // 放在重建**之后**：重建失败时"什么都没改"是最容易解释的失败形态。
         ResetFailedAttempts(user);
         if (user.Status == UserStatus.Locked) user.Status = UserStatus.Enabled;
         await _db.Users.ReplaceOneAsync(u => u.Id == user.Id, user);
@@ -465,7 +533,8 @@ public class AccountController : AuthControllerBase
         // 新旧口令都不入日志
         var requestLog = new { req.Username };
 
-        if (string.IsNullOrWhiteSpace(sanitizedUsername) || string.IsNullOrWhiteSpace(req.OldPassword) || string.IsNullOrWhiteSpace(req.NewPassword))
+        if (string.IsNullOrWhiteSpace(sanitizedUsername) || string.IsNullOrWhiteSpace(req.NewPassword)
+            || string.IsNullOrWhiteSpace(req.OldOtpCode) || string.IsNullOrWhiteSpace(req.OldChallengeToken))
         {
             var resp = new ApiResponse { Success = false, Code = BusinessCode.EmptyFields, Message = "字段不能为空" };
             await _auditWriter.WriteAsync("anonymous", sanitizedUsername, failAction, "N/A", requestLog, resp, "N/A",
@@ -497,26 +566,101 @@ public class AccountController : AuthControllerBase
 
         var statusBefore = user.Status.ToString();
 
-        if (!PasswordHasher.Verify(req.OldPassword, user.PasswordHash, _pepper.Pepper).Valid)
+        // 本端点**匿名**（没有票据可依）：唯一的身份证明就是"能算出一格仍然有效的链值"。
+        // 旧口令明文早已不上网 —— 客户端在本机把它折叠成 x_k 再提交。
+
+        // ① 先消费挑战：一次性、绑用户名、有 TTL。顺序与登录一致 ——
+        //    放在最前面是为了"无论后面成败，这张票都不能再用"。
+        var (challengeUsername, challengeError) = _challenges.Consume(req.OldChallengeToken);
+        if (challengeError is not null
+            || !string.Equals(challengeUsername, user.Username, StringComparison.Ordinal))
         {
-            var resp = new ApiResponse { Success = false, Code = BusinessCode.InvalidCredentials, Message = "旧密码错误" };
-            await _auditWriter.WriteAsync(user.Id, user.Username, failAction, statusBefore, requestLog, resp, statusBefore,
-                sanitizedUsername, AuditResult.Failed, AuditReason.WrongOldPassword);
+            var resp = new ApiResponse
+            {
+                Success = false,
+                Code = BusinessCode.OtpChallengeInvalid,
+                Message = "改密请求已失效，请重新发起"
+            };
+            await _auditWriter.WriteAsync(user.Id, user.Username, failAction, statusBefore, requestLog, resp,
+                statusBefore, sanitizedUsername, AuditResult.Failed, AuditReason.OtpChallengeInvalid);
             return Unauthorized(resp);
         }
 
-        // 新旧口令相同：改密等于没改，按策略拒绝。
-        // 这条校验必须放在**旧口令验过之后** —— 否则攻击者能拿它当"口令是否正确"的探针。
-        if (string.Equals(req.NewPassword, req.OldPassword, StringComparison.Ordinal))
+        // ② 核销一格
+        var consumed = await _chains.ConsumeAsync(user.Id, req.OldOtpCode);
+
+        // 未建链 / 链畸形：对外与"旧密码错误"**逐字一致**。
+        // 这个端点是匿名的，承认"这个账号有链 / 链坏了"就是一条比"账号存在"更细的枚举信息。
+        if (consumed.Outcome is OtpConsumeOutcome.NotEnrolled or OtpConsumeOutcome.Malformed)
         {
-            var resp = new ApiResponse { Success = false, Code = BusinessCode.PasswordReused, Message = "新密码不能与当前密码相同" };
-            await _auditWriter.WriteAsync(user.Id, user.Username, failAction, statusBefore, requestLog, resp, statusBefore,
-                sanitizedUsername, AuditResult.Failed, AuditReason.PasswordReused);
-            return BadRequest(resp);
+            var resp = new ApiResponse { Success = false, Code = BusinessCode.InvalidCredentials, Message = "旧密码错误" };
+            await _auditWriter.WriteAsync(user.Id, user.Username, failAction, statusBefore, requestLog, resp,
+                statusBefore, sanitizedUsername, AuditResult.Failed,
+                consumed.Outcome == OtpConsumeOutcome.Malformed
+                    ? AuditReason.OtpChainMalformed
+                    : AuditReason.OtpNotEnrolled);
+            return Unauthorized(resp);
         }
 
-        user.PasswordHash = PasswordHasher.Hash(req.NewPassword, _pepper.Pepper);
-        await _db.Users.ReplaceOneAsync(u => u.Id == user.Id, user);
+        if (consumed.Outcome == OtpConsumeOutcome.Exhausted)
+        {
+            // 凭据是真的、链没了。必须回"需重建"，否则用户会反复重输旧口令。
+            var resp = new ApiResponse
+            {
+                Success = false,
+                Code = BusinessCode.OtpChainExhausted,
+                Message = "本账号的一次性口令已用尽，请用邮箱验证码重置口令"
+            };
+            await _auditWriter.WriteAsync(user.Id, user.Username, failAction, statusBefore, requestLog, resp,
+                statusBefore, sanitizedUsername, AuditResult.Failed, AuditReason.OtpChainExhausted);
+            return Unauthorized(resp);
+        }
+
+        if (consumed.Outcome == OtpConsumeOutcome.Conflict)
+        {
+            var resp = new ApiResponse
+            {
+                Success = false,
+                Code = BusinessCode.OtpChainConflict,
+                Message = "改密请求发生并发冲突，请重试"
+            };
+            await _auditWriter.WriteAsync(user.Id, user.Username, failAction, statusBefore, requestLog, resp,
+                statusBefore, sanitizedUsername, AuditResult.Failed, AuditReason.OtpChainConflict);
+            return Conflict(resp);
+        }
+
+        if (consumed.Outcome == OtpConsumeOutcome.Mismatch)
+        {
+            var resp = new ApiResponse { Success = false, Code = BusinessCode.InvalidCredentials, Message = "旧密码错误" };
+            await _auditWriter.WriteAsync(user.Id, user.Username, failAction, statusBefore, requestLog, resp,
+                statusBefore, sanitizedUsername, AuditResult.Failed, AuditReason.WrongOldPassword);
+            return Unauthorized(resp);
+        }
+
+        // ── ③「新旧口令相同」这一条 P8 起由**客户端**判定 ──
+        // 服务端已经没有"当前口令"可比：库里的链是一串哈希迭代的结果，
+        // 拿新明文去比它需要先知道 k 与盐，而那正是登录/改密刚刚消耗掉的东西。
+        // 这不是"放弃校验"而是"校验挪位"：客户端同时持有新旧两个明文，比较是一行的事；
+        // 服务端要做同样的判定，就必须为每个账号留一份可离线比对的口令派生物 ——
+        // 那正是这个项目从 P0 起就在拆掉的东西。
+        // 代价是绕过客户端（直接打接口）可以把口令改成同一个值：**改密等于没改**，
+        // 不产生任何权限变化，因此不构成安全边界（见设计稿 §7.6 边界）。
+
+        // ── ④ 重建链 = 换口令 ──
+        // 口令只存在于链里，所以改密的全部内容就是"用新明文重算一条链"。
+        // 这一步失败 = 什么都没变，旧口令照样能登进来。
+        if (!await TryRebuildChainAsync(user, req.NewPassword, "CHANGE_PASSWORD", requestLog, sanitizedUsername))
+        {
+            var rebuildFailed = new ApiResponse
+            {
+                Success = false,
+                Code = BusinessCode.OtpRebuildFailed,
+                Message = "改密失败：认证链未能重建，口令未变更，请稍后重试"
+            };
+            await _auditWriter.WriteAsync(user.Id, user.Username, failAction, statusBefore, requestLog,
+                rebuildFailed, user.Status.ToString(), sanitizedUsername, AuditResult.Failed, AuditReason.OtpRebuildFailed);
+            return StatusCode(500, rebuildFailed);
+        }
 
         // 口令已换，旧票据不应再能用。
         // 吊销失败不阻断主流程（AuditService 同思路）：口令已经改成功，
@@ -533,6 +677,69 @@ public class AccountController : AuthControllerBase
         await _auditWriter.WriteAsync(user.Id, user.Username, okAction, statusBefore, requestLog, response, user.Status.ToString(),
             sanitizedUsername, AuditResult.Success);
         return Ok(response);
+    }
+
+    /* ==================== 口令变更后的链重建（P6） ==================== */
+
+    /**
+     * 用新口令整条重建链。返回 false ⇒ 调用方**必须整体失败**（口令未变）。
+     *
+     * ── 为什么不走"下次登录再补"的懒路径 ────────────────────────
+     * 那条路看起来更温和（改密永不会失败），但它把问题推到了下一次登录：
+     * 那时客户端手里已经是新口令、链却绑着旧口令，得到的是"口令明明对却登不上"。
+     * 这类故障的归因成本极高 —— 而在 P8 之前它一直是**隐形的**：`passwordHash` 还在，
+     * 口令登录是通的，用户不会意识到 OTP 那条路已经死了。P8 删掉口令路径之后，
+     * 半截状态就是"谁都进不来"，所以这条约束反而更硬：
+     * 宁可让改密这一次显式失败，也不要留下半个口令。
+     *
+     * ── 为什么失败也不抛 ────────────────────────────────────────
+     * 返回值而不是异常：调用方还要写自己的失败审计、决定状态码，并保证
+     * "失败 ⇒ 什么都没改"（P8 之后重建链就是换口令本身，没有第二个记录要回滚）。
+     * 这里只负责"把 OTP 域的事实记清楚"。
+     */
+    private async Task<bool> TryRebuildChainAsync(User user, string newPassword, string trigger,
+        object requestLog, string target)
+    {
+        var statusBefore = user.Status.ToString();
+
+        try
+        {
+            var chain = await _chains.RebuildAsync(user.Id, user.Username, newPassword);
+
+            // 审计里**绝不含口令、绝不含链值**：只记这条新链的公开参数与"由谁触发"。
+            // Trigger 必须记 —— 同一个动作码要能回答"这次换链是改密、是重置、还是人工恢复"。
+            await _auditWriter.WriteAsync(user.Id, user.Username, AuditAction.OtpRebuilt, statusBefore,
+                requestLog,
+                new
+                {
+                    Trigger = trigger,
+                    user.Username,
+                    ChainLength = chain.Length,
+                    KdfIterations = chain.KdfIterations,
+                    Generation = chain.Generation
+                },
+                statusBefore, target, AuditResult.Success, AuditReason.OtpRebuilt);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[Otp] 账号「{user.Username}」重建链失败（{trigger} 将整体失败并回滚口令）: {ex.Message}");
+
+            try
+            {
+                await _auditWriter.WriteAsync(user.Id, user.Username, AuditAction.OtpRebuildFailed, statusBefore,
+                    requestLog,
+                    new { Trigger = trigger, user.Username, ErrorType = ex.GetType().Name },
+                    statusBefore, target, AuditResult.Failed, AuditReason.OtpRebuildFailed);
+            }
+            catch (Exception auditEx)
+            {
+                // 审计是旁路，任何情况下都不该把"重建失败"升级成"连响应都发不出去"。
+                Console.WriteLine($"[Otp] 重建失败的审计也未能写入: {auditEx.Message}");
+            }
+
+            return false;
+        }
     }
 
     /* ==================== 人脸模板自助（可选第二因子） ==================== */
@@ -606,34 +813,13 @@ public class AccountController : AuthControllerBase
             return StatusCode(503, resp);
         }
 
-        if (string.IsNullOrWhiteSpace(req.Password))
-        {
-            var resp = new ApiResponse { Success = false, Code = BusinessCode.EmptyFields, Message = "请先输入当前登录口令" };
-            await _auditWriter.WriteAsync(user.Id, user.Username, AuditAction.FaceEnrollFailed, statusBefore,
-                requestLog, resp, statusBefore, user.Username, AuditResult.Failed, AuditReason.EmptyFields);
-            return BadRequest(resp);
-        }
-
-        if (!PasswordHasher.Verify(req.Password, user.PasswordHash, _pepper.Pepper).Valid)
-        {
-            // 这次失败的语义就是"有人在猜这个账号的口令"，与登录时的口令错误同类，
-            // 因此**计次**（走 A 组语义，见 FaceCodes.IsCounted）。
-            // 它与 create-account 的二次口令不同：那里的操作者本身就是管理员、
-            // 且目标是他人的账号；这里猜的是**自己的**登录口令，
-            // 而这条路径若不计次就是一条无节流的在线口令猜测通道。
-            var lockMessage = await ApplyCountedFailureAsync(user);
-            var resp = new ApiResponse
-            {
-                Success = false,
-                Code = lockMessage is null ? BusinessCode.InvalidCredentials : BusinessCode.AccountLocked,
-                Message = lockMessage ?? "口令校验失败，已拒绝录入",
-                Data = new { FailedAttempts = user.FailedLoginAttempts, LockoutEnd = user.LockoutEnd }
-            };
-            await _auditWriter.WriteAsync(user.Id, user.Username, AuditAction.FaceEnrollFailed, statusBefore,
-                requestLog, resp, user.Status.ToString(), user.Username, AuditResult.Failed,
-                lockMessage is null ? AuditReason.FaceWrongPassword : AuditReason.AccountLocked);
-            return Unauthorized(resp);
-        }
+        // 二次确认（P8）：只认一次性确认凭据，没有"再输一次口令"这条路了。
+        // 缺凭据时 <see cref="DenyUnlessConfirmedAsync"/> 一律回 401 OTP_CONFIRM_REQUIRED，
+        // 客户端据此去 <c>POST /api/auth/reconfirm</c> 换一张 —— 与旧路径"口令不对"同一个状态码，
+        // 于是界面上的错误处理不必按新旧分叉（那段分叉正是回滚期最容易错位的地方）。
+        var confirmDeny = await DenyUnlessConfirmedAsync(req.ConfirmToken, user, OtpConfirmPurpose.FaceEnroll,
+            user.Username, AuditAction.FaceEnrollFailed, requestLog);
+        if (confirmDeny != null) return confirmDeny;
 
         var (token, pose) = _face.IssueForEnroll(user.Username);
 
@@ -769,29 +955,13 @@ public class AccountController : AuthControllerBase
         var requestLog = new { user = user!.Username };
         var statusBefore = user.Status.ToString();
 
-        if (string.IsNullOrWhiteSpace(req.Password))
-        {
-            var resp = new ApiResponse { Success = false, Code = BusinessCode.EmptyFields, Message = "删除人脸需要重新输入当前口令" };
-            await _auditWriter.WriteAsync(user.Id, user.Username, action, statusBefore, requestLog, resp, statusBefore,
-                user.Username, AuditResult.Failed, AuditReason.EmptyFields);
-            return BadRequest(resp);
-        }
-
-        if (!PasswordHasher.Verify(req.Password, user.PasswordHash, _pepper.Pepper).Valid)
-        {
-            var lockMessage = await ApplyCountedFailureAsync(user);
-            var resp = new ApiResponse
-            {
-                Success = false,
-                Code = lockMessage is null ? BusinessCode.InvalidCredentials : BusinessCode.AccountLocked,
-                Message = lockMessage ?? "口令校验失败，已拒绝删除人脸",
-                Data = new { FailedAttempts = user.FailedLoginAttempts, LockoutEnd = user.LockoutEnd }
-            };
-            await _auditWriter.WriteAsync(user.Id, user.Username, action, statusBefore, requestLog, resp,
-                user.Status.ToString(), user.Username, AuditResult.Failed,
-                lockMessage is null ? AuditReason.FaceWrongPassword : AuditReason.AccountLocked);
-            return Unauthorized(resp);
-        }
+        // 二次确认（P8）：只认一次性确认凭据，没有"再输一次口令"这条路了。
+        // 缺凭据时 <see cref="DenyUnlessConfirmedAsync"/> 一律回 401 OTP_CONFIRM_REQUIRED，
+        // 客户端据此去 <c>POST /api/auth/reconfirm</c> 换一张 —— 与旧路径"口令不对"同一个状态码，
+        // 于是界面上的错误处理不必按新旧分叉（那段分叉正是回滚期最容易错位的地方）。
+        var confirmDeny = await DenyUnlessConfirmedAsync(req.ConfirmToken, user, OtpConfirmPurpose.FaceDelete,
+            user.Username, action, requestLog);
+        if (confirmDeny != null) return confirmDeny;
 
         var removed = await _faceTemplates.DeleteByUserIdAsync(user.Id);
         var response = new ApiResponse
