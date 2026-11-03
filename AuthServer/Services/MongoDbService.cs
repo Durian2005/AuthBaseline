@@ -14,11 +14,21 @@ public class MongoDbService
     private readonly IMongoCollection<AuditChainHead> _auditChainHeads;
     private readonly IMongoCollection<FaceTemplate> _faceTemplates;
     private readonly IMongoCollection<AuthServer.Models.FaceIdTemplate> _faceIdTemplates;
+    private readonly IMongoCollection<OtpChain> _otpChains;
     private readonly PepperProvider _pepper;
 
-    public MongoDbService(IConfiguration configuration, PepperProvider pepper)
+    /// <summary>
+    /// 一次性口令参数。种子管理员也要建链，而建链需要 N 与 PBKDF2 迭代次数 ——
+    /// 这两项在 <see cref="OtpChainStore"/> 里，但那个类依赖本类构造出的集合句柄，
+    /// 构造顺序上只能由本类自己算一次（不引入反向依赖）。
+    /// </summary>
+    private readonly AuthServer.Services.Otp.OtpOptions _otp;
+
+    public MongoDbService(IConfiguration configuration, PepperProvider pepper,
+        AuthServer.Services.Otp.OtpOptions otp)
     {
         _pepper = pepper;
+        _otp = otp;
 
         var connectionString = configuration.GetValue<string>("MongoDbSettings:ConnectionString")
             ?? "mongodb://localhost:27017";
@@ -35,10 +45,19 @@ public class MongoDbService
         _faceTemplates = _database.GetCollection<FaceTemplate>("FaceTemplates");
         _faceIdTemplates = _database.GetCollection<AuthServer.Models.FaceIdTemplate>("FaceIdTemplates");
 
+        // 一次性口令（哈希链）状态：**独立集合**（理由见 OtpChain 的注释 ——
+        // 挂进 Users 会被整篇 ReplaceOne 静默回滚 k，开出可重放窗口）。
+        _otpChains = _database.GetCollection<OtpChain>(AuthServer.Services.Otp.OtpChainStore.CollectionName);
+
         EnsureIndexes();
 
         // 预置管理员账号（如果不存在），使用同步方法避免构造函数中 .Wait() 死锁
         SeedAdmin();
+
+        // P8 迁移自检：把「还留着历史口令哈希、却没有链」的账号列出来。
+        // 它们在新版本里**登不进来**（口令路径已删除），所以必须在启动日志里点名，
+        // 而不是等用户报"口令明明对"。
+        ReportUnchainedLegacyAccounts();
 
         // 沉睡账号治理的数据准备：从审计里回填 lastLoginAt。
         // 放在最后：它需要 Users 与 AuditLogs_* 都可用。
@@ -164,6 +183,28 @@ public class MongoDbService
         {
             Console.WriteLine($"[Mongo] 纯人脸登录模板索引创建失败（该功能将不可用）: {ex.Message}");
         }
+
+        try
+        {
+            // 一人一条链：`userId` **唯一**。
+            // 这不只是查询优化，它是"并发首次登录同时建链"的唯一拦截手段 ——
+            // 没有它，两个请求会各插一条，此后每次登录随机命中其中一条，
+            // 表现为"时好时坏地登不上"，且两条链各自推进、互不知情。
+            var otpUserKeys = Builders<OtpChain>.IndexKeys.Ascending(c => c.UserId);
+            _otpChains.Indexes.CreateOne(new CreateIndexModel<OtpChain>(
+                otpUserKeys, new CreateIndexOptions { Unique = true, Name = "uniq_otp_user" }));
+
+            // 注销路径手里只有用户名（见 IUserDataPurger），这条索引让清理不必全表扫。
+            var otpNameKeys = Builders<OtpChain>.IndexKeys.Ascending(c => c.Username);
+            _otpChains.Indexes.CreateOne(new CreateIndexModel<OtpChain>(
+                otpNameKeys, new CreateIndexOptions { Name = "idx_otp_username" }));
+        }
+        catch (Exception ex)
+        {
+            // 索引建不起来不影响启动：业务侧仍会按 userId 等值查询（只是慢），
+            // 但**并发建链的保护会失效**，所以必须把它喊出来而不是静默降级。
+            Console.WriteLine($"[Mongo] OTP 链索引创建失败（并发建链将失去唯一性保护）: {ex.Message}");
+        }
     }
 
     /// <summary>
@@ -217,26 +258,111 @@ public class MongoDbService
         return names;
     }
 
+    /**
+     * 空库时播种 `admin / Admin123`。
+     *
+     * P8 起种子账号也**只建链、不写任何口令派生哈希** —— 这里拿到的 "Admin123"
+     * 是明文常量，正好直接折叠成一条链。于是"全新部署"与"存量迁移完"是同一种数据形态：
+     * 库里除了链之外没有第二个能验口令的东西。
+     *
+     * ⚠️ 两步（插账号 → 建链）之间失败会导致"有账号没链"。这里刻意**不删账号重试**：
+     *    空库播种发生在启动路径上，把账号删掉再抛异常会让下次启动重复播种，
+     *    而留下一个无链 admin 至少是可诊断的（登录会得到统一的「用户名或口令错误」，
+     *    运维用 `--rechain` 一次即可修好）。真正不可接受的是"启动成功但谁都进不去"，
+     *    所以下面的 catch 会把结论写进控制台。
+     */
     private void SeedAdmin()
     {
         var admin = _users.Find(u => u.Username == "admin").FirstOrDefault();
         if (admin == null)
         {
-            // 种子口令同样必须走 PasswordHasher —— 直接调 BCrypt 会写出一条
-            // "无 pepper" 的哈希，那条记录在 pepper 上线后依然能验过（走旧格式分支），
-            // 于是这台机器上永远有一条不受 pepper 保护的账号，是纯粹的漏洞。
-            var hash = PasswordHasher.Hash("Admin123", _pepper.Pepper);
-            _users.InsertOne(new User
+            var seeded = new User
             {
+                Id = ObjectId.GenerateNewId().ToString(),
                 Username = "admin",
-                PasswordHash = hash,
                 Status = UserStatus.Enabled,
                 Role = UserRole.Admin,
                 CreatedAt = DateTime.UtcNow
-            });
+            };
+            _users.InsertOne(seeded);
+
+            try
+            {
+                var seed = AuthServer.Services.Otp.OtpChainStore.NewSeed();
+                var state = AuthServer.Services.Otp.OtpVerifier.Create(
+                    "Admin123", seed, _otp.KdfIterations, _otp.Length);
+
+                _otpChains.InsertOne(new OtpChain
+                {
+                    UserId = seeded.Id,
+                    Username = seeded.Username,
+                    R = seed,
+                    Algorithm = AuthServer.Services.Otp.OtpVerifier.ChainAlgorithm,
+                    Kdf = AuthServer.Services.Otp.OtpVerifier.KdfName,
+                    KdfIterations = _otp.KdfIterations,
+                    Length = _otp.Length,
+                    V = state.V,
+                    K = state.K,
+                    Generation = 1,
+                    CreatedAt = DateTime.UtcNow
+                });
+
+                Console.WriteLine("[Mongo] 已播种种子管理员 admin（口令 Admin123）并建好一次性口令链");
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[Mongo] ⚠️ 种子管理员已插入，但建链失败：{ex.Message}。" +
+                                  "该账号当前无法登录，请在服务起来后用 `authserver.exe --rechain --username admin --password Admin123` 修复");
+            }
         }
 
         MigrateLegacyRoles();
+    }
+
+    /**
+     * 列出「有历史口令哈希、但没有链」的账号。
+     *
+     * 这类账号是 P8 唯一的**硬失败面**：登录只收链值，而它没有链；而链又只能由明文口令派生，
+     * 服务端从哈希反推不出来。所以它必须由运维执行一次：
+     *   authserver.exe --rechain --username <账号>
+     *
+     * 为什么打在启动日志里而不是只在文档里写：迁移是**一次性**动作，做完这批账号就永远没有了；
+     * 而"文档写了但没人读"是这类过渡期最常见的失败方式 —— 上线当天发现登不进去，
+     * 却不知道是因为库里还有几个账号没迁。日志是排障第一现场，所以点名到这里。
+     *
+     * 只统计、不阻断启动：阻断会让"库里有一个测试账号没迁"变成整站起不来，
+     * 而真正在用的账号可能个个都好好的。
+     */
+    private void ReportUnchainedLegacyAccounts()
+    {
+        try
+        {
+            var legacy = _users
+                .Find(Builders<User>.Filter.Exists("passwordHash", true))
+                .ToList();
+
+            if (legacy.Count == 0) return;
+
+            var chained = _otpChains
+                .Find(Builders<OtpChain>.Filter.Empty)
+                .Project(c => c.UserId)
+                .ToList()
+                .ToHashSet(StringComparer.Ordinal);
+
+            var pending = legacy.Where(u => !chained.Contains(u.Id)).Select(u => u.Username).ToList();
+            if (pending.Count == 0) return;
+
+            Console.WriteLine($"[Otp] ⚠️ 有 {pending.Count} 个账号仍停留在「只有口令哈希、没有链」的状态：" +
+                              $"{string.Join("、", pending)}");
+            Console.WriteLine("[Otp]    本版本已移除口令登录，这些账号**当前无法登录**。迁移方式（逐条执行）：");
+            foreach (var name in pending)
+                Console.WriteLine($"[Otp]      authserver.exe --rechain --username {name}");
+        }
+        catch (Exception ex)
+        {
+            // 自检失败不该拦住启动：它是诊断信息，不是安全闸门。
+            Console.WriteLine($"[Otp] 迁移自检未完成（不影响启动）：{ex.Message}");
+        }
     }
 
     /// <summary>
@@ -366,4 +492,10 @@ public class MongoDbService
 
     /// <summary>纯人脸登录（FaceId）的模板集合 —— 与 <see cref="FaceTemplates"/>（2FA）刻意分开。</summary>
     public IMongoCollection<AuthServer.Models.FaceIdTemplate> FaceIdTemplates => _faceIdTemplates;
+
+    /// <summary>
+    /// 一次性口令（哈希链）的链状态。**独立集合**，只由 <c>OtpChainStore</c> 推进；
+    /// 本属性之所以公开，是因为那个 Store 拿的是集合句柄而不是整个 <see cref="MongoDbService"/>。
+    /// </summary>
+    public IMongoCollection<OtpChain> OtpChains => _otpChains;
 }

@@ -191,6 +191,102 @@ public static class AuditAction
     /// </summary>
     public const string PasswordHashUpgraded = "PASSWORD_HASH_UPGRADED";
 
+    /// <summary>
+    /// 哈希链的一格被消耗（配额 −1）。
+    ///
+    /// 为什么"成功"也要单独一条：配额是本方案最稀缺的资源，而它被三种事消耗 ——
+    /// 登录、二次确认（再认证）、将来可能的恢复流程。若都埋在各自动作的报文里，
+    /// 事后没人能回答"这个账号的格都花到哪去了"。
+    /// 这一条只记下标与代数，**绝不记链值本身**（那是凭据）。
+    /// </summary>
+    public const string OtpConsume = "OTP_CONSUME";
+
+    /**
+     * 存量账号的"懒迁移"：第一次用口令登录成功后，当场把口令折叠成一条哈希链。
+     *
+     * 为什么单独成一个动作而不是塞进 LOGIN_SUCCESS 的报文里：
+     * 迁移是一条**有终点的工程状态**，而 LOGIN_SUCCESS 是每天都会发生的事。
+     * 独立动作之后，"还有多少账号没迁"就是一条 `count(action=LOGIN_SUCCESS)` 减去
+     * `count(action=OTP_MIGRATED)` 的查询，迁移进度不再需要直连数据库统计。
+     */
+    public const string OtpMigrated = "OTP_MIGRATED";
+
+    /**
+     * 迁移失败（建链写库出错）。
+     *
+     * 它必须是**可检索的事件**而不是一行控制台输出：失败意味着这个账号仍然只能用口令登录，
+     * 一旦 P8 移除口令路径，这类账号会直接登不进来 —— 那是必须在上线前清零的清单。
+     */
+    public const string OtpMigrationFailed = "OTP_MIGRATION_FAILED";
+
+    /**
+     * 静默续期成功：链被整条换成新一代（`r` 换新、`k` 回到 N-1、`generation` +1）。
+     *
+     * 为什么成功也要留痕：续期是唯一会**让旧链立刻作废**的动作。
+     * 若某次续期"替别人换掉了一条正在用的链"，症状是"另一个设备突然登不上"，
+     * 而唯一的线索就是这条记录（带前后两代的代数与种子前缀）。
+     */
+    public const string OtpRenewed = "OTP_RENEWED";
+
+    /**
+     * 静默续期失败 / 被跳过。
+     *
+     * ⚠️ 它对用户**完全不可见**（本次登录照常成功），所以它必须对系统**完全可见** ——
+     * 否则链迟早会在某次登录时直接耗尽，而事后没有任何线索能回答"它什么时候开始坏的"（§7.4）。
+     */
+    public const string OtpRenewFailed = "OTP_RENEW_FAILED";
+
+    /**
+     * 敏感操作前的链值再认证通过，并签发了一张一次性确认凭据。
+     *
+     * 为什么它不能混进 OTP_CONSUME：核销那一格只回答"链推进了一格"，
+     * 不回答"这次推进是为了什么"。而这里要能回答的问题恰恰是
+     * "谁在什么时候、为了哪个操作、对哪个目标，证明过一次是本人" ——
+     * 六处敏感操作共用一条动作码时，用途与目标只能靠这条记录的报文区分。
+     */
+    public const string OtpReconfirm = "OTP_RECONFIRM";
+
+    /**
+     * 再认证失败（链值不符 / 链已用尽 / 未建链 / 被节流）。
+     *
+     * ⚠️ 与 LOGIN_FAILED 刻意分开：它**不计入登录失败计数**（否则拿着一张票据
+     * 连点三次就能把受害者的账号锁掉）。分开之后，"有人在用偷来的票据试口令"
+     * 这条信号仍然可检索，但它不会改变任何人的账号状态。
+     */
+    public const string OtpReconfirmFailed = "OTP_RECONFIRM_FAILED";
+
+    /**
+     * 链被整条重建（改密 / 重置口令触发）。
+     *
+     * 为什么必须单独一条动作：重建是唯一会**让旧链所有格立即失效**的动作。
+     * 若只记 `CHANGE_PASSWORD`，审计员就答不出"这个账号的链为什么突然换了"，
+     * 而"链换了"与"口令换了"不总是同时发生 —— 下面还有一条 `OTP_RECOVERED`。
+     */
+    public const string OtpRebuilt = "OTP_REBUILT";
+
+    /**
+     * 走 `/api/auth/otp/recover` 的人工恢复（口令不变、只换链与盐）。
+     *
+     * 与 `OTP_REBUILT` 分开的理由：这是**运营事件**，不是用户日常操作。
+     * 它出现的场景是"链坏了或用尽了，口令却还是对的"，通常意味着一次事故；
+     * 混在改密里会让这类信号彻底消失。
+     */
+    public const string OtpRecovered = "OTP_RECOVERED";
+
+    /**
+     * 人工恢复失败（口令不对 / 验证码不对 / 链写不进去）。
+     *
+     * 与 `OTP_REBUILD_FAILED` 分开：那条是"改密/重置的第二步挂了"（一个本该成功的事务没做完），
+     * 这条是"有人来敲门但没敲开"。后者在安全视角上更值得盯 —— 它会成串出现。
+     */
+    public const string OtpRecoverFailed = "OTP_RECOVER_FAILED";
+
+    /**
+     * 重建链失败。**调用方据此决定整体失败**（改密/重置会回滚口令），
+     * 因为"口令换了、链还绑旧口令"是比"什么都没改"更糟的半截状态。
+     */
+    public const string OtpRebuildFailed = "OTP_REBUILD_FAILED";
+
     // ---- 沉睡（僵尸）账号治理 ----
     // 为什么冻结沿用 Unlock 的反向动作而不复用 SetRole / DeleteUser：
     // 治理动作必须在审计里与"日常管理"分得开 —— 审计员要能一条查询
@@ -519,4 +615,85 @@ public static class AuditReason
     /// 灰区是"证据不足"，不是"证明不是"；计次等于让光线问题积累成锁定。
     /// </summary>
     public const string FaceIdGrayZone = "FACEID_GRAY_ZONE";
+
+    // ── 一次性口令（哈希链） ─────────────────────────────────────
+    // 与业务码**刻意不互相引用**（见 BusinessCodes.cs 顶部）：这里只求"能按事实检索"。
+    // 一句话概括这套码的取舍：对外只有三种回答（通过 / 统一话术 / 需重建），
+    // 对内必须能分开"链不匹配""链用尽""链坏了""还没建链"这四件性质完全不同的事。
+
+    /// <summary>链值核销成功（本次登录消耗了一格配额）。**成功也留痕** —— 它回答"这一格被谁吃掉了"。</summary>
+    public const string OtpChainVerified = "OTP_CHAIN_VERIFIED";
+
+    /// <summary>
+    /// 链值不匹配（重放 / 跨格 / 猜错）。
+    ///
+    /// 与 <see cref="InvalidCredentials"/> 分开的理由同 <see cref="WrongOldPassword"/>：
+    /// 对外话术完全相同（不透露账号是否存在），但审计语义不同 ——
+    /// INVALID_CREDENTIALS 是"账号根本不存在"，本码是"账号存在、链值不符"，
+    /// 后者是"有人在拿旧格试"的直接指纹，必须能单独检索。
+    /// </summary>
+    public const string OtpChainMismatch = "OTP_CHAIN_MISMATCH";
+
+    /// <summary>链的配额用尽（<c>k = 0</c>）。需重建，**不计失败次数**。</summary>
+    public const string OtpChainExhausted = "OTP_CHAIN_EXHAUSTED";
+
+    /// <summary>并发冲突：另一请求抢先核销了同一格。不计次、可重试。</summary>
+    public const string OtpChainConflict = "OTP_CHAIN_CONFLICT";
+
+    /// <summary>
+    /// 链记录畸形（<c>v</c> 不是 32 字节 / <c>k</c> 越界）。这是**服务端数据事故**：
+    /// 不计入用户失败次数、对外按统一话术，但必须能被捞出来 ——
+    /// 否则"某些账号永远登不上、且看起来像口令错"这件事没有任何线索可查。
+    /// </summary>
+    public const string OtpChainMalformed = "OTP_CHAIN_MALFORMED";
+
+    /// <summary>
+    /// 账号还没有链（迁移期的存量账号）。对外与"口令错"逐字一致，
+    /// 对内单独归类是为了能统计"还有多少账号没迁"（P3 之后这个数应当归零）。
+    /// </summary>
+    public const string OtpNotEnrolled = "OTP_NOT_ENROLLED";
+
+    /// <summary>挑战无效（过期 / 已使用 / 不属于该用户名）。不计次：它不是一次凭据尝试。</summary>
+    public const string OtpChallengeInvalid = "OTP_CHALLENGE_INVALID";
+
+    /// <summary>存量账号首次成功登录时就地建链完成（迁移进度可据此统计）。</summary>
+    public const string OtpMigrated = "OTP_MIGRATED";
+
+    /// <summary>迁移建链失败：本次登录照常成功，账号仍是"只有口令哈希"的状态，下次登录重试。</summary>
+    public const string OtpMigrationFailed = "OTP_MIGRATION_FAILED";
+
+    /// <summary>静默续期成功（链换代）。</summary>
+    public const string OtpRenewed = "OTP_RENEWED";
+
+    /// <summary>静默续期失败或跳过：本次登录不受影响，但链少了一格且没有补回来。</summary>
+    public const string OtpRenewFailed = "OTP_RENEW_FAILED";
+
+    /// <summary>再认证通过，已签发一次性确认凭据。</summary>
+    public const string OtpReconfirmOk = "OTP_RECONFIRM_OK";
+
+    /// <summary>
+    /// 再认证被节流（窗口内失败次数到顶）。**不发确认凭据，也不影响登录**。
+    /// 单独记一条，是为了把"有人在这条路上反复失败"与"某次真的猜错"分开：
+    /// 前者是攻击形态或坏客户端，后者只是算错了一格。
+    /// </summary>
+    public const string OtpReconfirmThrottled = "OTP_RECONFIRM_THROTTLED";
+
+    /// <summary>
+    /// 敏感接口手里的确认凭据不可用（缺失 / 过期 / 已用过 / 用途不符 / 目标不符）。
+    /// 对外统一回答"请重新确认身份"，对内记下具体是哪一维不符 —— 那是排查客户端
+    /// 绑定错（比如把目标是 alice 的确认拿去操作 bob）的唯一线索。
+    /// </summary>
+    public const string OtpConfirmRequired = "OTP_CONFIRM_REQUIRED";
+
+    /// <summary>链已按新口令整条重建（旧链与它的所有格同时作废）。</summary>
+    public const string OtpRebuilt = "OTP_REBUILT";
+
+    /// <summary>人工恢复：口令未变、只换链与盐。</summary>
+    public const string OtpRecovered = "OTP_RECOVERED";
+
+    /// <summary>人工恢复失败（口令不对 / 验证码不对 / 写库失败）。</summary>
+    public const string OtpRecoverFailed = "OTP_RECOVER_FAILED";
+
+    /// <summary>重建链失败（本次操作整体失败并回滚，口令没有变）。</summary>
+    public const string OtpRebuildFailed = "OTP_REBUILD_FAILED";
 }

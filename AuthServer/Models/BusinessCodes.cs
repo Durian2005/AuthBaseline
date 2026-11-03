@@ -183,4 +183,72 @@ public static class BusinessCode
     /// 引导改用口令登录 —— 计次会让"光线不好"逐步把本人锁在门外。
     /// </summary>
     public const string FaceIdGrayZone = "FACEID_GRAY_ZONE";
+
+    // ── 一次性口令（哈希链） ─────────────────────────────────────
+    // 与本类其它分组一样，"业务码"与"审计原因码"是**两套码**（见本类顶部）：
+    // 这里决定界面说什么，AuditReason 那边决定审计怎么归类。
+
+    /// <summary>本模块整体关闭。客户端收到它应当回退到口令登录，而不是提示"登录失败"。</summary>
+    public const string OtpDisabled = "OTP_DISABLED";
+
+    /// <summary>
+    /// 挑战无效：过期 / 已被用过 / 不属于这个用户名。
+    /// 与"凭据错"分开是**为了用户**：这条几乎总是"点了登录后放了一会儿"，
+    /// 正确补救是重新点一次，而不是怀疑自己记错了口令。因此它**不计入失败次数**。
+    /// </summary>
+    public const string OtpChallengeInvalid = "OTP_CHALLENGE_INVALID";
+
+    /// <summary>
+    /// 配额用尽：链到了尽头。<c>k = 0</c> 时**凭据本身是对的**，错的是没有下一格了。
+    ///
+    /// 必须与 <see cref="InvalidCredentials"/> 分开，否则用户会以为口令失效，
+    /// 反复重输、把自己锁进"口令错"的循环里 —— 而真正要做的是重建链（邮箱验证码重置）。
+    /// 代价是它对外透露"该账号有一条用尽的链"，这是可接受的：用尽本身不是秘密，
+    /// 且要走到这一步，请求里必须带一个**真实存在**的挑战凭据。
+    /// </summary>
+    public const string OtpChainExhausted = "OTP_CHAIN_EXHAUSTED";
+
+    /// <summary>
+    /// 并发冲突：同一格被两个请求同时提交，另一个抢先核销成功。
+    /// 不是失败、**不计次**（否则"手机和电脑同时登录"会平白锁号），客户端重试即可。
+    /// </summary>
+    public const string OtpChainConflict = "OTP_CHAIN_CONFLICT";
+
+    /// <summary>
+    /// 再认证时该账号还没有链（迁移期的新建账号，尚未登录过一次）。
+    ///
+    /// 与登录路径**刻意不同**：登录那边对它统一回"用户名或密码错误"，因为那是匿名接口，
+    /// 承认"这个账号没链"就是承认"这个账号存在"。而这里请求必须带**有效票据**，
+    /// 调用者已经知道自己是谁 —— 再含糊其辞只会让人不知道该怎么办。
+    /// </summary>
+    public const string OtpNotEnrolled = "OTP_NOT_ENROLLED";
+
+    /// <summary>
+    /// 敏感操作缺少可用的确认凭据：没带、过期、已用过，或与本次操作的用途/目标不符。
+    ///
+    /// 与 <see cref="InvalidCredentials"/> 分开是**为了客户端**：这不是"你口令错了"，
+    /// 而是"再确认一次就行"。混成一个码，前端只能提示用户重输口令 ——
+    /// 而在替代式模型里，那个动作根本不存在了。
+    /// </summary>
+    public const string OtpConfirmRequired = "OTP_CONFIRM_REQUIRED";
+
+    /// <summary>
+    /// 再认证被节流（窗口内失败次数到顶）。**不是账号锁定**：登录不受任何影响。
+    /// 单独一个码，是为了让客户端能把"等 5 分钟"和"你被锁号了"区分开。
+    /// </summary>
+    public const string OtpReconfirmThrottled = "OTP_RECONFIRM_THROTTLED";
+
+    /// <summary>
+    /// 重建链失败 ⇒ 本次改密/重置**整体失败**（口令已回滚，什么都没变）。
+    ///
+    /// 为什么不留成"口令改了、链等下次再说"：那正是 P3 记下的那个隐患形态 ——
+    /// 口令登录正常、OTP 登录永远失败，而用户看不出任何异常。
+    /// 宁可让他重试一次，也不要留下一个只有到 P8 才会爆的半截状态。
+    /// </summary>
+    public const string OtpRebuildFailed = "OTP_REBUILD_FAILED";
+
+    // 刻意**没有** OTP_CHAIN_MALFORMED 这个业务码：
+    // 链记录畸形是服务端的数据事故，对外统一按"用户名或密码错误"回答。
+    // 给它一个对外码等于告诉匿名调用者"这个用户名有链、而且链坏了"——
+    // 那是一条比"账号存在"更细的枚举信息。它对内仍可在审计里检索（AuditReason.OtpChainMalformed）。
 }

@@ -57,8 +57,24 @@ public class User
     [BsonElement("username")]
     public string Username { get; set; } = string.Empty;
 
+    /// <summary>
+    /// 【历史字段，P8 起不再写入、登录路径不再读】
+    ///
+    /// 它是口令 → BCrypt(pepper) 的哈希，曾经是唯一的登录凭据。
+    /// P8 把口令路径整条移除后，这里只剩「迁移期的过渡数据」这一个身份：
+    /// 存量账号的链必须由**明文口令**派生，而明文只在登录/重置时出现，
+    /// 服务端无法从哈希反推出链根 —— 于是迁移工具 `--rechain` 会用这个哈希
+    /// 把运维输入的明文**校验一次**，校验通过后建链、并把本字段清空（置 null）。
+    ///
+    /// 迁移完成后本字段全库为 null ⇒ `PepperProvider` 的启动校验会认为
+    /// 「这台机器上不再有需要 pepper 才能验的哈希」，pepper 随之退化为历史遗留。
+    ///
+    /// ⚠️ 必须保留 `BsonIgnoreIfNull`：`ReplaceOne` 是整篇覆盖，
+    ///    不能把它写回空串，否则「已迁移」这个事实会被静默抹掉，迁移进度再也数不清。
+    /// </summary>
     [BsonElement("passwordHash")]
-    public string PasswordHash { get; set; } = string.Empty;
+    [BsonIgnoreIfNull]
+    public string? PasswordHash { get; set; }
 
     [BsonElement("status")]
     [BsonRepresentation(BsonType.String)]

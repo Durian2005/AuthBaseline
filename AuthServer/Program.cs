@@ -20,6 +20,11 @@ public class Program
         if (PepperCli.IsPepperCommand(args))
             return PepperCli.Run(args);
 
+        // 存量账号迁移（P8）：同样必须在 CreateBuilder 之前截住 ——
+        // 它只连库、不启 Web 主机，也不该被 Web 主机的参数解析吞掉自己的开关。
+        if (AuthServer.Services.Otp.OtpRechainCli.IsCommand(args))
+            return AuthServer.Services.Otp.OtpRechainCli.Run(args);
+
         // 人脸录制 / 回放：与 pepper 同理，必须在 CreateBuilder 之前截住。
         // 这两条命令只跑引擎、不启 Web 主机，也不需要 pepper / 数据库 / 证书 ——
         // 它们的存在是为了把"真实摄像头上的动作判定"变成可反复回放的回归样本。
@@ -237,6 +242,42 @@ public class Program
         builder.Services.AddSingleton<AuthServer.Services.IUserDataPurger>(sp =>
             sp.GetRequiredService<AuthServer.Services.FaceId.FaceIdTemplateStore>());
 
+        // ---- 一次性口令（OTP，哈希链）----
+        // P1 只注册**存储层**：还没有任何端点读它，所以这一步不改变任何现有行为
+        // （登录仍旧走口令，见 AuthController）。P2 才把 challenge 与登录接上来。
+        //
+        // 配置全部有默认值，缺配置按"可用"启动；但参数非法（如链长 1）会在这一行当场抛出 ——
+        // 那种链建出来就是死的，让它启动成功反而是更大的坑（见 OtpOptions.Validate）。
+        var otpOptions = new AuthServer.Services.Otp.OtpOptions();
+        builder.Configuration.GetSection(AuthServer.Services.Otp.OtpOptions.SectionName).Bind(otpOptions);
+        otpOptions.ApplyEnvironmentOverrides();
+        otpOptions.Validate();
+        builder.Services.AddSingleton(otpOptions);
+
+        // Store 拿的是集合句柄而不是整个 MongoDbService：链推进最怕"别处的整篇覆盖"（§5.2），
+        // 能力上就不该让它够得着 Users 与审计分片。
+        builder.Services.AddSingleton<AuthServer.Services.Otp.OtpChainStore>(sp =>
+            new AuthServer.Services.Otp.OtpChainStore(
+                sp.GetRequiredService<MongoDbService>().OtpChains,
+                sp.GetRequiredService<AuthServer.Services.Otp.OtpOptions>()));
+
+        // 一次性挑战：纯内存（ConcurrentDictionary），不落库 ——
+        // 它只活几十秒，落库反而要面对"过期清理"这个额外问题，且没有任何取证价值
+        // （谁申请过挑战不等于谁在登录）。
+        builder.Services.AddSingleton<AuthServer.Services.Otp.OtpChallengeStore>();
+
+        // 一次性确认凭据：与挑战同一种取舍（内存、TTL、一次即弃），理由见 OtpConfirmStore 类注释。
+        builder.Services.AddSingleton<AuthServer.Services.Otp.OtpConfirmStore>();
+
+        // 再认证失败的独立节流。**刻意不是**登录失败计数器的一部分：
+        // 用登录计数器会让"拿着一张票据连点三次"变成一次锁号攻击（见该类注释）。
+        builder.Services.AddSingleton<AuthServer.Services.Otp.OtpReconfirmThrottle>();
+
+        // 注销清理：与 FaceId 同一机制 —— 账号域只遍历 IUserDataPurger，不认识"哈希链"这种细节。
+        // 用工厂复用上面那个单例，避免出现第二个持有集合句柄的实例。
+        builder.Services.AddSingleton<AuthServer.Services.IUserDataPurger>(sp =>
+            sp.GetRequiredService<AuthServer.Services.Otp.OtpChainStore>());
+
         // 允许前端跨域访问
         builder.Services.AddCors(options =>
         {
@@ -316,6 +357,12 @@ public class Program
                   + " · " + padText + " · " + multiText
                 : $"[FaceId] 引擎不可用，纯人脸登录将整体降级：{faceIdStatus.Message}");
         }
+
+        // 一次性口令：P8 起它是**唯一**的第一因子，所以这里不再是"参数 + 开关"，
+        // 而是一句结论 + 参数。启动日志是排障第一现场，它说的每一句都会被当成事实 ——
+        // 前几个阶段这句话改过三次（"端点尚未接入"→"口令路径并存"→"口令路径已移除"），
+        // 每次都是实现先变、文案后追，代价是有人在排障时信了过期的那句。
+        Console.WriteLine($"[Otp] 哈希链是唯一第一因子（口令路径已移除）：{otpOptions.Describe()}");
 
         // Configure the HTTP request pipeline.
         if (app.Environment.IsDevelopment())
