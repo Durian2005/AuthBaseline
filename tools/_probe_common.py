@@ -51,6 +51,8 @@
   与 `_guard()` 刻意分成两个函数：探针打真实库是 bug，
   验收脚本打真实库是设计意图，同一条规则罩不住两种相反语义。
 """
+import base64
+import hashlib
 import json
 import os
 import subprocess
@@ -375,6 +377,138 @@ def http_call(base, method, path, body=None, ticket=None, ctx=None, timeout=60):
             return e.code, text
     except Exception as e:  # noqa: BLE001 —— 探针需要把"连不上"也当成一种可断言的返回
         return 0, {"err": str(e)}
+
+
+# ---------------------------------------------------------------------------
+# P8：链值登录（唯一的第一因子）
+# ---------------------------------------------------------------------------
+#
+# 口令路径已在 P8 删除，于是每个探针都不能再 POST {username, password} 登录。
+# 登录变成三步：取挑战 → 在本机算一格 → 提交那一格。
+#
+# ⚠️ 这里的算链实现**必须**与 `OtpVerifier` 逐字一致：
+#    盐 = R 的 UTF-8 字节（不套别的编码）、PBKDF2-HMACSHA256、32 字节、
+#    之后对 32 字节原值反复 SHA-256，最后标准 Base64（带填充）。
+#    任何一处不同，表现都是"口令明明对却登不上"，而排查方向会被带向口令本身。
+
+
+def otp_code(password, r, k, iterations):
+    """算出第 k 格（`x_k`）的 Base64 文本。"""
+    x = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), r.encode("utf-8"), int(iterations))
+    for _ in range(int(k)):
+        x = hashlib.sha256(x).digest()
+    return base64.b64encode(x).decode("ascii")
+
+
+def otp_challenge(base, username, ctx=None):
+    """取挑战参数。返回 (status, data)；失败时 data 为空 dict。"""
+    status, body = http_call(base, "POST", "/api/auth/login/challenge", {"username": username}, ctx=ctx)
+    data = body.get("data") if isinstance(body, dict) else None
+    return status, (data or {})
+
+
+def otp_login(base, username, password, ctx=None, *, next_chain=None):
+    """链值登录。返回 (status, body)，与直接 POST /auth/login 的返回完全一致。
+
+    刻意**不让调用方传 code/token**：这样每个探针的登录口径都一样，
+    将来再改协议（例如换 KDF）只需要改这一个函数。
+    """
+    status, ch = otp_challenge(base, username, ctx=ctx)
+    if status != 200 or not ch.get("r"):
+        return status or 0, {"err": "challenge failed", "challenge": ch}
+
+    code = otp_code(password, ch["r"], ch["k"], ch["iterations"])
+    body = {
+        "username": username,
+        "otpCode": code,
+        "challengeToken": ch["challengeToken"],
+    }
+    if next_chain:
+        body["nextChain"] = next_chain
+    return http_call(base, "POST", "/api/auth/login", body, ctx=ctx)
+
+
+def chain_login_post(post, username, password, *, prefix="/api/auth", next_chain=None):
+    """链值登录的核心实现。`post(path, body) -> (status, body)`。
+
+    两种探针写法（`call("POST", path, body)` 与 `call(path, body)`）都归到这一个函数，
+    差别只在外层包一层适配 —— 这样"登录怎么算"只有一份实现。
+    """
+    st, ch = post(prefix + "/login/challenge", {"username": username})
+    d = (ch.get("data") or {}) if isinstance(ch, dict) else {}
+    if st != 200 or not d.get("r"):
+        return st, ch
+
+    body = {
+        "username": username,
+        "otpCode": otp_code(password, d["r"], d["k"], d["iterations"]),
+        "challengeToken": d["challengeToken"],
+    }
+    if next_chain:
+        body["nextChain"] = next_chain
+    return post(prefix + "/login", body)
+
+
+def chain_login_via(call, username, password, *, prefix="/api/auth", next_chain=None):
+    """用**探针自己的** `call(method, path, body)` 做一次链值登录。
+
+    P8 把口令路径删掉之后，所有探针的 `login(username, password)` 都得改成三步。
+    做成"接收 call 回调"而不是"接收 base"：各探针的 `call` 负责拼前缀、带 ctx、
+    统一超时，这里不该复制那份逻辑，否则 20 个探针会有 20 份登录口径。
+    """
+    return chain_login_post(lambda path, body: call("POST", path, body), username, password,
+                            prefix=prefix, next_chain=next_chain)
+
+
+def confirm_token_via(call, ticket, operator, operator_pw, purpose, target, *, prefix="/api/auth"):
+    """按探针自己的 `call(method, path, body, ticket=)` 换一张确认凭据。
+
+    与 `confirm_token()` 的差别只在"怎么发请求"：那个是给直接用 base URL 的脚本的，
+    这个是给有自己 `call()` 封装（带超时 / ctx / 前缀）的探针的。
+    两处的**算法**共用 `otp_code()`，所以不会出现"两套口径"。
+    """
+    st, ch = call("POST", prefix + "/login/challenge", {"username": operator})
+    d = (ch.get("data") or {}) if isinstance(ch, dict) else {}
+    if st != 200 or not d.get("r"):
+        return None
+
+    body = {
+        "purpose": purpose,
+        "target": target,
+        "otpCode": otp_code(operator_pw, d["r"], d["k"], d["iterations"]),
+    }
+    st, resp = call("POST", prefix + "/reconfirm", body, ticket=ticket)
+    if st != 200 or not isinstance(resp, dict):
+        return None
+    return (resp.get("data") or {}).get("confirmToken")
+
+
+def confirm_token(base, ticket, operator, operator_pw, purpose, target, ctx=None):
+    """换一张一次性确认凭据（六处敏感操作的"再确认一次"）。
+
+    P8 之前这些接口收 `operatorPassword`（口令原样上传）；P8 之后只有一个办法：
+    用调用者自己的链值换票。探针必须跟着走，否则每个敏感操作的用例都会被
+    401 OTP_CONFIRM_REQUIRED 挡住 —— 那不是权限判定失败，而是"没做确认"。
+    """
+    st, ch = otp_challenge(base, operator, ctx=ctx)
+    if st != 200 or not ch.get("r"):
+        return None
+    body = {
+        "purpose": purpose,
+        "target": target,
+        "otpCode": otp_code(operator_pw, ch["r"], ch["k"], ch["iterations"]),
+    }
+    st, resp = http_call(base, "POST", "/api/auth/reconfirm", body, ticket=ticket, ctx=ctx)
+    return (resp.get("data") or {}).get("confirmToken") if isinstance(resp, dict) else None
+
+
+def login_ticket(base, username, password, ctx=None):
+    """登录并返回票据；失败返回 None。给"只关心有没有拿到票"的探针用。"""
+    status, body = otp_login(base, username, password, ctx=ctx)
+    if status != 200 or not isinstance(body, dict):
+        return None
+    data = body.get("data") or {}
+    return data.get("ticket")
 
 
 # ---------------------------------------------------------------------------
