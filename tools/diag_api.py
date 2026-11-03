@@ -12,6 +12,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from _probe_common import chain_login_via
 
 ROOT = Path(__file__).resolve().parents[1]
 EXE = ROOT / "AuthServer" / "publish" / "AuthServer.exe"
@@ -78,7 +79,7 @@ def main():
         if not wait_port(PORT):
             print("后端未就绪")
             return 1
-        st, body = req("POST", "/api/auth/login", {"username": "admin", "password": "Admin123"})
+        st, body = chain_login_via(req, "admin", "Admin123")
         j = json.loads(body)
         d = j.get("data") or {}
         tok = d.get("ticket") or d.get("Ticket")

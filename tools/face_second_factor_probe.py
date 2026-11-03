@@ -33,13 +33,15 @@ import urllib.parse
 import urllib.request
 
 from _probe_common import (
+    chain_login_via,
     ProbeDb,
     http_call,
     resolve_probe_db,
     start_backend,
     stop_backend,
     wait_backend_ready,
-)
+    confirm_token_via,
+    otp_code,)
 
 EXE = sys.argv[1]
 PORT = int(sys.argv[2])
@@ -67,16 +69,25 @@ def call(method, path, body=None, ticket=None):
 
 
 def login(user, pw):
-    return call("POST", "/api/auth/login", {"username": user, "password": pw})
+    return chain_login_via(call, user, pw)
 
 
 def api(path_suffix):
     return "/api/auth" + path_suffix
 
 
+def confirm_for(user, pw, purpose, ticket):
+    """换一张一次性确认凭据（P8：口令只在本机参与派生，不再随请求上传）。
+
+    `target` 用**用户名**：这些自助接口的作用域就是"我自己"。
+    """
+    return confirm_token_via(call, ticket, user, pw, purpose, user)
+
+
 def enroll_face(user, pw, ticket):
     """走完整的两步式录入，返回 (ok, 说明)。"""
-    st, r = call("POST", api("/face/enroll"), {"password": pw}, ticket)
+    st, r = call("POST", api("/face/enroll"),
+                 {"confirmToken": confirm_for(user, pw, "face-enroll", ticket)}, ticket)
     token = (r.get("data") or {}).get("challengeToken", "")
     if not token:
         return False, "第一步未下发挑战：%s %s" % (st, r.get("code"))
@@ -230,7 +241,8 @@ def main():
 
         st, r = call("POST", api("/create-account"), {
             "username": USER, "password": USER_PW, "role": "User",
-            "email": "", "operatorPassword": ADMIN_PW}, admin_ticket)
+            "email": "", "confirmToken": confirm_token_via(call, admin_ticket, "admin", ADMIN_PW,
+                                             "create-account", USER)}, admin_ticket)
         check("建测试账号", st == 200 and r.get("code") == "OK", "%s %s" % (st, r.get("code")))
 
         st, r = login(USER, USER_PW)
@@ -256,17 +268,42 @@ def main():
         ticket = (r.get("data") or {}).get("ticket", "")
         check("（准备）拿到票据", bool(ticket), "%s %s" % (st, r.get("code")))
 
-        st, r = call("POST", api("/face/enroll"), {"password": "WrongPass123"}, ticket)
-        check("录入第一步：口令错被拒",
-              st == 401 and r.get("code") == "INVALID_CREDENTIALS", "%s %s" % (st, r.get("code")))
-        check("录入第一步：口令错按 A 组计次 = 1",
-              (r.get("data") or {}).get("failedAttempts") == 1, str(r.get("data")))
-
+        # P8：这一步的凭据不再是"再输一次口令"，而是"用口令换一张一次性确认票"。
+        # 于是四种失败形态都变了，逐条钉住：
         st, r = call("POST", api("/face/enroll"), {}, ticket)
-        check("录入第一步：未填口令被拒（EMPTY_FIELDS）",
-              st == 400 and r.get("code") == "EMPTY_FIELDS", "%s %s" % (st, r.get("code")))
+        check("录入第一步：未带确认凭据 → 401 OTP_CONFIRM_REQUIRED",
+              st == 401 and r.get("code") == "OTP_CONFIRM_REQUIRED", "%s %s" % (st, r.get("code")))
 
-        st, r = call("POST", api("/face/enroll"), {"password": USER_PW}, ticket)
+        st, r = call("POST", api("/face/enroll"), {"confirmToken": "not-a-real-ticket"}, ticket)
+        check("录入第一步：伪造凭据 → 401 OTP_CONFIRM_REQUIRED（与未带同码）",
+              st == 401 and r.get("code") == "OTP_CONFIRM_REQUIRED", "%s %s" % (st, r.get("code")))
+
+        # 口令错 ⇒ **换不到票**：失败发生在 reconfirm，而不是业务接口。
+        # 这是 P5 就定下的口径：再认证失败不进登录计数（否则连点三次就把自己锁了），
+        # 只走独立的 5 次/5 分钟节流。下面那条断言就是在守这个口径。
+        # 注意：**不能**用 confirm_for() 来表达"口令错" —— 它内部会吞掉失败并返回 None，
+        # 那样发出去的是 otpCode=""，测出来的是"字段缺失"而不是"凭据不符"。
+        # 这里自己算一格错误的口令派生值，直接打 reconfirm。
+        _, ch = call("POST", "/api/auth/login/challenge", {"username": USER})
+        cd = ch.get("data") or {}
+        st, r = call("POST", "/api/auth/reconfirm",
+                     {"purpose": "face-enroll", "target": USER,
+                      "otpCode": otp_code("WrongPass123", cd.get("r", ""), cd.get("k", 0),
+                                          cd.get("iterations", 1))},
+                     ticket)
+        # 口令错与"票已失效"回**同一个码**（都是 OTP_CONFIRM_REQUIRED）：
+        # 对界面来说两者的处置完全相同 —— 重新弹一次确认框。
+        # 若在这里分出"口令错"，就等于告诉调用方"这张票的结构是对的"，
+        # 而那是一条不必给的信号。
+        check("口令错 ⇒ 换票失败（401 OTP_CONFIRM_REQUIRED）",
+              st == 401 and r.get("code") == "OTP_CONFIRM_REQUIRED", "%s %s" % (st, r.get("code")))
+        u_doc = probe_db["Users"].find_one({"username": USER}) or {}
+        check("再认证失败**不**进登录失败计数（否则连点三次就锁死自己）",
+              (u_doc.get("failedLoginAttempts") or 0) == 0,
+              "failedLoginAttempts=%s" % u_doc.get("failedLoginAttempts"))
+
+        st, r = call("POST", api("/face/enroll"),
+                     {"confirmToken": confirm_for(USER, USER_PW, "face-enroll", ticket)}, ticket)
         d = r.get("data") or {}
         enroll_token = d.get("challengeToken", "")
         check("录入第一步：口令对 ⇒ 下发动作挑战",
@@ -339,19 +376,21 @@ def main():
         check("（准备）刷脸登录拿到票据", bool(ticket), "%s %s" % (st, r.get("code")))
 
         st, r = call("POST", api("/face/delete"), {}, ticket)
-        check("自助删除：未填口令被拒",
-              st == 400 and r.get("code") == "EMPTY_FIELDS", "%s %s" % (st, r.get("code")))
+        check("自助删除：未带确认凭据 → 401 OTP_CONFIRM_REQUIRED",
+              st == 401 and r.get("code") == "OTP_CONFIRM_REQUIRED", "%s %s" % (st, r.get("code")))
 
-        st, r = call("POST", api("/face/delete"), {"password": "WrongPass123"}, ticket)
-        check("自助删除：口令错被拒",
-              st == 401 and r.get("code") == "INVALID_CREDENTIALS", "%s %s" % (st, r.get("code")))
-        check("自助删除：口令错计次",
-              (r.get("data") or {}).get("failedAttempts", 0) >= 1, str(r.get("data")))
+        # 删除是"不可逆操作"，确认凭据必须绑对用途：
+        # 拿一张**录入**用途的票来删，必须被拒 —— 否则"确认过录入"就等于"确认过删除"。
+        enroll_ticket = confirm_for(USER, USER_PW, "face-enroll", ticket)
+        st, r = call("POST", api("/face/delete"), {"confirmToken": enroll_ticket}, ticket)
+        check("自助删除：用途不符的票被拒（录入票不能拿来删）",
+              st == 401 and r.get("code") == "OTP_CONFIRM_REQUIRED", "%s %s" % (st, r.get("code")))
 
         st, r = call("GET", api("/face"), ticket=ticket)
         check("口令错**不**连坐票据（仍是已登录态）", st == 200, "%s %s" % (st, r.get("code")))
 
-        st, r = call("POST", api("/face/delete"), {"password": USER_PW}, ticket)
+        st, r = call("POST", api("/face/delete"),
+                     {"confirmToken": confirm_for(USER, USER_PW, "face-delete", ticket)}, ticket)
         check("自助删除：口令对 ⇒ 清空模板",
               st == 200 and r.get("code") == "OK" and (r.get("data") or {}).get("removed") == 1,
               "%s %s %s" % (st, r.get("code"), r.get("message")))
@@ -396,7 +435,8 @@ def main():
         # 注销连带清理：另建一个账号并录入人脸，然后注销
         st, r = call("POST", api("/create-account"), {
             "username": DEL_USER, "password": DEL_PW, "role": "User",
-            "email": "", "operatorPassword": ADMIN_PW}, admin_ticket)
+            "email": "", "confirmToken": confirm_token_via(call, admin_ticket, "admin", ADMIN_PW,
+                                             "create-account", DEL_USER)}, admin_ticket)
         check("（准备）建待注销账号", st == 200, "%s %s" % (st, r.get("code")))
         st, r = login(DEL_USER, DEL_PW)
         dticket = (r.get("data") or {}).get("ticket", "")
@@ -480,7 +520,8 @@ def main():
 
         # ⑥ 录入挑战同样能取画面：门禁绑的是"挑战"，不是"哪个接口签发的"
         ticket = (r.get("data") or {}).get("ticket", "")
-        st, r = call("POST", api("/face/enroll"), {"password": USER_PW}, ticket)
+        st, r = call("POST", api("/face/enroll"),
+                     {"confirmToken": confirm_for(USER, USER_PW, "face-enroll", ticket)}, ticket)
         etok = (r.get("data") or {}).get("challengeToken", "")
         check("（准备）拿到录入挑战", bool(etok), "%s %s" % (st, r.get("code")))
         estatus, _, ebody = wait_preview(etok)

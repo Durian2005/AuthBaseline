@@ -33,7 +33,7 @@ import time
 import urllib.request
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from _probe_common import http_call, resolve_probe_db, start_backend, stop_backend, wait_backend_ready
+from _probe_common import otp_login, http_call, resolve_probe_db, start_backend, stop_backend, wait_backend_ready
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 EXE = os.path.join(ROOT, "AuthServer", "bin", "Debug", "net8.0", "AuthServer.exe")
@@ -208,8 +208,7 @@ def main():
             print("后端未就绪")
             return 2
 
-        st, r = http_call(BASE, "POST", "/api/auth/login",
-                          body={"username": "admin", "password": "Admin123"})
+        st, r = otp_login(BASE, "admin", "Admin123")
         ticket = (r.get("data") or {}).get("ticket", "")
         if not ticket:
             print("登录失败：%s %s" % (st, r))

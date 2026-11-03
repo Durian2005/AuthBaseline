@@ -14,8 +14,11 @@ import sys
 import time
 import urllib.error
 import urllib.request
+from _probe_common import chain_login_post
 
-BASE = "http://localhost:5007"
+# 与 audit_e2e 同一条规则：默认指向本机 5007 的真实部署，但允许用环境变量
+# 指到探针后端 —— 在 CI/回归里跑探针库，不碰真实库。
+BASE = os.environ.get("BASE", "http://localhost:5007")
 # 注意：Git Bash 的 /tmp 映射到 %TEMP%，原生 Python 读不到 "/tmp/x"，
 # 必须用 Windows 风格路径；可由环境变量 BE_LOG 覆盖。
 LOG = os.environ.get("BE_LOG", os.path.join(os.environ.get("TEMP", "."), "be.log"))
@@ -48,7 +51,7 @@ ADMIN_PASS = os.environ.get("ADMIN_PASS", "Admin123")
 
 def admin_login():
     """管理员接口已改为服务端票据鉴权，先登录换取 ticket。"""
-    st, r = call("/api/auth/login", {"username": ADMIN_USER, "password": ADMIN_PASS})
+    st, r = chain_login_post(call, ADMIN_USER, ADMIN_PASS)
     if st == 200 and r.get("success"):
         return (r.get("data") or {}).get("ticket")
     return None
@@ -137,7 +140,7 @@ def main():
     check("正确验证码建号成功且为待审核", ok, f"HTTP {st} {r.get('code')} {r.get('message')}")
     check("建号响应标记邮箱已验证", (r.get("data") or {}).get("emailVerified") is True)
 
-    st, r = call("/api/auth/login", {"username": user, "password": "Passw0rdX"})
+    st, r = chain_login_post(call, user, "Passw0rdX")
     check("待审核账号不能登录", st == 401 and r.get("code") == "PENDING_APPROVAL", f"HTTP {st} {r.get('code')}")
 
     st, r = call("/api/auth/send-email-code",
@@ -198,10 +201,10 @@ def main():
                  {"username": user, "email": email, "code": reset_code, "newPassword": "NewPassw0rd"})
     check("正确验证码重置成功", st == 200 and r.get("success"), f"HTTP {st} {r.get('code')} {r.get('message')}")
 
-    st, r = call("/api/auth/login", {"username": user, "password": "Passw0rdX"})
+    st, r = chain_login_post(call, user, "Passw0rdX")
     check("旧密码立即失效", st == 401 and r.get("code") == "INVALID_CREDENTIALS", f"HTTP {st} {r.get('code')}")
 
-    st, r = call("/api/auth/login", {"username": user, "password": "NewPassw0rd"})
+    st, r = chain_login_post(call, user, "NewPassw0rd")
     check("新密码可正常登录", st == 200 and r.get("success"), f"HTTP {st} {r.get('code')} {r.get('message')}")
 
     st, r = call("/api/auth/reset-password",
@@ -212,7 +215,7 @@ def main():
     # ---------- 锁定状态拒绝 ----------
     print("\n== 锁定状态门禁 ==")
     for _ in range(3):
-        call("/api/auth/login", {"username": user, "password": "WrongPass1"})
+        chain_login_post(call, user, "WrongPass1")
     st, r = call("/api/auth/send-email-code",
                  {"purpose": "RESET", "username": user, "email": email})
     check("锁定期间不能找回密码", st == 423 and r.get("code") == "ACCOUNT_LOCKED",
@@ -224,8 +227,24 @@ def main():
 
     # ---------- 审计 ----------
     print("\n== 审计日志 ==")
-    # 审计查询已改为管理员票据鉴权，并支持分页：返回 data.items / data.total
-    st, r = call("/api/auth/logs?page=1&pageSize=200", method="GET", ticket=admin_ticket)
+    # SoD（角色分离）之后读审计是 AuditAdmin 的专属职责，Admin 反而读不了。
+    # 所以这里让 admin 建一个审计管理员、用它读 —— 建号要一次性确认票（P8）。
+    auditor, auditor_pw = "email_e2e_auditor", "AuditE2e123"
+    try:
+        from _probe_common import confirm_token as _ct
+        tok = _ct(BASE, admin_ticket, ADMIN_USER, ADMIN_PASS, "create-account", auditor)
+    except Exception:
+        tok = None
+    st, r = call("/api/auth/create-account",
+                 {"username": auditor, "password": auditor_pw,
+                  "role": "AuditAdmin", "confirmToken": tok}, ticket=admin_ticket)
+    check("建审计管理员（SoD：读审计归它管）", st == 200, f"HTTP {st} {r.get('code')}")
+    st, r = chain_login_post(call, auditor, auditor_pw)
+    audit_ticket = (r.get("data") or {}).get("ticket")
+    check("审计管理员登录", st == 200 and bool(audit_ticket), f"HTTP {st}")
+
+    # 审计查询支持分页：返回 data.items / data.total
+    st, r = call("/api/auth/logs?page=1&pageSize=200", method="GET", ticket=audit_ticket)
     items = (r.get("data") or {}).get("items") or []
     actions = [x.get("action") for x in items]
     for a in ("SEND_EMAIL_CODE", "RESET_PASSWORD", "REGISTER"):

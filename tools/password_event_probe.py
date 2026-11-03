@@ -24,6 +24,7 @@ import urllib.error
 import urllib.request
 
 from pymongo import MongoClient
+from _probe_common import chain_login_via, otp_code
 
 EXE = sys.argv[1]
 PORT = int(sys.argv[2])
@@ -100,11 +101,23 @@ if not ready:
     sys.exit(1)
 print("  就绪 (PID=%d)" % proc.pid)
 
+def change_pw(username, old_pw, new_pw):
+    """P8：改密的旧凭据是链值（口令明文不上网）。本端点匿名，不需要票据。"""
+    st, ch = call("POST", "/api/auth/login/challenge", {"username": username})
+    d = (ch.get("data") or {}) if isinstance(ch, dict) else {}
+    return call("POST", "/api/auth/change-password", {
+        "username": username,
+        "oldOtpCode": otp_code(old_pw, d.get("r", ""), d.get("k", 0), d.get("iterations", 1)),
+        "oldChallengeToken": d.get("challengeToken"),
+        "newPassword": new_pw,
+    })
+
+
 mark = max_seq()
 print("  起始链尾 seq = %d" % mark)
 
 # ---------- 登录 admin ----------
-st, b = call("POST", "/api/auth/login", {"username": PROBE_USER, "password": "Admin123"})
+st, b = chain_login_via(call, PROBE_USER, "Admin123")
 tk = (b.get("data") or {}).get("ticket")
 print("\n[2] admin 登录 -> HTTP %s，票据 %s" % (st, "已获得" if tk else "未获得"))
 if not tk:
@@ -114,28 +127,25 @@ if not tk:
 
 # ---------- 场景一：弱口令改密 ----------
 print("\n[3] 场景一：改密时新口令不符合复杂度要求（abc）")
-st, b = call("POST", "/api/auth/change-password",
-             {"username": PROBE_USER, "oldPassword": "Admin123", "newPassword": "abc"},
-             ticket=tk)
+st, b = change_pw(PROBE_USER, "Admin123", "abc")
 print("   响应：HTTP %s / %s / %s" % (st, b.get("code"), b.get("message")))
 
 # ---------- 场景二：旧口令错误 ----------
 print("\n[4] 场景二：旧口令错误（不改动任何口令）")
-st, b = call("POST", "/api/auth/change-password",
-             {"username": PROBE_USER, "oldPassword": "totallyWrong1", "newPassword": "NewPass123"},
-             ticket=tk)
+st, b = change_pw(PROBE_USER, "totallyWrong1", "NewPass123")
 print("   响应：HTTP %s / %s / %s" % (st, b.get("code"), b.get("message")))
 
 # ---------- 场景三：新旧口令相同 ----------
-print("\n[5] 场景三：新旧口令相同")
-st, b = call("POST", "/api/auth/change-password",
-             {"username": PROBE_USER, "oldPassword": "Admin123", "newPassword": "Admin123"},
-             ticket=tk)
+# P8：这条判定挪到了客户端（服务端没有可离线比对的口令派生物）。
+# 于是"新旧相同"在这里会**成功** —— 等价于"改密没生效"，不产生权限变化。
+# 口令本体没变（还是 Admin123），变的是链（换代 + 旧票据吊销）。
+print("\n[5] 场景三：新旧口令相同（P8 起由客户端拦，服务端接受）")
+st, b = change_pw(PROBE_USER, "Admin123", "Admin123")
 print("   响应：HTTP %s / %s / %s" % (st, b.get("code"), b.get("message")))
 
 # ---------- 场景四：登录口令错误 ----------
 print("\n[6] 场景四：登录时口令错误")
-st, b = call("POST", "/api/auth/login", {"username": PROBE_USER, "password": "WrongPass1"})
+st, b = chain_login_via(call, PROBE_USER, "WrongPass1")
 print("   响应：HTTP %s / %s / %s" % (st, b.get("code"), b.get("message")))
 
 # ---------- 查库核对 ----------
@@ -156,8 +166,12 @@ CHECKS = [
      count("CHANGE_PASSWORD_FAILED", "WEAK_PASSWORD", seq_gt=mark) >= 1),
     ("旧口令错误已入日志（+ WRONG_OLD_PASSWORD）",
      count("CHANGE_PASSWORD_FAILED", "WRONG_OLD_PASSWORD", seq_gt=mark) >= 1),
-    ("新旧相同已入日志（+ PASSWORD_REUSED）",
-     count("CHANGE_PASSWORD_FAILED", "PASSWORD_REUSED", seq_gt=mark) >= 1),
+    # P8 翻面：服务端产生不了 PASSWORD_REUSED（没有可比对象）。
+    # 留这条 == 0 的断言，是为了盯住"别有人把判定偷偷加回服务端"。
+    ("服务端不再产生 PASSWORD_REUSED（判定已移到客户端）",
+     count("CHANGE_PASSWORD_FAILED", "PASSWORD_REUSED", seq_gt=mark) == 0),
+    ("新旧相同的改密作为**成功**入日志（CHANGE_PASSWORD）",
+     count("CHANGE_PASSWORD", seq_gt=mark) >= 1),
     ("登录失败已入日志（LOGIN_FAILED + INVALID_CREDENTIALS）",
      count("LOGIN_FAILED", "INVALID_CREDENTIALS", seq_gt=mark) >= 1),
     ("上述失败全部挂在 admin 名下（可定位到具体操作者）",
@@ -183,7 +197,7 @@ if leak:
     bad += 1
 
 # 后端进程里的 admin 口令未被改动：仍能用原口令登录
-st2, b2 = call("POST", "/api/auth/login", {"username": PROBE_USER, "password": "Admin123"})
+st2, b2 = chain_login_via(call, PROBE_USER, "Admin123")
 ok2 = st2 == 200
 print("   [%s] admin 原口令仍然有效（本次只触发失败分支，未真正改密）" % ("OK  " if ok2 else "FAIL"))
 if not ok2:

@@ -50,6 +50,7 @@ import bcrypt
 # 改造前用 `next((a for a in sys.argv[3:] if not a.startswith("--")), ...)`
 # —— 扫描式解析最危险：任何非 -- 前缀的参数都会被当成库名喂给 drop_database()。
 from _probe_common import (
+    chain_login_via,
     ProbeDb,
     resolve_probe_db,
     start_backend as _common_start_backend,
@@ -96,7 +97,7 @@ def call(method, path, body=None, ticket=None, timeout=60):
 
 
 def login(username, password):
-    st, b = call("POST", "/api/auth/login", {"username": username, "password": password})
+    st, b = chain_login_via(call, username, password)
     return st, b, (b.get("data") or {}).get("ticket")
 
 
@@ -128,6 +129,12 @@ def naked_check(password: str, stored: str) -> bool:
         return bcrypt.checkpw(password.encode(), body.encode())
     except Exception:
         return False
+
+
+def v2_make(password: str, pepper: bytes) -> str:
+    """造一条 v2$ 形态的哈希（pepper 参与）。P8 之后唯一还能造它的地方是探针 ——
+    服务端已不再写哈希，这条能力只服务于「存量库 + pepper 丢失」那条拒绝启动的测试。"""
+    return "v2$" + bcrypt.hashpw(prehash(password, pepper).encode(), bcrypt.gensalt(11)).decode()
 
 
 def legacy_hash(password: str) -> str:
@@ -251,20 +258,30 @@ try:
     check("管理员可用播种口令登录", st == 200 and bool(tk_admin),
           "HTTP %s / %s" % (st, b.get("code")))
 
+    # ── P8 翻面 ──
+    # P8 之前这里断言"播种管理员也是 v2$ 哈希"。现在库里**根本不该有哈希**：
+    # 唯一的凭据是链，pepper 与登录路径彻底解耦。这条翻转是有意的，
+    # 它守着"口令派生物不再落库"这条性质。
     admin_doc = db["Users"].find_one({"username": ADMIN_USER})
-    h_admin_1 = (admin_doc or {}).get("passwordHash", "")
-    check("播种管理员的口令哈希也是 v2$ 格式（没有绕过 pepper 的例外）",
-          h_admin_1.startswith("v2$"), "实际前缀 %r" % h_admin_1[:8])
-    check("独立复算：HMAC-SHA256(P1) → bcrypt 命中该哈希（不靠后端自证）",
-          v2_check(ADMIN_PW, h_admin_1, PEPPER1))
-    check("剥掉标记后用裸口令直接验证必须失败（证明 pepper 真的参与了运算）",
-          not naked_check(ADMIN_PW, h_admin_1))
+    check("播种管理员**没有**口令哈希（P8 起种子只建链）",
+          not (admin_doc or {}).get("passwordHash"),
+          "passwordHash=%r" % (admin_doc or {}).get("passwordHash"))
+    check("播种管理员有链（登录凭据就是它）",
+          db["OtpChains"].count_documents({"username": ADMIN_USER}) == 1,
+          "链 %d 条" % db["OtpChains"].count_documents({"username": ADMIN_USER}))
 
     # ============================================================
-    print("\n[2] 造一条改造前形态的账号，验证渐进迁移")
+    # P8 之前这一节测"渐进迁移"（旧哈希登录时自动升级）。P8 删掉口令路径之后：
+    #   · 登录时没有"验哈希"这个动作，于是懒升级没有发生的时机；
+    #   · 存量哈希账号的唯一出路是运维工具 --rechain（在 P8 专项探针里覆盖）。
+    # 这一节改成验证翻面后的两条性质：
+    #   a) 存量哈希账号**登不进来**（不管哈希新旧、pepper 对不对）；
+    #   b) 登录失败不会去动那份哈希（没有任何代码路径会再写它）。
+    # 手工造一个 v2$ 哈希账号 —— 服务端已不会写哈希，这能力只剩探针有。
+    print("\n[2] 存量哈希账号：登录被拒，且哈希不被触碰")
     LEGACY_USER = "legacy_pepper_user"
     LEGACY_PW = "LegacyPass123"
-    lh = legacy_hash(LEGACY_PW)
+    lh = v2_make(LEGACY_PW, PEPPER1)
     db["Users"].insert_one({
         "username": LEGACY_USER,
         "passwordHash": lh,
@@ -276,55 +293,35 @@ try:
         "lockoutEnd": None,
         "createdAt": datetime.now(timezone.utc),
     })
-    check("已造出旧格式账号（$2a$ 前缀、无 pepper）", lh.startswith("$2a$"), lh[:7])
-
-    before = count_action("PASSWORD_HASH_UPGRADED")
+    check("已造出 v2$ 哈希账号（独立复算自洽）", v2_check(LEGACY_PW, lh, PEPPER1), lh[:8])
 
     st, b, tk = login(LEGACY_USER, LEGACY_PW)
-    check("旧格式账号仍能登录（升级不要求用户改口令）", st == 200 and bool(tk),
+    check("存量哈希账号登不进来（口令路径已删除，与 pepper 对错无关）",
+          st == 401 and b.get("code") == "INVALID_CREDENTIALS",
           "HTTP %s / %s" % (st, b.get("code")))
-
-    h_after = (db["Users"].find_one({"username": LEGACY_USER}) or {}).get("passwordHash", "")
-    check("登录后库里的哈希自动变成 v2$ 格式", h_after.startswith("v2$"),
-          "实际前缀 %r" % h_after[:8])
-    check("升级后的哈希能用 P1 独立复算验证（口令没有被改掉）",
-          v2_check(LEGACY_PW, h_after, PEPPER1))
-
-    after = count_action("PASSWORD_HASH_UPGRADED")
-    check("恰好新增 1 条 PASSWORD_HASH_UPGRADED 审计", after - before == 1,
-          "%d → %d" % (before, after))
-
-    hits = []
-    for n, d in audit_docs():
-        for k, v in d.items():
-            if isinstance(v, str) and LEGACY_PW in v:
-                hits.append("%s.%s" % (n, k))
-    check("审计里不含口令明文（升级记录也不能写口令）", not hits, "命中 %s" % hits)
-
-    st, _, _ = login(LEGACY_USER, LEGACY_PW)
-    check("再次登录仍成功", st == 200, "HTTP %s" % st)
-    check("不产生第二条升级审计（幂等）", count_action("PASSWORD_HASH_UPGRADED") == after,
-          "仍为 %d 条" % count_action("PASSWORD_HASH_UPGRADED"))
-
-    if tk_admin:
-        st_l, _ = call("GET", "/api/auth/users", ticket=tk_admin)
-        check("升级期间不影响其它接口（管理员仍可查用户列表）", st_l == 200, "HTTP %s" % st_l)
+    check("该账号没有链（无链 ⇒ 无凭据，这正是 --rechain 要补的东西）",
+          db["OtpChains"].count_documents({"username": LEGACY_USER}) == 0)
+    check("登录失败不会改写库里的哈希（没有代码路径再碰它）",
+          (db["Users"].find_one({"username": LEGACY_USER}) or {}).get("passwordHash") == lh)
+    check("审计里不出现 PASSWORD_HASH_UPGRADED（历史动作彻底退场）",
+          count_action("PASSWORD_HASH_UPGRADED") == 0,
+          "%d 条" % count_action("PASSWORD_HASH_UPGRADED"))
 
     stop(proc, logf)
 
     # ============================================================
-    print("\n[3] 换成错误的 pepper —— 正确口令也必须验不过")
+    print("\n[3] 换成错误的 pepper —— 登录照常（pepper 已与认证解耦）")
     p2, logf, _ = start({"AUTHBASELINE_PEPPER": b64raw(PEPPER2)}, "s2")
     proc = p2
 
-    st, b, tk_bad = login(LEGACY_USER, LEGACY_PW)
-    check("错误 pepper 下，旧格式升级来的账号登不进去", st == 401,
-          "HTTP %s / %s" % (st, b.get("code")))
-    st2, b2, _ = login(ADMIN_USER, ADMIN_PW)
-    check("错误 pepper 下，管理员同样登不进去", st2 == 401,
-          "HTTP %s / %s" % (st2, b2.get("code")))
-    check("验证失败时不会把库里的哈希改写坏",
-          (db["Users"].find_one({"username": LEGACY_USER}) or {}).get("passwordHash") == h_after)
+    st2, b2, tk2 = login(ADMIN_USER, ADMIN_PW)
+    check("错误 pepper 下，链值登录照样成功（登录根本不用 pepper）",
+          st2 == 200 and bool(tk2), "HTTP %s / %s" % (st2, b2.get("code")))
+    st, b, _ = login(LEGACY_USER, LEGACY_PW)
+    check("存量哈希账号依然登不进去（原因还是没有链，不是 pepper）",
+          st == 401, "HTTP %s / %s" % (st, b.get("code")))
+    check("哈希原封不动",
+          (db["Users"].find_one({"username": LEGACY_USER}) or {}).get("passwordHash") == lh)
 
     stop(proc, logf)
 

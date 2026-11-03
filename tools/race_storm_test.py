@@ -72,6 +72,7 @@ env = {
     "MongoDbSettings__DatabaseName": DB,
 }
 import os
+from _probe_common import chain_login_via, otp_code
 full_env = {**os.environ, **env}
 # 注意：stdout 必须重定向到文件，不能用 PIPE。
 # 后端每处理一个请求都会往 stdout 打一行日志，风暴期间数百条请求会把
@@ -100,7 +101,7 @@ if not ready:
 print("  就绪 (PID=%d)" % proc.pid)
 
 # ---------- 2. 登录 ----------
-st, body = call("POST", "/api/auth/login", {"username": "admin", "password": "Admin123"})
+st, body = chain_login_via(call, "admin", "Admin123")
 if st != 200 or not body.get("data", {}).get("ticket"):
     print("  !! 登录失败:", json.dumps(body, ensure_ascii=False)[:200])
     proc.kill()
@@ -108,9 +109,33 @@ if st != 200 or not body.get("data", {}).get("ticket"):
 ticket = body["data"]["ticket"]
 print("  登录 OK，票据已取")
 
-# 基线：校验一次，确认起始 intact
-st, b = call("GET", "/api/audit/verify", ticket=ticket)
-print("  起始校验: intact=%s checked=%s" % (b.get("data", {}).get("intact"), b.get("data", {}).get("checked")))
+# 基线：校验一次，确认起始 intact。
+# 两个 P8/SoD 相关的调整：
+#   1) 读审计要 AuditAdmin 的票（Admin 无权读审计），所以先建一个审计员、用它打审计端点；
+#   2) 响应体可能是字面量 null（非 JSON 对象），不做 isinstance 防御会在 .get 上炸。
+st, r = call("POST", "/api/auth/login/challenge", {"username": "admin"})
+d = r.get("data") or {}
+st, r = call("POST", "/api/auth/reconfirm",
+             {"purpose": "create-account", "target": "storm_auditor",
+              "otpCode": otp_code("Admin123", d.get("r", ""), d.get("k", 0), d.get("iterations", 1))},
+             ticket=ticket)
+tok = ((r or {}).get("data") or {}).get("confirmToken")
+st, r = call("POST", "/api/auth/create-account",
+             {"username": "storm_auditor", "password": "Storm12345",
+              "role": "AuditAdmin", "confirmToken": tok}, ticket=ticket)
+if st != 200:
+    print("  !! 建审计员失败（读审计需要 AuditAdmin）:", json.dumps(r, ensure_ascii=False)[:200])
+    proc.kill(); sys.exit(1)
+st, r = chain_login_via(call, "storm_auditor", "Storm12345")
+audit_ticket = (r.get("data") or {}).get("ticket")
+if not audit_ticket:
+    print("  !! 审计员登录失败:", json.dumps(r, ensure_ascii=False)[:200])
+    proc.kill(); sys.exit(1)
+print("  审计员就绪（风暴打审计端点用它；Admin 无权读审计 —— SoD）")
+
+st, b = call("GET", "/api/audit/verify", ticket=audit_ticket)
+b = b if isinstance(b, dict) else {}
+print("  起始校验: intact=%s checked=%s" % ((b.get("data") or {}).get("intact"), (b.get("data") or {}).get("checked")))
 
 # ---------- 3. 风暴 ----------
 print("\n[2] 风暴 %d 秒：写线程(/api/audit/logs) × 校验线程(/api/audit/verify) ..." % DURATION)
@@ -120,14 +145,14 @@ stats = {"W": [0, 0], "V": [0, 0]}  # [成功, 失败]
 
 def writer():
     while time.time() < stop_at:
-        st, _ = call("GET", "/api/audit/logs?page=1&pageSize=1", ticket=ticket)
+        st, _ = call("GET", "/api/audit/logs?page=1&pageSize=1", ticket=audit_ticket)
         stats["W"][0 if st == 200 else 1] += 1
         time.sleep(0.05)  # ~20 次/秒，每次都会写一条 AUDIT_QUERY
 
 
 def verifier():
     while time.time() < stop_at:
-        st, _ = call("GET", "/api/audit/verify", ticket=ticket)
+        st, _ = call("GET", "/api/audit/verify", ticket=audit_ticket)
         stats["V"][0 if st == 200 else 1] += 1
         # 校验本身较慢（全链读+哈希），不额外 sleep，背靠背打满
 

@@ -24,6 +24,7 @@ import subprocess
 import sys
 import urllib.error
 import urllib.request
+from _probe_common import otp_login
 
 ADMIN_USER = "admin"
 ADMIN_PASS = "Admin123"          # 演示项目的公开默认种子口令，只用于连通性自检
@@ -121,8 +122,7 @@ for name, path in (("GET /", "/"), ("GET /index.html", "/index.html")):
     print(f"   {'[OK]' if ok else '[x] '} {name:16s} HTTP {st}")
 
 print("\n[第3层] 后端 ↔ MongoDB + 票据通道")
-st, body = call(BASE, "POST", "/api/auth/login",
-                {"username": ADMIN_USER, "password": ADMIN_PASS}, ctx=ctx)
+st, body = otp_login(BASE, ADMIN_USER, ADMIN_PASS, ctx=ctx)
 print(f"   POST /api/auth/login  → HTTP {st}")
 tk = None
 if st == 200 and body.get("data"):

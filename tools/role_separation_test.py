@@ -39,7 +39,8 @@ from datetime import datetime, timezone
 # 公共探针基础层：库名守卫 + 代理绕过 + 后端启动。
 # 改造前的写法 `DB = sys.argv[3]` 无任何校验 —— 传参错位就会把真实库名
 # 喂给 drop_database()（10-05 事故形态）。现在统一走 resolve_probe_db()。
-from _probe_common import ProbeDb, resolve_probe_db, start_backend, http_call
+from _probe_common import (confirm_token, chain_login_via, otp_code, ProbeDb, resolve_probe_db,
+                              start_backend, http_call)
 
 EXE = sys.argv[1]
 PORT = int(sys.argv[2])
@@ -74,8 +75,29 @@ def call(method, path, body=None, ticket=None, timeout=90):
     return http_call(BASE, method, path, body=body, ticket=ticket, timeout=timeout)
 
 
+def change_pw(username, old_pw, new_pw):
+    """改密（P8：旧凭据 = 链值）。返回 (status, body)。
+
+    本端点匿名，所以"我是本人"只能靠算出一格有效链值来证明。
+    """
+    st, ch = http_call(BASE, "POST", "/api/auth/login/challenge", {"username": username})
+    d = ch.get("data") or {}
+    body = {
+        "username": username,
+        "oldOtpCode": otp_code(old_pw, d.get("r", ""), d.get("k", 0), d.get("iterations", 1)),
+        "oldChallengeToken": d.get("challengeToken"),
+        "newPassword": new_pw,
+    }
+    return http_call(BASE, "POST", "/api/auth/change-password", body)
+
+
+def ct(ticket, operator, purpose, target, pw):
+    """换一张一次性确认凭据（P8 起六处敏感操作的唯一确认方式）。"""
+    return confirm_token(BASE, ticket, operator, pw, purpose, target)
+
+
 def login(username, password):
-    st, b = call("POST", "/api/auth/login", {"username": username, "password": password})
+    st, b = chain_login_via(call, username, password)
     data = b.get("data") or {}
     return st, data.get("ticket"), data
 
@@ -118,16 +140,12 @@ for path in ["/api/audit/logs", "/api/audit/verify", "/api/audit/stats", "/api/a
 
 # ---------- 3. admin 创建账号（无需邮箱） ----------
 print("\n[3] Admin 创建账号：不绑邮箱、建号即启用")
-st, b = call("POST", "/api/auth/create-account",
-             {"username": "ops01", "password": "Ops12345", "role": "UserAdmin",
-              "operatorPassword": "Admin123"}, ticket=admin_tk)
+st, b = call("POST", "/api/auth/create-account", {"username": "ops01", "password": "Ops12345", "role": "UserAdmin", "confirmToken": ct(admin_tk, "admin", "create-account", "ops01", "Admin123")}, ticket=admin_tk)
 check("创建「用户管理员」ops01 → 成功", st == 200, "HTTP %s / %s" % (st, b.get("code")))
 check("  返回角色 = UserAdmin", (b.get("data") or {}).get("role") == "UserAdmin")
 check("  未绑定邮箱", not (b.get("data") or {}).get("email"))
 
-st, b = call("POST", "/api/auth/create-account",
-             {"username": "auditor01", "password": "Audit12345", "role": "AuditAdmin",
-              "operatorPassword": "Admin123"}, ticket=admin_tk)
+st, b = call("POST", "/api/auth/create-account", {"username": "auditor01", "password": "Audit12345", "role": "AuditAdmin", "confirmToken": ct(admin_tk, "admin", "create-account", "auditor01", "Admin123")}, ticket=admin_tk)
 check("创建「审计管理员」auditor01 → 成功", st == 200, "HTTP %s / %s" % (st, b.get("code")))
 check("  返回角色 = AuditAdmin", (b.get("data") or {}).get("role") == "AuditAdmin")
 
@@ -144,17 +162,14 @@ st, ops_tk, ops_info = login("ops01", "Ops12345")
 check("ops01 免邮箱直接登录成功", st == 200 and bool(ops_tk), "HTTP %s" % st)
 
 # 口令太弱时拒绝
-st, b = call("POST", "/api/auth/create-account",
-             {"username": "weak01", "password": "abc", "role": "UserAdmin",
-              "operatorPassword": "Admin123"}, ticket=admin_tk)
+st, b = call("POST", "/api/auth/create-account", {"username": "weak01", "password": "abc", "role": "UserAdmin", "confirmToken": ct(admin_tk, "admin", "create-account", "weak01", "Admin123")}, ticket=admin_tk)
 check("弱口令被拒", st == 400 and b.get("code") == "WEAK_PASSWORD",
       "HTTP %s / %s" % (st, b.get("code")))
 
-# 操作者口令错误时拒绝（二次确认）
-st, b = call("POST", "/api/auth/create-account",
-             {"username": "nope01", "password": "Nope12345", "role": "UserAdmin",
-              "operatorPassword": "wrongpassword"}, ticket=admin_tk)
-check("操作者口令错误 → 拒绝", st == 401, "HTTP %s / %s" % (st, b.get("code")))
+# 操作者凭据错误时拒绝（二次确认）：P8 起凭据是「用他自己的链值换来的票」，
+# 口令错 ⇒ 换不到票 ⇒ 401 OTP_CONFIRM_REQUIRED。与旧路径同一个状态码。
+st, b = call("POST", "/api/auth/create-account", {"username": "nope01", "password": "Nope12345", "role": "UserAdmin", "confirmToken": ct(admin_tk, "admin", "create-account", "nope01", "wrongpassword")}, ticket=admin_tk)
+check("操作者凭据错误 → 拒绝（换不到确认票）", st == 401, "HTTP %s / %s" % (st, b.get("code")))
 
 # ---------- 3b. Admin 也能创建「普通用户」，邮箱可选 ----------
 #
@@ -163,9 +178,7 @@ check("操作者口令错误 → 拒绝", st == 401, "HTTP %s / %s" % (st, b.get
 #   · 填写 —— 与自助注册同一条格式校验与唯一性校验，但不发码，直接置已验证，
 #     否则这个字段就是一个"收进来却永远用不了"的死字段（系统里没有补验证的路径）。
 print("\n[3b] Admin 创建「普通用户」：邮箱留空与填写两种都成立")
-st, b = call("POST", "/api/auth/create-account",
-             {"username": "normal01", "password": "Normal12345", "role": "User",
-              "operatorPassword": "Admin123"}, ticket=admin_tk)
+st, b = call("POST", "/api/auth/create-account", {"username": "normal01", "password": "Normal12345", "role": "User", "confirmToken": ct(admin_tk, "admin", "create-account", "normal01", "Admin123")}, ticket=admin_tk)
 check("创建「普通用户」normal01（邮箱留空）→ 成功", st == 200, "HTTP %s / %s" % (st, b.get("code")))
 check("  返回角色 = User", (b.get("data") or {}).get("role") == "User")
 check("  未绑邮箱（留空即不绑）", not (b.get("data") or {}).get("email"))
@@ -181,10 +194,8 @@ check("未绑邮箱的普通用户可凭口令直接登录", st == 200 and bool(
 check("  登录后 isAdmin = false（不带任何管理能力）", normal_info.get("isAdmin") is False)
 
 # 填邮箱：登记为已绑定 + 视为已验证（这后一半是「忘记密码」能走通的前置条件）
-st, b = call("POST", "/api/auth/create-account",
-             {"username": "normal02", "password": "Normal12345", "role": "User",
-              "email": "Normal02@Example.COM", "operatorPassword": "Admin123"},
-             ticket=admin_tk)
+st, b = call("POST", "/api/auth/create-account", {"username": "normal02", "password": "Normal12345", "role": "User",
+              "email": "Normal02@Example.COM", "confirmToken": ct(admin_tk, "admin", "create-account", "normal02", "Admin123")}, ticket=admin_tk)
 check("创建「普通用户」normal02（填邮箱）→ 成功", st == 200, "HTTP %s / %s" % (st, b.get("code")))
 check("  响应里的邮箱是**脱敏**的（拿不到完整地址）",
       (b.get("data") or {}).get("email") == "n*****@example.com",
@@ -197,16 +208,14 @@ check("  库内 emailVerified=True —— 代填即视为已验证，否则「�
       nu2.get("emailVerified") is True, nu2.get("emailVerified"))
 
 # 邮箱格式非法：与自助注册同一套校验，且提示"可留空"（留空是合法用法）
-st, b = call("POST", "/api/auth/create-account",
-             {"username": "badmail01", "password": "Badmail12345", "role": "User",
-              "email": "not-an-email", "operatorPassword": "Admin123"}, ticket=admin_tk)
+st, b = call("POST", "/api/auth/create-account", {"username": "badmail01", "password": "Badmail12345", "role": "User",
+              "email": "not-an-email", "confirmToken": ct(admin_tk, "admin", "create-account", "badmail01", "Admin123")}, ticket=admin_tk)
 check("邮箱格式非法 → 拒绝", st == 400 and b.get("code") == "INVALID_EMAIL",
       "HTTP %s / %s" % (st, b.get("code")))
 
 # 邮箱唯一：与自助注册同一条规则（共用会让「忘记密码」不知道该把重置码发给谁）
-st, b = call("POST", "/api/auth/create-account",
-             {"username": "dup01", "password": "Dupmail12345", "role": "User",
-              "email": "normal02@example.com", "operatorPassword": "Admin123"}, ticket=admin_tk)
+st, b = call("POST", "/api/auth/create-account", {"username": "dup01", "password": "Dupmail12345", "role": "User",
+              "email": "normal02@example.com", "confirmToken": ct(admin_tk, "admin", "create-account", "dup01", "Admin123")}, ticket=admin_tk)
 check("邮箱已被占用 → 拒绝", st == 409 and b.get("code") == "EMAIL_ALREADY_BOUND",
       "HTTP %s / %s" % (st, b.get("code")))
 
@@ -215,14 +224,10 @@ print("\n[4] UserAdmin（ops01）：同样能管用户，但不能任免角色�
 st, b = call("GET", "/api/auth/users", ticket=ops_tk)
 check("ops01 读用户列表 → 允许", st == 200, "HTTP %s" % st)
 
-st, b = call("POST", "/api/auth/create-account",
-             {"username": "try01", "password": "Try12345", "role": "UserAdmin",
-              "operatorPassword": "Ops12345"}, ticket=ops_tk)
+st, b = call("POST", "/api/auth/create-account", {"username": "try01", "password": "Try12345", "role": "UserAdmin", "confirmToken": ct(ops_tk, "ops01", "create-account", "try01", "Ops12345")}, ticket=ops_tk)
 check("ops01 尝试创建账号 → 拒绝", st == 403, "HTTP %s / %s" % (st, b.get("code")))
 
-st, b = call("POST", "/api/auth/set-role",
-             {"username": "admin", "role": "AuditAdmin", "operatorPassword": "Ops12345"},
-             ticket=ops_tk)
+st, b = call("POST", "/api/auth/set-role", {"username": "admin", "role": "AuditAdmin", "confirmToken": ct(ops_tk, "ops01", "set-role", "admin", "Ops12345")}, ticket=ops_tk)
 check("ops01 尝试变更他人角色 → 拒绝", st == 403, "HTTP %s / %s" % (st, b.get("code")))
 
 st, b = call("GET", "/api/audit/logs", ticket=ops_tk)
@@ -244,16 +249,12 @@ for path in ["/api/audit/logs", "/api/audit/verify", "/api/audit/stats", "/api/a
 st, b = call("GET", "/api/auth/users", ticket=auditor_tk)
 check("auditor01 读用户列表 → 拒绝", st == 403, "HTTP %s / %s" % (st, b.get("code")))
 
-st, b = call("POST", "/api/auth/create-account",
-             {"username": "try02", "password": "Try12345", "role": "AuditAdmin",
-              "operatorPassword": "Audit12345"}, ticket=auditor_tk)
+st, b = call("POST", "/api/auth/create-account", {"username": "try02", "password": "Try12345", "role": "AuditAdmin", "confirmToken": ct(auditor_tk, "auditor01", "create-account", "try02", "Audit12345")}, ticket=auditor_tk)
 check("auditor01 尝试创建账号 → 拒绝", st == 403, "HTTP %s / %s" % (st, b.get("code")))
 
 # ---------- 6. admin 任命角色 + 越界尝试 ----------
 print("\n[6] Admin 任命角色：能指定审计管理员，但不能自我提权")
-st, b = call("POST", "/api/auth/set-role",
-             {"username": "ops01", "role": "AuditAdmin", "operatorPassword": "Admin123"},
-             ticket=admin_tk)
+st, b = call("POST", "/api/auth/set-role", {"username": "ops01", "role": "AuditAdmin", "confirmToken": ct(admin_tk, "admin", "set-role", "ops01", "Admin123")}, ticket=admin_tk)
 check("把 ops01 变更为 AuditAdmin → 成功", st == 200, "HTTP %s / %s" % (st, b.get("code")))
 check("  返回新角色 = AuditAdmin", (b.get("data") or {}).get("role") == "AuditAdmin")
 
@@ -270,21 +271,15 @@ st, b = call("GET", "/api/auth/users", ticket=new_ops_tk)
 check("ops01 改角色后读用户列表被拒（不再管账号）", st == 403, "HTTP %s" % st)
 
 # 越界尝试
-st, b = call("POST", "/api/auth/set-role",
-             {"username": "admin", "role": "AuditAdmin", "operatorPassword": "Admin123"},
-             ticket=admin_tk)
+st, b = call("POST", "/api/auth/set-role", {"username": "admin", "role": "AuditAdmin", "confirmToken": ct(admin_tk, "admin", "set-role", "admin", "Admin123")}, ticket=admin_tk)
 check("admin 变更自己的角色 → 拒绝", st == 400 and b.get("code") == "CANNOT_SET_OWN_ROLE",
       "HTTP %s / %s" % (st, b.get("code")))
 
-st, b = call("POST", "/api/auth/create-account",
-             {"username": "admin2", "password": "Admin12345", "role": "Admin",
-              "operatorPassword": "Admin123"}, ticket=admin_tk)
+st, b = call("POST", "/api/auth/create-account", {"username": "admin2", "password": "Admin12345", "role": "Admin", "confirmToken": ct(admin_tk, "admin", "create-account", "admin2", "Admin123")}, ticket=admin_tk)
 check("创建「管理员」角色 → 拒绝（不能自我复制）",
       st == 400 and b.get("code") == "FORBIDDEN_ROLE", "HTTP %s / %s" % (st, b.get("code")))
 
-st, b = call("POST", "/api/auth/set-role",
-             {"username": "auditor01", "role": "Admin", "operatorPassword": "Admin123"},
-             ticket=admin_tk)
+st, b = call("POST", "/api/auth/set-role", {"username": "auditor01", "role": "Admin", "confirmToken": ct(admin_tk, "admin", "set-role", "auditor01", "Admin123")}, ticket=admin_tk)
 check("把他人设为「管理员」→ 拒绝", st == 400 and b.get("code") == "FORBIDDEN_ROLE",
       "HTTP %s / %s" % (st, b.get("code")))
 
@@ -309,9 +304,7 @@ check("admin 注销自己 → 拒绝（自保护）",
       st == 400 and b.get("code") == "FORBIDDEN_TARGET", "HTTP %s / %s" % (st, b.get("code")))
 
 # 再建一个用户管理员：验证"下级不能删上级"
-st, b = call("POST", "/api/auth/create-account",
-             {"username": "ops02", "password": "Ops12345", "role": "UserAdmin",
-              "operatorPassword": "Admin123"}, ticket=admin_tk)
+st, b = call("POST", "/api/auth/create-account", {"username": "ops02", "password": "Ops12345", "role": "UserAdmin", "confirmToken": ct(admin_tk, "admin", "create-account", "ops02", "Admin123")}, ticket=admin_tk)
 check("创建「用户管理员」ops02 → 成功", st == 200, "HTTP %s / %s" % (st, b.get("code")))
 st, ops2_tk, ops2_info = login("ops02", "Ops12345")
 check("ops02 登录成功且角色 = UserAdmin",
@@ -356,34 +349,32 @@ print("\n[8] 安全事件留痕：口令类失败与越权拒绝都能单独检�
 
 # --- admin 改自己被拒绝的四类原因 ---
 # 用 ops02 做靶子（它能登录，因此旧口令校验走得到），避免改动真实 admin 的口令。
-st, b = call("POST", "/api/auth/change-password",
-             {"username": "ops02", "oldPassword": "Ops12345", "newPassword": "abc"},
-             ticket=ops2_tk)
+st, b = change_pw("ops02", "Ops12345", "abc")
 check("改密：弱口令被拒", st == 400 and b.get("code") == "WEAK_PASSWORD",
       "HTTP %s / %s" % (st, b.get("code")))
 
-st, b = call("POST", "/api/auth/change-password",
-             {"username": "ops02", "oldPassword": "Ops12345", "newPassword": "Ops12345"},
-             ticket=ops2_tk)
-check("改密：新旧相同被拒", st == 400 and b.get("code") == "PASSWORD_REUSED",
-      "HTTP %s / %s" % (st, b.get("code")))
+# P8：「新旧相同」不再由服务端判定 —— 它手里没有可离线比对的口令派生物，
+# 这条判定挪到客户端（两个明文都在那儿）。所以这里断言的是**服务端接受**
+# （等价于"改密没生效"，不产生权限变化），而"拦下来"由客户端自检负责。
+st, b = change_pw("ops02", "Ops12345", "Ops12345")
+check("改密：新旧相同 → 服务端不再判定（客户端自检负责拦）",
+      st == 200, "HTTP %s / %s" % (st, b.get("code")))
 
-st, b = call("POST", "/api/auth/change-password",
-             {"username": "ops02", "oldPassword": "wrongold1A", "newPassword": "NewPass123"},
-             ticket=ops2_tk)
+st, b = change_pw("ops02", "wrongold1A", "NewPass123")
 check("改密：旧口令错误被拒", st == 401 and b.get("code") == "INVALID_CREDENTIALS",
       "HTTP %s / %s" % (st, b.get("code")))
 
+# P8 之后"空字段"指的是**凭据字段**为空（链值 / 挑战票），不是 password ——
+# 请求体里已经没有 password 了。注意这里不能走 change_pw()：
+# 空口令照样能算出一格（PBKDF2 接受空串），那会变成"凭据不匹配"而不是"字段缺失"。
 st, b = call("POST", "/api/auth/change-password",
-             {"username": "ops02", "oldPassword": "", "newPassword": "NewPass123"},
-             ticket=ops2_tk)
-check("改密：字段为空被拒", st == 400 and b.get("code") == "EMPTY_FIELDS",
+             {"username": "ops02", "oldOtpCode": "", "oldChallengeToken": "",
+              "newPassword": "NewPass123"})
+check("改密：凭据字段为空被拒", st == 400 and b.get("code") == "EMPTY_FIELDS",
       "HTTP %s / %s" % (st, b.get("code")))
 
 # --- 改密成功一次，确认成功与失败确实分属两个动作 ---
-st, b = call("POST", "/api/auth/change-password",
-             {"username": "ops02", "oldPassword": "Ops12345", "newPassword": "Ops9x8y7z"},
-             ticket=ops2_tk)
+st, b = change_pw("ops02", "Ops12345", "Ops9x8y7z")
 check("改密：合规口令成功", st == 200, "HTTP %s / %s" % (st, b.get("code")))
 
 # 改密成功后旧票据应已作废
@@ -391,10 +382,10 @@ st, b = call("GET", "/api/auth/users", ticket=ops2_tk)
 check("改密成功后旧票据失效", st == 401, "HTTP %s / %s" % (st, b.get("code")))
 
 # --- 登录失败的原因码 ---
-st, b = call("POST", "/api/auth/login", {"username": "ghostuser01", "password": "WrongPass1"})
+st, b = chain_login_via(call, "ghostuser01", "WrongPass1")
 check("登录：账号不存在被拒", st == 401, "HTTP %s / %s" % (st, b.get("code")))
 
-st, b = call("POST", "/api/auth/login", {"username": "admin", "password": "WrongPass1"})
+st, b = chain_login_via(call, "admin", "WrongPass1")
 check("登录：账号存在但口令错误被拒（与'账号不存在'同码、不同原因）",
       st == 401, "HTTP %s / %s" % (st, b.get("code")))
 
@@ -411,7 +402,10 @@ def count(action, reason=None):
 
 
 cp_failed = count("CHANGE_PASSWORD_FAILED")
-check("改密失败已留痕（CHANGE_PASSWORD_FAILED，独立动作）", cp_failed >= 4, "%d 条" % cp_failed)
+# 本段当前会制造三类失败：弱口令、旧凭据错、凭据字段为空。
+# P8 之前还有第四类（新旧相同），现在它由客户端拦、服务端根本收不到 ——
+# 于是这里从 4 改成 3。数字变小不是"留痕变差"，是"少了那一种失败"。
+check("改密失败已留痕（CHANGE_PASSWORD_FAILED，独立动作）", cp_failed >= 3, "%d 条" % cp_failed)
 
 check("改密失败动作本身即 result=失败",
       sum(probe_db[n].count_documents(
@@ -420,7 +414,11 @@ check("改密失败动作本身即 result=失败",
 
 check("弱口令尝试带 WEAK_PASSWORD", count("CHANGE_PASSWORD_FAILED", "WEAK_PASSWORD") >= 1,
       "%d 条" % count("CHANGE_PASSWORD_FAILED", "WEAK_PASSWORD"))
-check("新旧相同带 PASSWORD_REUSED", count("CHANGE_PASSWORD_FAILED", "PASSWORD_REUSED") >= 1,
+# P8："新旧相同"由**客户端**判定，服务端产生不了这个原因码，也不该产生 ——
+# 它没有可比的对象（库里只有链）。这条断言从"至少 1 条"翻成"恰好 0 条"，
+# 用来盯住"别有人在服务端偷偷把它加回来"（加回来必然要留一份可离线比对的派生物）。
+check("新旧相同不再由服务端判定（PASSWORD_REUSED 应为 0 条）",
+      count("CHANGE_PASSWORD_FAILED", "PASSWORD_REUSED") == 0,
       "%d 条" % count("CHANGE_PASSWORD_FAILED", "PASSWORD_REUSED"))
 check("旧口令错误带 WRONG_OLD_PASSWORD（与'账号不存在'可区分）",
       count("CHANGE_PASSWORD_FAILED", "WRONG_OLD_PASSWORD") >= 1,
@@ -433,9 +431,17 @@ check("CHANGE_PASSWORD 动作下不存在失败记录（失败已全部改走 _F
       sum(probe_db[n].count_documents(
           {"action": "CHANGE_PASSWORD", "result": "失败"}) for n in cols) == 0)
 
-check("登录失败带 INVALID_CREDENTIALS（账号不存在与口令错误同码）",
-      count("LOGIN_FAILED", "INVALID_CREDENTIALS") >= 2,
+# 对外**同码**（都是 INVALID_CREDENTIALS，防枚举），审计里**分因**：
+#   · 账号不存在 ⇒ INVALID_CREDENTIALS
+#   · 账号在、链值对不上 ⇒ OTP_CHAIN_MISMATCH
+# 两个原因码并存是刻意的：审计是管理员才能看的地方，那里越细越好；
+# 而响应体必须逐字相同，否则"账号是否存在"就从这一层漏出去了。
+check("登录失败：账号不存在带 INVALID_CREDENTIALS",
+      count("LOGIN_FAILED", "INVALID_CREDENTIALS") >= 1,
       "%d 条" % count("LOGIN_FAILED", "INVALID_CREDENTIALS"))
+check("登录失败：链值不匹配带 OTP_CHAIN_MISMATCH（审计内与「不存在」可区分）",
+      count("LOGIN_FAILED", "OTP_CHAIN_MISMATCH") >= 1,
+      "%d 条" % count("LOGIN_FAILED", "OTP_CHAIN_MISMATCH"))
 check("登录失败不再有空原因码",
       sum(probe_db[n].count_documents(
           {"action": "LOGIN_FAILED", "reasonCode": {"$in": [None, ""]}}) for n in cols) == 0)

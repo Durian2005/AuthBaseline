@@ -24,7 +24,8 @@
 import sys
 import time
 
-from _probe_common import ProbeDb, resolve_probe_db, start_backend, http_call
+from _probe_common import (chain_login_via, confirm_token, ProbeDb, resolve_probe_db,
+                            start_backend, http_call)
 
 EXE = sys.argv[1]
 PORT = int(sys.argv[2])
@@ -56,9 +57,23 @@ def call(method, path, body=None, ticket=None, timeout=90):
 
 
 def login(username, password):
-    st, b = call("POST", "/api/auth/login", {"username": username, "password": password})
+    st, b = chain_login_via(call, username, password)
     data = b.get("data") or {}
     return st, data.get("ticket"), data
+
+
+def tokens_for(ticket, operator, operator_pw, usernames):
+    """给每个目标各换一张确认凭据（P8：批量 set-role 的唯一确认方式）。
+
+    一张票只绑一个目标 —— 拿绑定 alice 的票去改 bob，等于把"确认"
+    退化成"点过一次就可以授权任意多次"。所以这里逐个换，与前端
+    `prepareBatchParams()` 的做法一致。
+    """
+    out = {}
+    for name in usernames:
+        t = confirm_token(BASE, ticket, operator, operator_pw, "set-role", name)
+        out[name] = t
+    return out
 
 
 def batch(ticket, action, usernames, **extra):
@@ -110,9 +125,11 @@ for name, pwd, role in (
     ("u3", "User12345", "User"),
     ("u4", "User12345", "User"),
 ):
+    # 建号也是敏感操作：每个目标一张自己的确认票（绑 create-account + 该用户名）。
+    token = confirm_token(BASE, admin_tk, "admin", "Admin123", "create-account", name)
     st, b = call("POST", "/api/auth/create-account",
                  {"username": name, "password": pwd, "role": role,
-                  "operatorPassword": "Admin123"}, ticket=admin_tk)
+                  "confirmToken": token}, ticket=admin_tk)
     check("创建 %s（%s）" % (name, role), st == 200, "HTTP %s / %s" % (st, b.get("code")))
 
 st, ops_tk, ops_info = login("ops01", "Ops12345")
@@ -253,7 +270,9 @@ check("越权拒绝已留痕（DELETE_USER / FORBIDDEN_TARGET / auditor01）",
 # ---------- 9. 入口预检：改角色只有 Admin 能做 ----------
 print("\n[9] 入口预检：UserAdmin 发起批量改角色 → 整批拒绝，一个目标都不进循环")
 before = sum(probe_db[n].count_documents({"action": "SET_ROLE"}) for n in cols)
-st, b = batch(ops_tk, "set-role", ["u1", "u3"], role="User", operatorPassword="Ops12345")
+# 刻意**不带**确认凭据：入口预检（能不能任免角色）先于"循环调用单条 SetRole"，
+# 所以这里连票都不该被消耗。若哪天预检被挪到确认之后，这条用例会先变红。
+st, b = batch(ops_tk, "set-role", ["u1", "u3"], role="User")
 # 用户管理员"能管用户"但"不能任免角色"，后端为此单独给了 FORBIDDEN_ROLE
 # （而不是笼统的 NOT_ADMIN）—— 好让"低阶管理员试图提权"在审计里能被一眼捞出。
 check("ops01 批量改角色 → 403 FORBIDDEN_ROLE（低阶管理员试图提权）",
@@ -267,14 +286,19 @@ check("u1 角色未被改动", user_doc("u1").get("role") == "User", user_doc("u
 
 # ---------- 10. admin 改角色 + 去重归一 ----------
 print("\n[10] Admin 批量改角色；同样的目标写两遍只处置一次")
-st, b = batch(admin_tk, "set-role", ["u3"], role="AuditAdmin", operatorPassword="Admin123")
+st, b = batch(admin_tk, "set-role", ["u3"], role="AuditAdmin",
+              confirmTokens=tokens_for(admin_tk, "admin", "Admin123", ["u3"]))
 check("admin 批量把 u3 改成审计管理员 → 成功",
       st == 200 and b.get("code") == "OK", "HTTP %s / %s" % (st, b.get("code")))
 check("u3 库内 role=AuditAdmin", user_doc("u3").get("role") == "AuditAdmin",
       user_doc("u3").get("role"))
 
-st, b = batch(admin_tk, "set-role", ["u1"], role="User", operatorPassword="wrong-password")
-check("操作者口令错误 → 该条失败（不减权、不改角色）",
+# 口令错 ⇒ 换不到票 ⇒ confirmTokens 里 u1 的值是 None ⇒ 该目标 401。
+# 与旧路径"操作者口令校验失败"同一个状态码，界面上的处理不必分叉。
+st, b = batch(admin_tk, "set-role", ["u1"], role="User",
+              confirmTokens={"u1": confirm_token(BASE, admin_tk, "admin", "wrong-password",
+                                                 "set-role", "u1")})
+check("操作者凭据错误 → 该条失败（不减权、不改角色）",
       st == 400 and (items_of(b) or [{}])[0].get("success") is False,
       "HTTP %s / %s" % (st, (items_of(b) or [{}])[0].get("code")))
 check("u1 角色仍是 User", user_doc("u1").get("role") == "User", user_doc("u1").get("role"))

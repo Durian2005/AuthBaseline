@@ -28,7 +28,10 @@
   例如 DB_NAME=AuditE2eProbe，此时**不需要**确认开关。
 """
 import argparse
+import base64
+import hashlib
 import json
+import secrets
 import os
 import re
 import sys
@@ -48,7 +51,7 @@ except ImportError:
 # 接入统一门禁：默认拒绝，必须显式加 --i-know-this-is-the-real-db 才放行。
 # （为什么不用探针的 `_guard`：见 `_probe_common.require_real_db_optin` 的说明 ——
 #   探针打真实库是 bug，本脚本打真实库是设计意图，两套语义刻意分开。）
-from _probe_common import require_real_db_optin
+from _probe_common import chain_login_post, require_real_db_optin, confirm_token
 
 BASE = os.environ.get("BASE", "http://localhost:5007")
 ADMIN_USER = os.environ.get("ADMIN_USER", "admin")
@@ -82,7 +85,18 @@ def latest_code(prev_len, timeout=6.0):
 
 
 # ---------------------------------------------------------------- HTTP 工具
+# SoD（角色分离）之后，**Admin 不能读审计** —— 只有 AuditAdmin 可以。
+# 本脚本的主角是"审计完整性"，不是 SoD（SoD 有专门的 sod_detect_probe），
+# 所以这里在测试准备阶段让 admin 建一个 AuditAdmin，审计读全部用它。
+# call() 里做替换而不是改几十个调用点：审计路径一眼可辨（/api/audit、旧入口），不会误伤。
+_AUDIT_ROLES = {"admin": None, "audit": None}
+
+
 def call(path, body=None, method="POST", ticket=None):
+    if (ticket is not None and _AUDIT_ROLES["admin"] is not None
+            and ticket == _AUDIT_ROLES["admin"]
+            and (path.startswith("/api/audit") or path.startswith("/api/auth/logs"))):
+        ticket = _AUDIT_ROLES["audit"]
     """调用后端接口，返回 (status, payload)。"""
     url = BASE + path
     data = json.dumps(body).encode("utf-8") if body is not None else None
@@ -140,29 +154,59 @@ def register_real_user(username, password, db):
                 return True, "真实注册流程（控制台取码）"
 
     # ---- 路径 B：直接建号 ----
-    try:
-        import bcrypt as _bcrypt
-    except ImportError:
-        return False, ("后端处于 SMTP 发件模式、日志无明文验证码，"
-                       "且缺少 bcrypt 库，无法直接建号（pip install bcrypt）")
+    if db is None:
+        return False, "后端处于 SMTP 发件模式、日志无明文验证码，且没有可用的库句柄"
 
-    pw_hash = _bcrypt.hashpw(password.encode(), _bcrypt.gensalt(11)).decode()
-    db["Users"].replace_one(
+    # P8：直接建号 = 插账号 + **补一条链**。
+    # 以前这里是写一个 passwordHash 了事；现在口令路径没了，没有链的账号登不进来。
+    # 链的参数（k / iterations / length）从 challenge 拿 —— 问服务端而不是抄配置，
+    # 免得与部署时的覆盖项打架。challenge 对"没有链的账号"也返回完整参数（防枚举），
+    # 那组 (r, k) 同样能用：链是自洽的（v = H^k(PBKDF2(pw, r))）就行。
+    user_doc = {
+        "username": username,
+        "email": email,
+        "status": "Enabled",
+        "role": "User",
+        "emailVerified": True,
+        "failedLoginAttempts": 0,
+        "lockoutEnd": None,
+        "createdAt": datetime.now(timezone.utc),
+    }
+    res = db["Users"].replace_one({"username": username}, user_doc, upsert=True)
+    uid = res.upserted_id
+    if uid is None:
+        uid = db["Users"].find_one({"username": username})["_id"]
+
+    st, chbody = call("/api/auth/login/challenge", {"username": username}, method="POST")
+    d = chbody.get("data") or {}
+    r = secrets.token_hex(16)
+    k = int(d.get("k", 0))
+    iters = int(d.get("iterations", 100000))
+
+    # ⚠️ 链上存的 v 是 x_(k+1)，不是 x_k：服务端的判定式是 H(提交的 x_k) == v。
+    # 少哈希一次的表现是"口令明明对却登不上"（我在联调时踩过，别再踩）。
+    x = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), r.encode("utf-8"), iters, dklen=32)
+    for _ in range(k + 1):
+        x = hashlib.sha256(x).digest()
+
+    db["OtpChains"].replace_one(
         {"username": username},
         {
+            "userId": str(uid),
             "username": username,
-            "passwordHash": pw_hash,
-            "email": email,
-            "status": "Enabled",
-            "isAdmin": False,
-            "failedLoginAttempts": 0,
-            "lockoutEnd": None,
-            "emailVerified": True,
+            "r": r,
+            "algorithm": "SHA256",
+            "kdf": "PBKDF2-HMACSHA256",
+            "kdfIterations": iters,
+            "length": int(d.get("n", 1000)),
+            "v": base64.b64encode(x).decode("ascii"),
+            "k": k,
+            "generation": 1,
             "createdAt": datetime.now(timezone.utc),
         },
         upsert=True,
     )
-    return True, "直接建号（后端 SMTP 模式，日志无明文验证码）"
+    return True, "直接建号并补链（后端 SMTP 模式，日志无明文验证码）"
 
 
 # ---------------------------------------------------------------- 主流程
@@ -205,7 +249,7 @@ def main():
     db = mongo[DB_NAME]
 
     # 管理员登录，取服务端票据
-    st, r = call("/api/auth/login", {"username": ADMIN_USER, "password": ADMIN_PASS})
+    st, r = chain_login_post(call, ADMIN_USER, ADMIN_PASS)
     if not (st == 200 and r.get("success")):
         print(f"管理员登录失败（HTTP {st} {r.get('code')} {r.get('message')}）。"
               f"请确认 {ADMIN_USER} 存在且口令正确。")
@@ -215,6 +259,26 @@ def main():
         print("登录响应中未包含票据字段 ticket")
         sys.exit(2)
     print(f"管理员票据已获取：{ticket[:12]}…（长度 {len(ticket)}）")
+
+    # 准备一个 AuditAdmin：SoD 之后读审计是它的专属职责。
+    # （建号本身是敏感操作，要一次性确认票 —— P8 起没有"再输一次口令"的通道了。）
+    auditor, auditor_pw = "auditor_e2e", "AuditE2e123"
+    if not db["Users"].find_one({"username": auditor}):
+        tok = confirm_token(BASE, ticket, ADMIN_USER, ADMIN_PASS, "create-account", auditor)
+        st, r = call("/api/auth/create-account",
+                     {"username": auditor, "password": auditor_pw,
+                      "role": "AuditAdmin", "confirmToken": tok}, ticket=ticket)
+        if st != 200:
+            print(f"建审计管理员失败（HTTP {st} {r.get('code')} {r.get('message')}）")
+            sys.exit(2)
+    st, r = chain_login_post(call, auditor, auditor_pw)
+    audit_ticket = (r.get("data") or {}).get("ticket")
+    if not audit_ticket:
+        print(f"审计管理员登录失败（HTTP {st} {r.get('code')} {r.get('message')}）")
+        sys.exit(2)
+    _AUDIT_ROLES["admin"] = ticket
+    _AUDIT_ROLES["audit"] = audit_ticket
+    print(f"审计管理员就绪（读审计一律用它，Admin 无权读审计 —— SoD）")
 
     try:
         group_01_remember_all(ticket)
@@ -243,7 +307,7 @@ def group_01_remember_all(ticket):
     check("注册失败分支也被记录", st == 400, f"HTTP {st} {r.get('code')}")
 
     # 事件 B：失败登录（成功被拒的登入尝试）
-    st, r = call("/api/auth/login", {"username": user, "password": "TotallyWrong9"})
+    st, r = chain_login_post(call, user, "TotallyWrong9")
     check("登录失败被记录", st in (401, 403, 423), f"HTTP {st} {r.get('code')}")
 
     # 事件 C：无票据访问管理员接口（越权尝试）
@@ -337,7 +401,7 @@ def group_02_invisible(ticket, db):
             check("账号可登录（审核步骤按需跳过）", r.get("code") == "NOT_PENDING",
                   f"HTTP {st} {r.get('code')}（路径 B 已直接建为 Enabled）")
 
-        st, r = call("/api/auth/login", {"username": user, "password": pwd})
+        st, r = chain_login_post(call, user, pwd)
         user_ticket = (r.get("data") or {}).get("ticket")
         check("普通用户可正常登录并取得票据", st == 200 and bool(user_ticket),
               f"HTTP {st} {r.get('code')} {r.get('message')}")
@@ -594,6 +658,10 @@ def cleanup(db, keep):
     r = db["Users"].delete_many({"username": {"$regex": "^audituser"}})
     removed += r.deleted_count
     r = db["Users"].delete_many({"username": {"$regex": "^audit\\d"}})
+    r2 = db["Users"].delete_many({"username": "auditor_e2e"})
+    removed += r2.deleted_count
+    db["OtpChains"].delete_many({"username": {"$regex": "^audit"}})
+    db["OtpChains"].delete_many({"username": "auditor_e2e"})
     removed += r.deleted_count
     db["EmailCodes"].delete_many({"username": {"$regex": "^audit"}})
     db["Sessions"].delete_many({"username": {"$regex": "^audit"}})

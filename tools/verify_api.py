@@ -8,14 +8,18 @@ nohup 也拦不住（已被实测验证）。所以验证接口这类需要后�
 必须把"起服务 + 打接口 + 收尾"放在一个进程里完成，避免 TCP 拒绝连接。
 """
 import json
+import os
 import subprocess
 import socket
 import sys
 import time
 from pathlib import Path
+from _probe_common import chain_login_via
 
 ROOT = Path(__file__).resolve().parents[1]
-EXE = ROOT / "AuthServer" / "publish" / "AuthServer.exe"
+# 用 Debug 产物而不是 publish/：publish 只在打包时刷新，平时是旧的 ——
+# 本脚本要的是"验证当前代码"，指向 Debug 才不会拿着过期二进制得出过期结论。
+EXE = ROOT / "AuthServer" / "bin" / "Debug" / "net8.0" / "AuthServer.exe"
 PORT = 5210
 
 
@@ -74,9 +78,19 @@ def req(method, path, body=None, headers=None):
 
 def main():
     print("启动后端 %s" % EXE)
+    # ⚠️ 指到探针库：默认库名是真实库，诊断脚本不该碰它。
+    DB_NAME = "AuthBaselineVerifyApiProbe"
+    # 每次从全新库起步：上一次运行（可能是旧二进制）留下的账号/链形态不可信，
+    # 复用它会让本脚本在"陈旧数据"上得出结论。
+    try:
+        from pymongo import MongoClient
+        MongoClient("mongodb://localhost:27017", serverSelectionTimeoutMS=5000).drop_database(DB_NAME)
+    except Exception as e:
+        print("（无法清理旧探针库，继续：%s）" % e)
+    env = dict(os.environ, MongoDbSettings__DatabaseName=DB_NAME)
     proc = subprocess.Popen(
         [str(EXE), "--urls", f"http://127.0.0.1:{PORT}"],
-        cwd=str(EXE.parent),
+        cwd=str(EXE.parent), env=env,
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
     )
     try:
@@ -85,18 +99,57 @@ def main():
             return 1
         print("后端已就绪")
 
-        st, body = req("POST", "/api/auth/login", {"username": "admin", "password": "Admin123"})
+        # req() 返回原始文本，而 chain_login_via 期望"已解析的 dict"：
+        # 这里包一层适配（它内部要读 ch.get("data")，喂字符串会静默短路成"挑战失败"）。
+        def call(method, path, body=None):
+            headers = {"Content-Type": "application/json"} if body is not None else None
+            st_line, txt = req(method, path, body, headers=headers)
+            try:
+                code = int(st_line.split()[1]) if isinstance(st_line, str) else int(st_line)
+            except Exception:
+                code = 0
+            try:
+                parsed = json.loads(txt)
+            except Exception:
+                parsed = {"raw": txt}
+            return code, parsed if isinstance(parsed, dict) else {"raw": parsed}
+
+        st, body = chain_login_via(call, "admin", "Admin123")
         print("登录 ->", st)
-        j = json.loads(body)
+        j = body if isinstance(body, dict) else json.loads(body)
         d = j.get("data") or j.get("Data") or {}
         tok = d.get("ticket") or d.get("Ticket") or d.get("token") or d.get("Token")
         if not tok:
             print("未能取得票据，登录响应：", json.dumps(j, ensure_ascii=False)[:400])
             return 1
 
+        # SoD：读审计要 AuditAdmin。admin 建一个（要一次性确认票）、登它、用它的票校验。
+        from _probe_common import otp_code
+        st, r = req("POST", "/api/auth/login/challenge", {"username": "admin"})
+        ch = json.loads(r).get("data") or {}
+        code = otp_code("Admin123", ch["r"], ch["k"], ch["iterations"])
+        st, r = req("POST", "/api/auth/reconfirm",
+                    {"purpose": "create-account", "target": "verify_auditor", "otpCode": code},
+                    headers={"Authorization": "Bearer " + tok,
+                             "Content-Type": "application/json"})
+        tok2 = (json.loads(r).get("data") or {}).get("confirmToken")
+        st, r = req("POST", "/api/auth/create-account",
+                    {"username": "verify_auditor", "password": "Verify12345",
+                     "role": "AuditAdmin", "confirmToken": tok2},
+                    headers={"Authorization": "Bearer " + tok,
+                             "Content-Type": "application/json"})
+        print("建审计管理员 ->", st)
+        st, body = chain_login_via(call, "verify_auditor", "Verify12345")
+        j = body if isinstance(body, dict) else json.loads(body)
+        tok = (j.get("data") or {}).get("ticket")
+        if not tok:
+            print("审计管理员登录失败：", json.dumps(j, ensure_ascii=False)[:300])
+            return 1
+
         st2, body2 = req("GET", "/api/audit/verify", headers={"Authorization": "Bearer " + tok})
         print("完整性校验 ->", st2)
-        print(json.dumps(json.loads(body2), ensure_ascii=False, indent=2))
+        j2 = body2 if isinstance(body2, dict) else json.loads(body2)
+        print(json.dumps(j2, ensure_ascii=False, indent=2))
         return 0
     finally:
         proc.terminate()

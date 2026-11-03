@@ -40,13 +40,14 @@ import sys
 import time
 
 from _probe_common import (
+    chain_login_via,
     ProbeDb,
     http_call,
     resolve_probe_db,
     start_backend,
     stop_backend,
     wait_backend_ready,
-)
+    confirm_token_via,)
 
 EXE = sys.argv[1]
 PORT = int(sys.argv[2])
@@ -75,19 +76,36 @@ def call(method, path, body=None, ticket=None):
 
 
 def login(user, pw):
-    return call("POST", "/api/auth/login", {"username": user, "password": pw})
+    return chain_login_via(call, user, pw)
 
 
 def status(ticket):
     return call("GET", "/api/faceid/status", ticket=ticket)
 
 
-def enroll(ticket, pw):
-    return call("POST", "/api/faceid/enroll", {"password": pw}, ticket)
+def _confirm(user, pw, purpose, ticket):
+    """用口令换一张一次性确认票；`pw is None` 表示"这次故意不带票"。"""
+    if pw is None:
+        return None
+    return confirm_token_via(call, ticket, user, pw, purpose, user)
 
 
-def delete(ticket, pw):
-    return call("POST", "/api/faceid/delete", {"password": pw}, ticket)
+def enroll(ticket, pw, user=None):
+    """录入。`pw is None` ⇒ 不带确认票（测"缺票"那条路）。"""
+    body = {}
+    token = _confirm(user or USER, pw, "faceid-enroll", ticket)
+    if token:
+        body["confirmToken"] = token
+    return call("POST", "/api/faceid/enroll", body, ticket)
+
+
+def delete(ticket, pw, user=None):
+    """删除。令牌用途绑 `faceid-delete`，不能复用录入那张。"""
+    body = {}
+    token = _confirm(user or USER, pw, "faceid-delete", ticket)
+    if token:
+        body["confirmToken"] = token
+    return call("POST", "/api/faceid/delete", body, ticket)
 
 
 @contextlib.contextmanager
@@ -197,7 +215,8 @@ def main():
 
         st, r = call("POST", "/api/auth/create-account", {
             "username": USER, "password": USER_PW, "role": "User",
-            "email": "", "operatorPassword": ADMIN_PW}, admin_ticket)
+            "email": "", "confirmToken": confirm_token_via(call, admin_ticket, "admin", ADMIN_PW,
+                                             "create-account", USER)}, admin_ticket)
         check("建测试账号", st == 200 and r.get("code") == "OK", "%s %s" % (st, r.get("code")))
 
         st, r = status(None)
@@ -227,15 +246,22 @@ def main():
         ticket = (r.get("data") or {}).get("ticket", "")
         check("（准备）拿到票据", bool(ticket), "%s %s" % (st, r.get("code")))
 
-        st, r = enroll(ticket, "")
-        check("空口令 ⇒ 400 EMPTY_FIELDS", st == 400 and r.get("code") == "EMPTY_FIELDS",
-              "%s %s" % (st, r.get("code")))
+        # P8：这里不再收"再输一次口令"，收的是一张一次性确认票。
+        st, r = enroll(ticket, None)
+        check("无确认票 ⇒ 401 OTP_CONFIRM_REQUIRED",
+              st == 401 and r.get("code") == "OTP_CONFIRM_REQUIRED", "%s %s" % (st, r.get("code")))
 
+        # 口令错 ⇒ 换不到票 ⇒ 请求里没有票 ⇒ 与"无票"同码。
+        # 对界面来说两种情况是同一件事：重新确认一次身份。
         st, r = enroll(ticket, "WrongPass123")
-        check("错口令 ⇒ 401 INVALID_CREDENTIALS", st == 401 and r.get("code") == "INVALID_CREDENTIALS",
-              "%s %s" % (st, r.get("code")))
-        check("错口令按 A 组计次 = 1", (r.get("data") or {}).get("failedAttempts") == 1,
-              str(r.get("data")))
+        check("口令错 ⇒ 换不到票，与无票同码（OTP_CONFIRM_REQUIRED）",
+              st == 401 and r.get("code") == "OTP_CONFIRM_REQUIRED", "%s %s" % (st, r.get("code")))
+
+        # 关键口径：再认证失败**不进**登录失败计数（P5 定的），只走独立节流。
+        # 否则用户在这类"确认框"里手滑三次，主账号就被锁了。
+        u_doc = probe_db["Users"].find_one({"username": USER}) or {}
+        check("再认证失败不进登录失败计数", (u_doc.get("failedLoginAttempts") or 0) == 0,
+              "failedLoginAttempts=%s" % u_doc.get("failedLoginAttempts"))
 
         st, r = enroll(ticket, USER_PW)
         d = r.get("data") or {}
@@ -396,15 +422,16 @@ def main():
         st, r = login(USER, USER_PW)
         ticket = (r.get("data") or {}).get("ticket", "")
 
-        st, r = delete(ticket, "")
-        check("空口令 ⇒ 400 EMPTY_FIELDS", st == 400 and r.get("code") == "EMPTY_FIELDS",
-              "%s %s" % (st, r.get("code")))
+        st, r = delete(ticket, None)
+        check("无确认票 ⇒ 401 OTP_CONFIRM_REQUIRED",
+              st == 401 and r.get("code") == "OTP_CONFIRM_REQUIRED", "%s %s" % (st, r.get("code")))
 
-        st, r = delete(ticket, "WrongPass123")
-        check("错口令 ⇒ 401 INVALID_CREDENTIALS 且计次",
-              st == 401 and r.get("code") == "INVALID_CREDENTIALS"
-              and (r.get("data") or {}).get("failedAttempts") == 1,
-              "%s %s %s" % (st, r.get("code"), r.get("data")))
+        # 用途绑定：拿**录入**用途的票去删，必须被拒。
+        # 否则"确认过录入"就等于"确认过删除"，而删除是不可逆的。
+        st, r = call("POST", "/api/faceid/delete",
+                     {"confirmToken": _confirm(USER, USER_PW, "faceid-enroll", ticket)}, ticket)
+        check("用途不符的票被拒（录入票不能拿来删）⇒ 401 OTP_CONFIRM_REQUIRED",
+              st == 401 and r.get("code") == "OTP_CONFIRM_REQUIRED", "%s %s" % (st, r.get("code")))
 
         before = len(templates())
         st, r = delete(ticket, USER_PW)
@@ -430,12 +457,13 @@ def main():
 
         st, r = call("POST", "/api/auth/create-account", {
             "username": DROP_USER, "password": DROP_PW, "role": "User",
-            "email": "", "operatorPassword": ADMIN_PW}, admin_ticket)
+            "email": "", "confirmToken": confirm_token_via(call, admin_ticket, "admin", ADMIN_PW,
+                                             "create-account", DROP_USER)}, admin_ticket)
         check("建待注销账号", st == 200 and r.get("code") == "OK", "%s %s" % (st, r.get("code")))
 
         st, r = login(DROP_USER, DROP_PW)
         drop_ticket = (r.get("data") or {}).get("ticket", "")
-        st, r = enroll(drop_ticket, DROP_PW)
+        st, r = enroll(drop_ticket, DROP_PW, DROP_USER)
         check("待注销账号录入人脸", st == 200 and len(templates(DROP_USER)) == 1,
               "%s %s" % (st, r.get("code")))
 
@@ -455,13 +483,14 @@ def main():
         admin_ticket = (r.get("data") or {}).get("ticket", "")
         st, r = call("POST", "/api/auth/create-account", {
             "username": PAD_USER, "password": PAD_PW, "role": "User",
-            "email": "", "operatorPassword": ADMIN_PW}, admin_ticket)
+            "email": "", "confirmToken": confirm_token_via(call, admin_ticket, "admin", ADMIN_PW,
+                                             "create-account", PAD_USER)}, admin_ticket)
         check("建活体测试账号", st == 200 and r.get("code") == "OK", "%s %s" % (st, r.get("code")))
 
         st, r = login(PAD_USER, PAD_PW)
         pad_ticket = (r.get("data") or {}).get("ticket", "")
 
-        st, r = enroll(pad_ticket, PAD_PW)
+        st, r = enroll(pad_ticket, PAD_PW, PAD_USER)
         check("★ spoof（举照片）⇒ 400 FACEID_LIVENESS_FAILED",
               st == 400 and r.get("code") == "FACEID_LIVENESS_FAILED",
               "%s %s" % (st, r.get("code")))
@@ -481,7 +510,7 @@ def main():
         st, r = login(PAD_USER, PAD_PW)
         pad_ticket = (r.get("data") or {}).get("ticket", "")
         before = len(templates(PAD_USER))
-        st, r = enroll(pad_ticket, PAD_PW)
+        st, r = enroll(pad_ticket, PAD_PW, PAD_USER)
         check("★ 活体模型不可用 ⇒ 503（fail closed，绝不放行）",
               st == 503 and r.get("code") == "FACEID_ENGINE_UNAVAILABLE",
               "%s %s" % (st, r.get("code")))
@@ -491,7 +520,7 @@ def main():
     with backend("ok", "i_pad_off", {"AUTHBASELINE_FACEID_PAD_ENABLED": "false"}):
         st, r = login(PAD_USER, PAD_PW)
         pad_ticket = (r.get("data") or {}).get("ticket", "")
-        st, r = enroll(pad_ticket, PAD_PW)
+        st, r = enroll(pad_ticket, PAD_PW, PAD_USER)
         check("对照组：关掉活体后能录入（证明拒绝来自 PAD 而不是别的原因）",
               st == 200 and len(templates(PAD_USER)) == 1,
               "%s %s" % (st, r.get("code")))
@@ -508,7 +537,8 @@ def main():
         admin_ticket = (r.get("data") or {}).get("ticket", "")
         st, r = call("POST", "/api/auth/create-account", {
             "username": LOGIN_USER, "password": LOGIN_PW, "role": "User",
-            "email": "", "operatorPassword": ADMIN_PW}, admin_ticket)
+            "email": "", "confirmToken": confirm_token_via(call, admin_ticket, "admin", ADMIN_PW,
+                                             "create-account", LOGIN_USER)}, admin_ticket)
         check("建「未录入」账号（用于对照）", st == 200 and r.get("code") == "OK",
               "%s %s" % (st, r.get("code")))
 
@@ -576,13 +606,14 @@ def main():
         admin_ticket = (r.get("data") or {}).get("ticket", "")
         st, r = call("POST", "/api/auth/create-account", {
             "username": AND_USER, "password": AND_PW, "role": "User",
-            "email": "", "operatorPassword": ADMIN_PW}, admin_ticket)
+            "email": "", "confirmToken": confirm_token_via(call, admin_ticket, "admin", ADMIN_PW,
+                                             "create-account", AND_USER)}, admin_ticket)
         check("建 AND 专用账号", st == 200 and r.get("code") == "OK", "%s %s" % (st, r.get("code")))
 
         st, r = login(AND_USER, AND_PW)
         ticket = (r.get("data") or {}).get("ticket", "")
         check("（准备）AND 账号口令登录", st == 200 and bool(ticket), "%s %s" % (st, r.get("code")))
-        st, r = enroll(ticket, AND_PW)
+        st, r = enroll(ticket, AND_PW, AND_USER)
         check("（准备）录入一对向量", st == 200 and r.get("code") == "OK", "%s %s" % (st, r.get("code")))
         check("★ 库里是双向量（cipher2 = 512 字节）",
               len(templates(AND_USER)) == 1

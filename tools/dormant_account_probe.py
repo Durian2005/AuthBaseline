@@ -34,13 +34,14 @@ from datetime import datetime, timedelta, timezone
 #      · 测试库起步时后端会自动播种 admin，A 段回填、C/D 段冻结解冻全流程都能验证；
 #      · 真实库上"验证回填"这件事本身没有额外价值 —— 回填逻辑与库名无关。
 from _probe_common import (
+    chain_login_via,
     ProbeDb,
     resolve_probe_db,
     start_backend,
     stop_backend,
     wait_backend_ready,
     http_call,
-)
+    confirm_token_via,)
 
 EXE = sys.argv[1]
 PORT = int(sys.argv[2])
@@ -118,7 +119,7 @@ if not wait_backend_ready(BASE, proc, timeout_s=25, path="/api/auth/transport"):
 print("   后端就绪：True")
 
 # ---------- 登录 admin 取票据（放在 A 段之前：回填场景需要它的登录审计） ----------
-st, login = call("POST", "/api/auth/login", {"username": ADMIN_USER, "password": ADMIN_PASS})
+st, login = chain_login_via(call, ADMIN_USER, ADMIN_PASS)
 ticket = (login.get("data") or {}).get("ticket", "")
 check("admin 登录成功（既有功能未受影响）", st == 200 and ticket != "", "status=%d" % st)
 if not ticket:
@@ -148,7 +149,7 @@ if not wait_backend_ready(BASE, proc, timeout_s=25, path="/api/auth/transport"):
     stop_backend(proc)
     print("   重启后未就绪，退出")
     sys.exit(2)
-call("POST", "/api/auth/login", {"username": ADMIN_USER, "password": ADMIN_PASS})
+chain_login_via(call, ADMIN_USER, ADMIN_PASS)
 
 admin_doc = db["Users"].find_one({"username": ADMIN_USER})
 check("重启后 admin 的 lastLoginAt 被回填（不是 null）",
@@ -187,8 +188,10 @@ check("该接口**不写审计**（只读派生视图，避免刷屏）", len(ne
 print("\n[3] 建一次性测试账号 %s" % TEST_USER)
 db["Users"].delete_many({"username": TEST_USER})
 st, reg = call("POST", "/api/auth/create-account",
-               {"username": TEST_USER, "password": TEST_PASS,
-                "role": "UserAdmin", "operatorPassword": ADMIN_PASS}, ticket=ticket)
+               {"username": TEST_USER, "password": TEST_PASS, "role": "UserAdmin",
+                "confirmToken": confirm_token_via(call, ticket, "admin", ADMIN_PASS,
+                                                  "create-account", TEST_USER)},
+               ticket=ticket)
 check("建号接口成功（既有功能未受影响）", st == 200 and reg.get("success") is True,
       "status=%d code=%s" % (st, reg.get("code")))
 
@@ -212,7 +215,7 @@ check("候选里带 dormantDays 且 >= 200", probe_row is not None and probe_row
 check("候选带 lastLoginAt", probe_row is not None and probe_row.get("lastLoginAt") is not None)
 
 # 冻结前先确认：未冻结时用正确口令能登录（证明"拒绝"来自冻结而非口令错）
-st, r = call("POST", "/api/auth/login", {"username": TEST_USER, "password": TEST_PASS})
+st, r = chain_login_via(call, TEST_USER, TEST_PASS)
 check("冻结前正确口令可登录（对照组）", st == 200, "status=%d code=%s" % (st, r.get("code")))
 
 # ---------- C. 冻结 ----------
@@ -232,9 +235,11 @@ check("拒绝冻结管理账号（DORMANT_PROTECTED_ROLE）",
 SELF_USER = "zz_self_probe"
 db["Users"].delete_many({"username": SELF_USER})
 call("POST", "/api/auth/create-account",
-     {"username": SELF_USER, "password": TEST_PASS,
-      "role": "UserAdmin", "operatorPassword": ADMIN_PASS}, ticket=ticket)
-st, self_login = call("POST", "/api/auth/login", {"username": SELF_USER, "password": TEST_PASS})
+     {"username": SELF_USER, "password": TEST_PASS, "role": "UserAdmin",
+      "confirmToken": confirm_token_via(call, ticket, "admin", ADMIN_PASS,
+                                        "create-account", SELF_USER)},
+     ticket=ticket)
+st, self_login = chain_login_via(call, SELF_USER, TEST_PASS)
 self_ticket = (self_login.get("data") or {}).get("ticket", "")
 check("自我豁免样本已登录（UserAdmin，拿到自己的票据）", self_ticket != "", "status=%d" % st)
 st, r = call("POST", "/api/auth/freeze-user", {"username": SELF_USER}, ticket=self_ticket)
@@ -265,7 +270,7 @@ check("被拒的冻结尝试也留痕（失败事件不静默）", len(fz_all) >
       "失败 %d 条" % (len(fz_all) - len(fz)))
 
 # C4 冻结后不能登录
-st, r = call("POST", "/api/auth/login", {"username": TEST_USER, "password": TEST_PASS})
+st, r = chain_login_via(call, TEST_USER, TEST_PASS)
 check("冻结后登录被拒（ACCOUNT_DISABLED）",
       st == 401 and r.get("code") == "ACCOUNT_DISABLED", "code=%s" % r.get("code"))
 
@@ -295,7 +300,7 @@ ul = audit_after(mark, action="UNLOCK", target=TEST_USER)
 check("解冻走的是 DORMANT_RESTORE 而非 UNLOCK", len(ul) == 0, "%d 条 UNLOCK" % len(ul))
 
 # 解冻后用正确口令重新登录 —— 这才是"恢复可登录"的完整证明
-st, r = call("POST", "/api/auth/login", {"username": TEST_USER, "password": TEST_PASS})
+st, r = chain_login_via(call, TEST_USER, TEST_PASS)
 check("解冻后正确口令可登录（恢复完成）", st == 200, "status=%d code=%s" % (st, r.get("code")))
 
 # ---------- 既有功能未受影响 ----------

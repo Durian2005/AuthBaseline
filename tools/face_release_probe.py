@@ -48,7 +48,7 @@ sys.path.insert(0, TOOLS_DIR)
 from _probe_common import (  # noqa: E402
     ProbeDb, http_call, resolve_probe_db, start_backend, stop_backend,
     wait_backend_ready,
-)
+    otp_login,)
 
 MIRROR = os.path.join(ROOT, ".workbuddy", "tmp", "install_mirror")
 # 实际被校验的目录（镜像 或 真实装机目录），由 main() 决定
@@ -176,8 +176,7 @@ def step1_real_engine(port, db_name):
             return
         ok("目标 exe（authserver.exe 与 face-models 同级）能启动并就绪")
 
-        st, r = http_call(base, "POST", "/api/auth/login",
-                          body={"username": "admin", "password": "Admin123"})
+        st, r = otp_login(base, "admin", "Admin123")
         ticket = (r.get("data") or {}).get("ticket")
         if not ticket:
             bad("admin 登录未拿到票据（st=%s code=%s）" % (st, r.get("code")))

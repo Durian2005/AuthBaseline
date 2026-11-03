@@ -38,6 +38,7 @@ from bson import ObjectId
 # 改造前用 `next((a for a in sys.argv[3:] if not a.startswith("--")), ...)`
 # —— 扫描式解析最危险：任何非 -- 前缀的参数都会被当成库名喂给 drop_database()。
 from _probe_common import (
+    chain_login_via,
     ProbeDb,
     resolve_probe_db,
     start_backend as _common_start_backend,
@@ -94,7 +95,7 @@ def shards():
 
 
 def login(username, password):
-    st, b = call("POST", "/api/auth/login", {"username": username, "password": password})
+    st, b = chain_login_via(call, username, password)
     return st, b, (b.get("data") or {}).get("ticket")
 
 

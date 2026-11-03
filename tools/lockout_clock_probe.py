@@ -71,6 +71,8 @@ from datetime import datetime, timedelta, timezone
 # 改造前的 `sys.argv[3] if ...` 无白名单校验 —— 传参错位就会把真实库名喂给
 # drop_database()（10-05 事故形态）。现在统一走 resolve_probe_db()。
 from _probe_common import (
+    confirm_token_via,
+    chain_login_via,
     ProbeDb,
     resolve_probe_db,
     start_backend as _common_start_backend,
@@ -137,11 +139,11 @@ def call(method, path, body=None, ticket=None, timeout=60):
 
 
 def login(password, username=VICTIM):
-    return call("POST", "/api/auth/login", {"username": username, "password": password})
+    return chain_login_via(call, username, password)
 
 
 def admin_login():
-    st, b = call("POST", "/api/auth/login", {"username": "admin", "password": ADMIN_PW})
+    st, b = chain_login_via(call, "admin", ADMIN_PW)
     return (b.get("data") or {}).get("ticket")
 
 
@@ -268,9 +270,13 @@ if not admin_tk:
     _proc.kill()
     sys.exit(2)
 
+# P8：建号必须带一次性确认凭据（绑 create-account + 目标用户名），
+# 操作者口令只在本机参与派生，不再上传。
 st, b = call("POST", "/api/auth/create-account",
              {"username": VICTIM, "password": VICTIM_PW, "role": VICTIM_ROLE,
-              "operatorPassword": ADMIN_PW}, ticket=admin_tk)
+              "confirmToken": confirm_token_via(call, admin_tk, "admin", ADMIN_PW,
+                                                "create-account", VICTIM)},
+             ticket=admin_tk)
 print("  创建靶子账号 %s（%s）-> HTTP %s / %s" % (VICTIM, VICTIM_ROLE, st, b.get("code")))
 if st != 200:
     print("  !! 建号失败，中止")
@@ -380,7 +386,7 @@ check("审计时间戳与本机真实 UTC 一致（偏差 < 10 秒）→ 无独�
 print("\n[8] 加固：把判定所见的墙钟**前拨 10 分钟**，看锁能不能被提前解开")
 print("    先以墙钟正常重启，重新把靶子账号锁上（锚点由此记录）")
 _, admin_tk = restart(None)
-call("POST", "/api/auth/unlock", {"username": VICTIM, "operatorPassword": ADMIN_PW}, ticket=admin_tk)
+call("POST", "/api/auth/unlock", {"username": VICTIM}, ticket=admin_tk)
 wrong_three_times()
 u0 = user_doc()
 end0 = naive(u0.get("lockoutEnd"))
@@ -426,7 +432,7 @@ check("同一轮锁定内时钟异常只留一条记录（靠 lockoutDriftLogged
 # ---------- 10. 回拨 1 小时 ----------
 print("\n[10] 加固：把判定所见的墙钟**回拨 1 小时**，看会不会把锁拖成一小时")
 _, admin_tk = restart(None)
-call("POST", "/api/auth/unlock", {"username": VICTIM, "operatorPassword": ADMIN_PW}, ticket=admin_tk)
+call("POST", "/api/auth/unlock", {"username": VICTIM}, ticket=admin_tk)
 wrong_three_times()
 u1 = user_doc()
 end1 = naive(u1.get("lockoutEnd"))
@@ -478,7 +484,7 @@ check("锁定同时把窗口锚点也钉下来（failedWindowWallAt / failedWind
 # ---------- 13. 窗口过期 ⇒ 计数归零、不再锁定 ----------
 print("\n[13] 窗口：错 2 次后把窗口锚点搬到 4 分钟前（等价于「3 分钟已经真实过去」），再错 1 次")
 _, admin_tk = restart(None)
-call("POST", "/api/auth/unlock", {"username": VICTIM, "operatorPassword": ADMIN_PW}, ticket=admin_tk)
+call("POST", "/api/auth/unlock", {"username": VICTIM}, ticket=admin_tk)
 
 st1, _ = login("definitelyWrong9")            # 窗口内第 1 次
 st2, b2 = login("definitelyWrong9")           # 窗口内第 2 次
@@ -537,7 +543,7 @@ _, admin_tk = restart(None)
 u = user_doc()
 check("锁定期内窗口锚点仍在（这一轮锁定正是由它累计出来的）",
       u.get("failedWindowWallAt") is not None, "failedWindowWallAt=%s" % u.get("failedWindowWallAt"))
-call("POST", "/api/auth/unlock", {"username": VICTIM, "operatorPassword": ADMIN_PW}, ticket=admin_tk)
+call("POST", "/api/auth/unlock", {"username": VICTIM}, ticket=admin_tk)
 u = user_doc()
 check("管理员解锁后失败计数归零", (u.get("failedLoginAttempts") or 0) == 0,
       "failedLoginAttempts=%s" % u.get("failedLoginAttempts"))

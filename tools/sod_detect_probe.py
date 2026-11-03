@@ -35,8 +35,10 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 os.environ.setdefault("AUTHBASELINE_REQUIRE_HTTPS", "false")
 
 from _probe_common import (  # noqa: E402
+    chain_login_via,
     ProbeDb, http_call, mongo_client, resolve_probe_db, start_backend,
-)
+    confirm_token_via,
+    otp_code,)
 import sod_trace  # noqa: E402  独立复算：同一套规则的另一份实现
 
 EXE = sys.argv[1]
@@ -72,7 +74,7 @@ def call(method, path, body=None, ticket=None, timeout=90):
 
 
 def login(username, password):
-    st, b = call("POST", "/api/auth/login", {"username": username, "password": password})
+    st, b = chain_login_via(call, username, password)
     data = b.get("data") or {}
     return st, data.get("ticket"), data
 
@@ -116,9 +118,12 @@ st, admin_tk, admin_info = login("admin", "Admin123")
 check("admin 登录成功", st == 200 and bool(admin_tk), "HTTP %s" % st)
 
 for name, pwd in ((PUPPET, PWD1), (NEVER, "Never1234")):
+    # P8：建号须带一次性确认凭据（绑 create-account + 目标用户名）
     st, b = call("POST", "/api/auth/create-account",
                  {"username": name, "password": pwd, "role": "AuditAdmin",
-                  "operatorPassword": "Admin123"}, ticket=admin_tk)
+                  "confirmToken": confirm_token_via(call, admin_tk, "admin", "Admin123",
+                                                    "create-account", name)},
+                 ticket=admin_tk)
     check("创建审计管理员 %s → 成功" % name, st == 200, "HTTP %s / %s" % (st, b.get("code")))
     check("  %s 角色 = AuditAdmin" % name, (b.get("data") or {}).get("role") == "AuditAdmin")
 
@@ -195,9 +200,20 @@ check("  拒绝记录指向 admin", bool(denied) and denied[-1].get("operatorNam
 
 # ---------- [7] 傀儡自助改密（封口） ----------
 print("\n[7] %s 自助改密 → 链应封口" % PUPPET)
-st, b = call("POST", "/api/auth/change-password",
-             {"username": PUPPET, "oldPassword": PWD1, "newPassword": PWD2},
-             ticket=puppet_tk)
+# P8：改密的旧凭据是**链值**（口令只在本机参与派生）。本端点匿名，
+# 所以这里不需要票据 —— 保留 ticket= 只是不改变调用形状。
+def _change(username, old_pw, new_pw):
+    _, ch = call("POST", "/api/auth/login/challenge", {"username": username})
+    d = ch.get("data") or {}
+    return call("POST", "/api/auth/change-password",
+                {"username": username,
+                 "oldOtpCode": otp_code(old_pw, d.get("r", ""), d.get("k", 0),
+                                        d.get("iterations", 1)),
+                 "oldChallengeToken": d.get("challengeToken"),
+                 "newPassword": new_pw})
+
+
+st, b = _change(PUPPET, PWD1, PWD2)
 check("自助改密成功", st == 200, "HTTP %s / %s" % (st, b.get("code")))
 
 st, _ = call("GET", "/api/audit/logs", ticket=puppet_tk)

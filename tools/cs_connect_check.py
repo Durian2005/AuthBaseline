@@ -5,6 +5,7 @@
 端口可省略，脚本会自动从 authserver.exe 进程反查。
 """
 import json, subprocess, sys, urllib.request, urllib.error, re
+from _probe_common import otp_login
 
 
 def find_port():
@@ -67,7 +68,7 @@ st, _ = call(BASE, "GET", "/", raw=True)
 print(f"   GET /  → HTTP {st}   {'✅ 服务在监听且能响应' if st == 200 else '❌'}")
 
 print("\n[第2层] 后端 ↔ MongoDB（服务端的数据通道）")
-st, body = call(BASE, "POST", "/api/auth/login", {"username": "admin", "password": "Admin123"})
+st, body = otp_login(BASE, "admin", "Admin123")
 print(f"   POST /api/auth/login  → HTTP {st}")
 tk = None
 if st == 200 and body.get("data"):

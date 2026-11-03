@@ -32,7 +32,7 @@ import pymongo
 # 真实库门禁：`restore` 子命令会**直接改写审计记录**（把 action/target 改回原值）。
 # 它天然是为真实库设计的（配合 Compass 做"改不掉"演示），所以用门禁而不是探针守卫：
 # 默认拒绝，需要显式确认。show / verify / watch 三个只读子命令不受影响。
-from _probe_common import require_real_db_optin
+from _probe_common import chain_login_via, require_real_db_optin
 
 ROOT = Path(__file__).resolve().parents[1]
 EXE = ROOT / "AuthServer" / "publish" / "AuthServer.exe"
@@ -133,7 +133,7 @@ def cmd_verify():
                 payload = out
             return json.loads(payload)
 
-        j = req("POST", "/api/auth/login", {"username": VERIFY_USER, "password": VERIFY_PASS})
+        j = chain_login_via(req, VERIFY_USER, VERIFY_PASS)
         if not j.get("success"):
             print("登录失败（HTTP body: %s）—— 无法校验链" % j.get("code"))
             return 2
