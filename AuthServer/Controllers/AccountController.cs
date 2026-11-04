@@ -706,6 +706,26 @@ public class AccountController : AuthControllerBase
         {
             var chain = await _chains.RebuildAsync(user.Id, user.Username, newPassword);
 
+            // ── 链就是口令本身，旧的口令派生物必须同时消失 ──
+            // P8 的口径是「服务端不存任何口令派生物」，但重建链原本只换了 OtpChains，
+            // `Users.PasswordHash` 会一直留着**改密 / 重置之前**那个口令的 BCrypt 哈希。
+            // 旧口令登不进来（口令路径已删），可它仍是可离线爆破的验证材料，
+            // 而且会让下一次 `--rechain` 的「旧口令校验」通过的是**重置前**的口令。
+            //
+            // 先改内存副本再 Unset：调用方随后可能整篇 ReplaceOneAsync（reset-password 就是这样），
+            // 只清库会被内存里的旧值写回来。
+            user.PasswordHash = null;
+            try
+            {
+                await _db.Users.UpdateOneAsync(Builders<User>.Filter.Eq(u => u.Id, user.Id),
+                    Builders<User>.Update.Unset(u => u.PasswordHash));
+            }
+            catch (Exception ex)
+            {
+                // 链已经换好了，清理失败不该把这次重建判成失败（残留一条旧哈希而已）。
+                Console.WriteLine($"[Otp] 账号「{user.Username}」旧口令哈希清理失败（不影响重建结果）: {ex.Message}");
+            }
+
             // 审计里**绝不含口令、绝不含链值**：只记这条新链的公开参数与"由谁触发"。
             // Trigger 必须记 —— 同一个动作码要能回答"这次换链是改密、是重置、还是人工恢复"。
             await _auditWriter.WriteAsync(user.Id, user.Username, AuditAction.OtpRebuilt, statusBefore,
