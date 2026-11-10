@@ -197,6 +197,27 @@
 
 ---
 
+## K. 挑战签名（防小数攻击，2026-11-10）
+
+验收方式：`tools/otp_challenge_proof_probe.py`（10 项，端到端跑真实后端）
++ xUnit `OtpChallengeKeyTests`（8 项）+ Rust `otp::tests` 的 3 条签名用例。
+两侧断言的**是同一组固定向量**（期望值由 Python 独立算出），因此"跨实现一致"是被钉住的，不是推测。
+
+| # | 断言 | 结果 | 证据 |
+|---|---|---|---|
+| OTP-55 挑战带签名 | ✅ 自动 | `login/challenge` 返回 `proof`；probe A1 |
+| OTP-56 跨实现一致 | ✅ 自动 | probe A2（Python 用同一份 DPAPI 密钥复算，与服务端逐字相同）；同一向量在 C# 与 Rust 各断言一次 |
+| OTP-57 篡改 `k` 即失效 | ✅ 自动 | probe A3；Rust `tampered_k_breaks_signature` |
+| OTP-58 篡改 `R` / `N` / 用户名即失效 | ✅ 自动 | probe A4/A5；xUnit `Sign_CoversEverySignedField` |
+| OTP-59 假参数同样签名 | ✅ 自动 | probe B1/B2（字段集合与真账号一致；假 proof 也能被同一密钥验过） |
+| OTP-60 客户端验签失败拒绝计算 | ✅ 代码路径 | `src/api/otp.js` 在 `compute` 前调用 `otp_verify_challenge`，不通过抛 `OTP_CHALLENGE_FORGED` 且**不进入** `otp_compute`；判定函数由 Rust 单测覆盖 |
+| OTP-61 正常登录不受影响 | ✅ 自动 | probe C1/C2（200 + 票据，`k` 减 1） |
+
+**边界**（设计稿 §15.5）：TLS 开启时这是纵深防御而非补漏洞；该密钥是本机配对密钥、
+不是用户的秘密；同一用户的进程仍可解开 DPAPI —— 不在本机制能解决的范围内。
+
+---
+
 ## 失败处理
 
 任一项不通过时：先判定是**设计缺陷**还是**实现缺陷**，记入待办，不要绕过。涉及链状态一致性的项（OTP-08 / 10 / 11 / 13）一旦失败，视为发布阻断项。
