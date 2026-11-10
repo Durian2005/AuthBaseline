@@ -10,6 +10,7 @@
     "core:default",
     "shell:default",
     "allow-get-backend-url",
-    "allow-otp-compute"
+    "allow-otp-compute",
+    "allow-otp-verify-challenge"
   ]
 }

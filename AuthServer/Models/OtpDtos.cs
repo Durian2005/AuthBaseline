@@ -31,6 +31,18 @@ public class OtpChallengeResponse
     /// <summary>一次性挑战凭据，登录时必须原样带回。</summary>
     public string ChallengeToken { get; set; } = string.Empty;
 
+    /// <summary>
+    /// 挑战签名：<c>HMAC-SHA256(本机配对密钥, hex(SHA256(username)) | R | K | N)</c>，Base64Url。
+    ///
+    /// 客户端**必须**在计算 <c>x_k</c> 之前验证它，验不过就拒算。它防的是「小数攻击」：
+    /// 中间人把 <c>k</c> 改小后转发，客户端若照算就会交出一个更靠前的格，
+    /// 攻击者正向哈希补齐即可冒充登录，并顺带拿走后续若干格。
+    ///
+    /// 服务端对这种提交**无从分辨**（收到的就是真正的 <c>x_k</c>，<c>H(x_k)==v</c> 成立），
+    /// 所以验签只能发生在客户端 —— 这也是本字段存在的唯一理由。
+    /// </summary>
+    public string Proof { get; set; } = string.Empty;
+
     /// <summary>公开链种子（Base32）。不是秘密，作用是让两条链即便口令相同也互不相干。</summary>
     public string R { get; set; } = string.Empty;
 

@@ -162,8 +162,12 @@ def run(probe_db):
     st, b = http_call(BASE, "POST", "/api/auth/login/challenge", {"username": USERNAME})
     fake = b.get("data") or {}
     fake_keys = sorted(fake.keys())
+    # 精确集合比对而不是数个数：将来加字段时这里会显式失败 ——
+    # 那正是"真假账号同形"这条论证需要被重新确认的时刻。
+    expected_fields = {"challengeToken", "proof", "r", "k", "n",
+                       "algorithm", "kdf", "iterations", "expiresInSeconds"}
     check("B1 无链账号也返回 200 + 完整参数（不暴露'没有链'）",
-          st == 200 and b.get("success") is True and len(fake_keys) == 8,
+          st == 200 and b.get("success") is True and set(fake_keys) == expected_fields,
           "HTTP %s / %s" % (st, b.get("code")))
     check("B2 假 R 是 32 字符 Base32、N/迭代次数取配置值",
           len(fake.get("r", "")) == 32 and fake.get("n") == CHAIN_N

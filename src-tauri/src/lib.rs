@@ -130,7 +130,13 @@ pub fn run() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
-        .invoke_handler(tauri::generate_handler![get_backend_url, otp::otp_compute])
+        .invoke_handler(tauri::generate_handler![
+            get_backend_url,
+            otp::otp_compute,
+            // 挑战验签：防小数攻击。必须与 otp_compute 一样在 ACL 里点名，
+            // 否则报 "not allowed. Plugin not found"（见 build.rs 的说明）。
+            otp::otp_verify_challenge,
+        ])
         .setup(|app| {
             let port = pick_free_port().ok_or_else(|| {
                 std::io::Error::new(

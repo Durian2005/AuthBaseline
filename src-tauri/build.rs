@@ -19,7 +19,7 @@ fn main() {
         tauri_build::Attributes::new().app_manifest(
             tauri_build::AppManifest::new()
                 // 每加一个 `#[tauri::command]` 就往这里补一个名字（snake_case，与函数名一致）
-                .commands(&["get_backend_url", "otp_compute"]),
+                .commands(&["get_backend_url", "otp_compute", "otp_verify_challenge"]),
         ),
     )
     .expect("tauri-build 失败");

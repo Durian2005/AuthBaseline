@@ -17,15 +17,21 @@ namespace AuthServer.Tests;
 /// </summary>
 public class OtpChallengeStoreTests
 {
+    /// <summary>固定密钥：不碰 DPAPI、不落盘，用例结果因此与运行环境无关。</summary>
+    private static readonly OtpChallengeKey Signer = new(new byte[32]);
+
+    /// <summary>签发用的固定参数。本文件只关心 token 的一次性 / TTL / 归属，不关心 proof 内容。</summary>
+    private const string Seed = "JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP";
+
     private static OtpChallengeStore Store(int ttlSeconds = 120) =>
-        new(new OtpOptions { ChallengeTtlSeconds = ttlSeconds });
+        new(new OtpOptions { ChallengeTtlSeconds = ttlSeconds }, Signer);
 
     /// <summary>签发 → 消费：拿回签发时绑定的用户名，且不报错。</summary>
     [Fact(DisplayName = "签发后消费一次：返回绑定的用户名")]
     public void IssueThenConsume_ReturnsBoundUsername()
     {
         var store = Store();
-        var (token, ttl) = store.Issue("alice");
+        var (token, _, ttl) = store.Issue("alice", Seed, 3, 5);
 
         Assert.Equal(120, ttl);
         Assert.False(string.IsNullOrWhiteSpace(token));
@@ -41,7 +47,7 @@ public class OtpChallengeStoreTests
     public void Consume_Twice_SecondFails()
     {
         var store = Store();
-        var (token, _) = store.Issue("alice");
+        var (token, _, _) = store.Issue("alice", Seed, 3, 5);
 
         Assert.Null(store.Consume(token).Error);
         var second = store.Consume(token);
@@ -55,7 +61,7 @@ public class OtpChallengeStoreTests
     public void Consume_RemovesRecord()
     {
         var store = Store();
-        var (token, _) = store.Issue("alice");
+        var (token, _, _) = store.Issue("alice", Seed, 3, 5);
         Assert.Equal(1, store.PendingCount);
 
         store.Consume(token);
@@ -63,7 +69,7 @@ public class OtpChallengeStoreTests
 
         // 过期的那次消费同样要把它从字典里摘掉，不能留给 Prune 之外的路径。
         var expired = Store(ttlSeconds: 0);
-        var (token2, _) = expired.Issue("bob");
+        var (token2, _, _) = expired.Issue("bob", Seed, 3, 5);
         Assert.Equal(OtpChallengeError.Invalid, expired.Consume(token2).Error);
         Assert.Equal(0, expired.PendingCount);
     }
@@ -73,7 +79,7 @@ public class OtpChallengeStoreTests
     public void Consume_AfterTtl_Fails()
     {
         var store = Store(ttlSeconds: 0);
-        var (token, _) = store.Issue("alice");
+        var (token, _, _) = store.Issue("alice", Seed, 3, 5);
 
         var (username, error) = store.Consume(token);
 
@@ -101,8 +107,8 @@ public class OtpChallengeStoreTests
     public void Issue_TwoUsers_AreIndependent()
     {
         var store = Store();
-        var a = store.Issue("alice").Token;
-        var b = store.Issue("bob").Token;
+        var a = store.Issue("alice", Seed, 3, 5).Token;
+        var b = store.Issue("bob", Seed, 3, 5).Token;
 
         Assert.Equal("bob", store.Consume(b).Username);
         Assert.Equal("alice", store.Consume(a).Username);
@@ -113,7 +119,7 @@ public class OtpChallengeStoreTests
     public void Consume_TrimsWhitespace()
     {
         var store = Store();
-        var (token, _) = store.Issue("alice");
+        var (token, _, _) = store.Issue("alice", Seed, 3, 5);
 
         Assert.Equal("alice", store.Consume("  " + token + "  ").Username);
     }
@@ -128,7 +134,7 @@ public class OtpChallengeStoreTests
         var store = Store();
 
         for (var i = 0; i < 1200; i++)
-            store.Issue($"flood-{i}");
+            store.Issue($"flood-{i}", Seed, 3, 5);
 
         Assert.True(store.PendingCount <= 512, $"未消费挑战数应被压在上限内，实际 {store.PendingCount}");
     }

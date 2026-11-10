@@ -261,6 +261,11 @@ public class Program
                 sp.GetRequiredService<MongoDbService>().OtpChains,
                 sp.GetRequiredService<AuthServer.Services.Otp.OtpOptions>()));
 
+        // 挑战签名密钥：DPAPI 保管的本机配对密钥（`%LOCALAPPDATA%\AuthBaselineData\otp-challenge.key`）。
+        // 客户端（Rust 侧）读同一份文件验签 —— 没有它，客户端无法区分
+        // "服务端签发的 k" 与 "中间人改小后的 k"，也就挡不住小数攻击。
+        builder.Services.AddSingleton<AuthServer.Services.Otp.OtpChallengeKey>();
+
         // 一次性挑战：纯内存（ConcurrentDictionary），不落库 ——
         // 它只活几十秒，落库反而要面对"过期清理"这个额外问题，且没有任何取证价值
         // （谁申请过挑战不等于谁在登录）。
@@ -363,6 +368,11 @@ public class Program
         // 前几个阶段这句话改过三次（"端点尚未接入"→"口令路径并存"→"口令路径已移除"），
         // 每次都是实现先变、文案后追，代价是有人在排障时信了过期的那句。
         Console.WriteLine($"[Otp] 哈希链是唯一第一因子（口令路径已移除）：{otpOptions.Describe()}");
+
+        // 挑战签名：这条日志是"客户端能不能验签"的第一现场 ——
+        // 两端指纹对不上时，表现为客户端把所有挑战都判成"已失效"，而服务端毫无异常。
+        var challengeKey = app.Services.GetRequiredService<AuthServer.Services.Otp.OtpChallengeKey>();
+        Console.WriteLine($"[Otp] 挑战签名已启用 · 指纹 {challengeKey.Fingerprint} · {AuthServer.Services.Otp.OtpChallengeKey.KeyPath}");
 
         // Configure the HTTP request pipeline.
         if (app.Environment.IsDevelopment())

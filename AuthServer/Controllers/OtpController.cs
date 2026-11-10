@@ -78,22 +78,32 @@ public class OtpController : AuthControllerBase
         // 有链 ⇒ 真参数；没链 ⇒ 假参数（形状逐字一致）。这就是防枚举的全部实现。
         var chain = await _chains.FindByUsernameAsync(username);
 
-        var (token, ttl) = _challenges.Issue(username);
+        // 先把三个被签名的参数定下来：proof 覆盖的就是它们，签发之后再算就白算了。
+        // 真链用库里的 R；没有链就现造一段等长 Base32。
+        // ⚠️ 假 R 必须是 CSPRNG，不能是常量：常量会让"没链的账号"在多次请求间保持同一个 R，
+        //    而真链的 R 只有续期才变 —— 反复采样就能把两类账号分开。
+        var r = chain?.R ?? OtpChainStore.NewSeed();
+
+        // k 在 [0, N-1] 之间取：真链的 k 也在这个区间里（含用尽时的 0），
+        // 所以取值域完全重合，单次采样分不出真假。
+        var k = chain?.K ?? RandomNumberGenerator.GetInt32(0, Math.Max(2, _otp.Length));
+
+        var n = chain?.Length ?? _otp.Length;
+
+        var (token, proof, ttl) = _challenges.Issue(username, r, k, n);
 
         var response = new OtpChallengeResponse
         {
             ChallengeToken = token,
 
-            // 真链用库里的 R；没有链就现造一段等长 Base32。
-            // ⚠️ 假 R 必须是 CSPRNG，不能是常量：常量会让"没链的账号"在多次请求间保持同一个 R，
-            //    而真链的 R 只有续期才变 —— 反复采样就能把两类账号分开。
-            R = chain?.R ?? OtpChainStore.NewSeed(),
+            // 客户端必须先验它，再决定算不算这一格。验不过就说明挑战在链路上被改过
+            // （典型就是把 k 改小 ⇒ 小数攻击），此时**绝不能**计算，否则等于把
+            // 更靠前的一格主动交给攻击者，让它正向补齐后冒充登录。
+            Proof = proof,
 
-            // k 在 [0, N-1] 之间取：真链的 k 也在这个区间里（含用尽时的 0），
-            // 所以取值域完全重合，单次采样分不出真假。
-            K = chain?.K ?? RandomNumberGenerator.GetInt32(0, Math.Max(2, _otp.Length)),
-
-            N = chain?.Length ?? _otp.Length,
+            R = r,
+            K = k,
+            N = n,
 
             // 算法名与 KDF 名是**全局常量**，不是每条链的属性（每条链可变的只有迭代次数）。
             Algorithm = OtpVerifier.ChainAlgorithm,

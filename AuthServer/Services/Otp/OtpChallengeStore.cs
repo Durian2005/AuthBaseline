@@ -17,7 +17,13 @@ namespace AuthServer.Services.Otp;
  *   · 拿到一张挑战 ≠ 能登录（还得算出 `x_k`）；
  *   · 挑战不是票据，拿它调任何需要鉴权的接口都必须失败（它只存在这个类里，
  *     `SessionService` 与它零交集 —— 与 FaceChallengeStore 同一原则）。
- * 所以这里**不需要加密、不需要签名**，只需要不可预测 + 有 TTL + 用过即焚。
+ * 所以 token 本身**不需要加密**，只需要不可预测 + 有 TTL + 用过即焚。
+ *
+ * ── 但参数需要签名（小数攻击）────────────────────────────────
+ * token 不透明并不等于挑战可信：中间人可以篡改 `k` 再转发给客户端，客户端算出的
+ * 是更靠前的一格，攻击者正向哈希补齐后照样能登录，且顺手拿到后续若干格。
+ * 服务端对此**无从分辨**（它收到的就是真正的 `x_k`），所以必须由客户端验签。
+ * 签名在 <see cref="OtpChallengeKey"/>，本类只负责把 proof 拼进签发结果。
  *
  * ── 一个刻意的取舍：挑战过期回"挑战无效"，而不是"口令错" ──
  * 两者对攻击者都是"没通过"，但对用户是两件事：前者几乎总是"点了登录之后放了一会儿"，
@@ -31,6 +37,7 @@ public sealed class OtpChallengeStore
 
     private readonly ConcurrentDictionary<string, Pending> _pending = new();
     private readonly OtpOptions _opt;
+    private readonly OtpChallengeKey _signer;
 
     /// <summary>
     /// 未消费挑战的上限。挑战端点是**匿名**的，任何人不带凭据就能刷；
@@ -38,26 +45,37 @@ public sealed class OtpChallengeStore
     /// </summary>
     private const int MaxPending = 512;
 
-    public OtpChallengeStore(OtpOptions opt) => _opt = opt;
+    public OtpChallengeStore(OtpOptions opt, OtpChallengeKey signer)
+    {
+        _opt = opt;
+        _signer = signer;
+    }
 
     /// <summary>当前挂着的挑战数（探针用来确认"消费真的把记录删掉了"）。</summary>
     public int PendingCount => _pending.Count;
 
     /// <summary>
-    /// 签发一张挑战，返回 (token, TTL 秒)。
+    /// 签发一张挑战，返回 (token, proof, TTL 秒)。
     ///
     /// ⚠️ **无论账号是否存在、是否有链、是否被冻结，都会签出一张**。
     ///    这是防枚举的一部分：如果"不存在的账号"拿不到 token，那个端点就成了账号名录。
     ///    判断账号状态是控制器的事，本类不做任何存在性判断 —— 它也不该知道。
+    ///
+    /// ⚠️ **假参数也必须签**。若只在真链上返回 proof，"proof 是否为空"就成了
+    ///    比 token 更好用的存在性判据 —— 那样防枚举等于白做。真/假两条路的
+    ///    字段集合与取值形状必须完全一致（单测 B3 那条断言现在也覆盖 proof）。
     /// </summary>
-    public (string Token, int TtlSeconds) Issue(string username)
+    public (string Token, string Proof, int TtlSeconds) Issue(string username, string r, int k, int n)
     {
         Prune();
 
         // 24 字节 CSPRNG ⇒ Base64Url 32 字符。长度足够大到猜不中，又不至于让日志难读。
-        var token = Base64Url(RandomNumberGenerator.GetBytes(24));
+        var token = OtpChallengeKey.Base64Url(RandomNumberGenerator.GetBytes(24));
         _pending[token] = new Pending(username, DateTime.UtcNow);
-        return (token, _opt.ChallengeTtlSeconds);
+
+        // proof 覆盖 (username, r, k, n)：客户端验过它才敢按这个 k 算格。
+        var proof = _signer.Sign(username, r, k, n);
+        return (token, proof, _opt.ChallengeTtlSeconds);
     }
 
     /// <summary>
@@ -110,9 +128,9 @@ public sealed class OtpChallengeStore
             _pending.TryRemove(token, out _);
     }
 
-    /// <summary>Base64Url（去填充）：token 会出现在 JSON 与 URL 里，'/' 与 '+' 都是麻烦。</summary>
-    private static string Base64Url(byte[] bytes) =>
-        Convert.ToBase64String(bytes).TrimEnd('=').Replace('+', '-').Replace('/', '_');
+    // Base64Url 只保留一份实现（`OtpChallengeKey.Base64Url`）：token 与 proof 都要出现在
+    // JSON 里，'/' 与 '+' 都是麻烦。两处各写一遍迟早会在填充或替换顺序上分叉，
+    // 而那种分叉的表现是"客户端偶尔验签失败"，极难定位。
 }
 
 /// <summary>

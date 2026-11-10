@@ -125,6 +125,162 @@ pub fn otp_compute(
     })
 }
 
+/// 验证服务端挑战的签名，确认 `(r, k, n)` 在链路上没有被改过。
+///
+/// ── 防的是「小数攻击」（S/KEY 的经典缺陷）────────────────────
+/// 中间人截获服务端下发的挑战，把**期望下标 k 改小**再转发给客户端。客户端若照算，
+/// 交出的是更靠前的一格 `x_k'`；攻击者正向哈希 `k - k'` 次就得到真正的 `x_k`，
+/// 既能冒充本次登录，还顺带握住后续若干格。
+///
+/// 服务端对此**无从分辨**：它收到的就是真正的 `x_k`，`H(x_k) == v` 完全成立。
+/// 唯一的防线在这里 —— 客户端算之前，先确认这个 `k` 是服务端签发的。
+///
+/// ── 密钥从哪来 ───────────────────────────────────────────────
+/// 与服务端同一个文件（`%LOCALAPPDATA%\AuthBaselineData\otp-challenge.key`，DPAPI·CurrentUser），
+/// 本机配对、重装重建，不是用户的秘密，因此不影响「客户端不存用户秘密、换机可用」。
+#[tauri::command]
+pub fn otp_verify_challenge(
+    username: String,
+    r: String,
+    k: i32,
+    n: i32,
+    proof: String,
+) -> Result<bool, String> {
+    let proof = proof.trim();
+    if proof.is_empty() {
+        return Err("挑战缺少签名（proof 为空）—— 拒绝计算链值".into());
+    }
+
+    let key = Zeroizing::new(load_challenge_key()?);
+    let expected = sign_challenge(&key, &username, &r, k, n);
+
+    // 常数时间比较：这里比的是 MAC。用 `==` 会按首个不同字节提前返回，
+    // 把"前几位对上了"泄露给能反复触发验签的人。
+    Ok(constant_time_eq(expected.as_bytes(), proof.as_bytes()))
+}
+
+/// 挑战签名密钥的路径。与服务端 `OtpChallengeKey.KeyPath` 必须逐字一致。
+fn challenge_key_path() -> Result<std::path::PathBuf, String> {
+    let base = std::env::var("LOCALAPPDATA")
+        .map_err(|_| "读不到 LOCALAPPDATA 环境变量，无法定位挑战签名密钥".to_string())?;
+    Ok(std::path::Path::new(&base)
+        .join("AuthBaselineData")
+        .join("otp-challenge.key"))
+}
+
+/// 读并解开 DPAPI 封装的密钥。
+///
+/// 用 DPAPI 而不是明文文件：它把密钥绑定到**当前 Windows 用户**。同机的其他用户
+/// 即使拿到这个文件也解不开 —— 而「小数攻击」的实施者恰恰可能是同机另一个进程。
+fn load_challenge_key() -> Result<Vec<u8>, String> {
+    let path = challenge_key_path()?;
+    let blob = std::fs::read(&path).map_err(|e| {
+        format!(
+            "读不到挑战签名密钥（{}）：{e}。请确认后端已启动过一次",
+            path.display()
+        )
+    })?;
+
+    let plain = dpapi_unprotect(&blob, CHALLENGE_KEY_ENTROPY)
+        .map_err(|e| format!("解不开挑战签名密钥：{e}"))?;
+
+    if plain.len() != ROOT_LEN {
+        return Err(format!(
+            "挑战签名密钥长度异常：{} 字节（期望 {ROOT_LEN}）",
+            plain.len()
+        ));
+    }
+    Ok(plain)
+}
+
+/// 与服务端 `OtpChallengeKey.Sign` 逐字节一致的签名：
+/// `Base64Url(HMAC-SHA256(key, hex(SHA256(username)) | r | k | n))`。
+fn sign_challenge(key: &[u8], username: &str, r: &str, k: i32, n: i32) -> String {
+    use hmac::{Hmac, Mac};
+
+    let payload = challenge_payload(username, r, k, n);
+
+    let mut mac = <Hmac<Sha256>>::new_from_slice(key)
+        .expect("HMAC 接受任意长度密钥，这里不会失败");
+    mac.update(payload.as_bytes());
+    let tag = mac.finalize().into_bytes();
+
+    // 与服务端同一套编码：去填充、'+'→'-'、'/'→'_'。
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    URL_SAFE_NO_PAD.encode(tag)
+}
+
+/// 签名覆盖的字符串。用户名先取摘要，消除分隔符歧义（与服务端注释同一理由）。
+fn challenge_payload(username: &str, r: &str, k: i32, n: i32) -> String {
+    let digest = Sha256::digest(username.as_bytes());
+    let mut name_hex = String::with_capacity(64);
+    for byte in digest {
+        use std::fmt::Write as _;
+        let _ = write!(name_hex, "{byte:02x}");
+    }
+    format!("{name_hex}|{r}|{k}|{n}")
+}
+
+/// 长度不同直接 false（proof 定长 43 字符，长度本身不携带信息）。
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for i in 0..a.len() {
+        diff |= a[i] ^ b[i];
+    }
+    diff == 0
+}
+
+/// DPAPI 附加熵。与服务端 `OtpChallengeKey.Entropy` 逐字一致 —— 熵不同就解不开。
+const CHALLENGE_KEY_ENTROPY: &[u8] = b"AuthBaseline.OtpChallenge.v1";
+
+/// 调 DPAPI 解封装（`CryptUnprotectData`，CurrentUser 作用域，无 UI）。
+#[cfg(windows)]
+fn dpapi_unprotect(blob: &[u8], entropy: &[u8]) -> Result<Vec<u8>, String> {
+    use windows_sys::Win32::Foundation::{LocalFree, HLOCAL};
+    use windows_sys::Win32::Security::Cryptography::{CryptUnprotectData, CRYPT_INTEGER_BLOB};
+
+    unsafe {
+        let mut data_in = CRYPT_INTEGER_BLOB {
+            cbData: blob.len() as u32,
+            pbData: blob.as_ptr() as *mut u8,
+        };
+        let mut entropy_in = CRYPT_INTEGER_BLOB {
+            cbData: entropy.len() as u32,
+            pbData: entropy.as_ptr() as *mut u8,
+        };
+        let mut data_out = CRYPT_INTEGER_BLOB {
+            cbData: 0,
+            pbData: std::ptr::null_mut(),
+        };
+
+        let ok = CryptUnprotectData(
+            &mut data_in,
+            std::ptr::null_mut(),
+            &mut entropy_in,
+            std::ptr::null_mut(),
+            std::ptr::null(),
+            0,
+            &mut data_out,
+        );
+
+        if ok == 0 {
+            return Err("CryptUnprotectData 返回失败（DPAPI 作用域或熵不匹配）".into());
+        }
+
+        let plain = std::slice::from_raw_parts(data_out.pbData, data_out.cbData as usize).to_vec();
+        LocalFree(data_out.pbData as HLOCAL);
+        Ok(plain)
+    }
+}
+
+#[cfg(not(windows))]
+fn dpapi_unprotect(_blob: &[u8], _entropy: &[u8]) -> Result<Vec<u8>, String> {
+    Err("挑战签名目前只在 Windows（DPAPI）上实现".into())
+}
+
 /// 从链根往下走 `times` 步，返回 `x_times`。`times = 0` 时就是链根本身。
 ///
 /// 全过程在同一个 `Zeroizing` 缓冲里就地覆写：不额外分配，也不会在堆上留下
@@ -199,6 +355,76 @@ mod tests {
             assert_eq!(got.code, expected, "k={k} 与 Python 复算不一致");
             assert!(got.next_r.is_none() && got.next_head.is_none());
         }
+    }
+
+    /// 挑战签名：与 C# / Python 三方对齐的固定向量。
+    ///
+    /// 期望值由 Python 的 `hmac.new(key, payload, sha256)` +
+    /// `urlsafe_b64encode(...).rstrip('=')` 独立算出。这条断言钉住三件事：
+    /// payload 的摘要编码与分隔、HMAC 输出、Base64Url 的替换顺序。
+    /// 任何一处与 C# 分叉，症状都是「所有挑战都被判成伪造」——登录全挂，且看不出原因。
+    #[test]
+    fn challenge_signature_crosses_with_python_and_csharp() {
+        let key: Vec<u8> = (0u8..32).collect();
+        let r = "JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP";
+
+        assert_eq!(
+            challenge_payload("alice", r, 3, 5),
+            "2bd806c97f0e00af1a1fc3328fa763a9269723c8db8fac4f93af71db186d6e90|JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP|3|5"
+        );
+        assert_eq!(
+            sign_challenge(&key, "alice", r, 3, 5),
+            "R99WOoCTqdTQTwMrI-C2LExKsKCz7ltVz2sYA7e_NyU"
+        );
+    }
+
+    /// 小数攻击的核心判据：把 k 改小，签名必然对不上。
+    ///
+    /// 客户端之所以能识破攻击，靠的不是「看起来不一样」，而是 MAC 不同 ——
+    /// 攻击者没有本机配对密钥，改完 k 之后重签不出来。
+    #[test]
+    fn tampered_k_breaks_signature() {
+        let key: Vec<u8> = (0u8..32).collect();
+        let r = "JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP";
+        let genuine = sign_challenge(&key, "alice", r, 3, 5);
+
+        // k：3 → 1。这一格正是攻击者想骗客户端算出来的（更靠前 = 更容易被补齐）
+        assert_ne!(sign_challenge(&key, "alice", r, 1, 5), genuine);
+        assert_eq!(
+            sign_challenge(&key, "alice", r, 1, 5),
+            "cgS7GTS11Dc6_oPq81yEibCLbhvHJhMAy0xZ5QHDv4g"
+        );
+
+        // n、种子、用户名：任何一个变了都必须对不上
+        assert_ne!(sign_challenge(&key, "alice", r, 3, 9), genuine);
+        assert_ne!(
+            sign_challenge(&key, "alice", "JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXQ", 3, 5),
+            genuine
+        );
+        assert_ne!(sign_challenge(&key, "bob", r, 3, 5), genuine);
+    }
+
+    /// 换一把密钥就签不出同一张挑战 —— 否则「本机配对密钥」等于没有。
+    #[test]
+    fn different_key_breaks_signature() {
+        let r = "JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP";
+        let key_a: Vec<u8> = (0u8..32).collect();
+        let mut key_b = key_a.clone();
+        key_b[0] ^= 0xff;
+
+        assert_ne!(
+            sign_challenge(&key_a, "alice", r, 3, 5),
+            sign_challenge(&key_b, "alice", r, 3, 5)
+        );
+    }
+
+    /// 常数时间比较：长度不同直接 false，同长逐字节判等。
+    #[test]
+    fn constant_time_eq_behaves() {
+        assert!(constant_time_eq(b"abc", b"abc"));
+        assert!(!constant_time_eq(b"abc", b"abd"));
+        assert!(!constant_time_eq(b"abc", b"ab"));
+        assert!(constant_time_eq(b"", b""));
     }
 
     /// 续期路径：新种子形状正确，且新链头确实等于「用新种子重算的 x_N」。

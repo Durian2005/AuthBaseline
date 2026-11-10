@@ -231,8 +231,11 @@ def run(probe_db):
           st == 401 and b.get("code") == "INVALID_CREDENTIALS", "HTTP %s / %s" % (st, b.get("code")))
 
     st, ch = otp_challenge(BASE, "p8user")
-    check("E2 无链账号 challenge 仍返回完整参数（8 个字段）",
-          st == 200 and len(ch.keys()) == 8, "HTTP %s / %s" % (st, ch))
+    # 精确集合比对：新增 proof 之后字段集合没变，将来再加会在这里显式失败。
+    expected_fields = {"challengeToken", "proof", "r", "k", "n",
+                       "algorithm", "kdf", "iterations", "expiresInSeconds"}
+    check("E2 无链账号 challenge 仍返回完整参数",
+          st == 200 and set(ch.keys()) == expected_fields, "HTTP %s / %s" % (st, ch))
 
     # ── F. 端点与审计面 ─────────────────────────────────────────
     print("\n[F] 端点与审计面")

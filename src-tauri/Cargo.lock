@@ -82,6 +82,7 @@ version = "1.0.0"
 dependencies = [
  "base64 0.22.1",
  "getrandom 0.2.17",
+ "hmac",
  "pbkdf2",
  "serde",
  "serde_json",
@@ -89,6 +90,7 @@ dependencies = [
  "tauri",
  "tauri-build",
  "tauri-plugin-shell",
+ "windows-sys 0.61.2",
  "zeroize",
 ]
 

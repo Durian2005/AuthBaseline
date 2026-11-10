@@ -87,8 +87,13 @@ export function needsRenewal(k, n) {
  * `renew=true` 会多付一次完整派生（约与主计算同价），所以只由调用方按
  * `needsRenewal()` 的结论决定 —— 这里不自己判断，因为"该不该续期"的判据
  * 必须与服务端**同一个时刻**的 `k`（挑战里给出的那个，即核销前）。
+ *
+ * ⚠️ **算之前先验签**，这不是可选的装饰：
+ * 挑战里的 `k` 若被中间人改小（小数攻击），这里算出来的就是**更靠前**的一格。
+ * 攻击者正向哈希补齐后既能登录、还能拿走后续若干格 —— 而服务端无法分辨，
+ * 因为它收到的确实是真正的 `x_k`。唯一能识破的地方就是这里。
  */
-async function compute({ password, challenge, renew }) {
+async function compute({ username, password, challenge, renew }) {
   const invoke = await getInvoke()
   if (!invoke) {
     throw new ApiError('当前环境无法本地计算口令凭据', {
@@ -98,6 +103,47 @@ async function compute({ password, challenge, renew }) {
   }
 
   const c = challenge || {}
+
+  // ── ① 验签：确认 (r, k, n) 是服务端签发的 ──
+  // 用 key 在 Rust 侧（DPAPI 解封装），JS 拿不到也不需要拿到密钥本体。
+  let verified
+  try {
+    verified = await invoke('otp_verify_challenge', {
+      username,
+      r: c.r,
+      k: c.k,
+      n: c.n,
+      proof: c.proof || ''
+    })
+  } catch (err) {
+    // 密钥读不到 / DPAPI 解不开：这是**环境**问题（比如后端还没启动过），
+    // 与"参数被改"必须分开报 —— 否则用户按"重试登录"永远修不好。
+    throw new ApiError(`挑战校验无法完成：${err}`, {
+      code: 'OTP_CHALLENGE_UNVERIFIABLE',
+      kind: 'client'
+    })
+  }
+
+  if (!verified) {
+    throw new ApiError('挑战参数与服务端签发的不一致，已拒绝计算', {
+      code: 'OTP_CHALLENGE_FORGED',
+      kind: 'client'
+    })
+  }
+
+  // ── ③ k = 0 时**算都不能算** ──
+  // 这一格按定义就是 x₀ —— 口令派生根。它一旦出门，任何截获者都能正向重算出
+  // 整条链（x₁…x_N），等于把之后所有配额一起交出去。
+  // 服务端确实会在比对前就返回「已用尽」，但那时值已经发到网络上了；能不出门就别出门。
+  // 放在验签之后：k 是签名覆盖的字段，验过之后这个判断才可信。
+  if (Number(c.k) <= 0) {
+    throw new ApiError('本账号的一次性口令已用尽，请用邮箱验证码重置口令后再登录', {
+      code: 'OTP_CHAIN_EXHAUSTED',
+      kind: 'client'
+    })
+  }
+
+  // ── ② 验过才动笔 ──
   try {
     return await invoke('otp_compute', {
       password,
@@ -137,7 +183,7 @@ export async function buildLogin({ username, password }) {
   const challenge = chRes?.data ?? {}
 
   const renew = needsRenewal(challenge.k, challenge.n)
-  const out = await compute({ password, challenge, renew })
+  const out = await compute({ username, password, challenge, renew })
 
   return {
     body: {
@@ -164,7 +210,7 @@ export async function buildChangePassword({ username, password, newPassword }) {
 
   // 改密**不续期**：这条链在这一刻之后就不存在了（服务端会用新口令整条重建），
   // 于是算一条新链出来既无用、又多付一次 PBKDF2。
-  const out = await compute({ password, challenge, renew: false })
+  const out = await compute({ username, password, challenge, renew: false })
 
   return {
     username,
@@ -195,7 +241,7 @@ export async function confirmCredential({ purpose, target, username, password })
   const chRes = await api.otpChallenge(username)
   const challenge = chRes?.data ?? {}
 
-  const out = await compute({ password, challenge, renew: false })
+  const out = await compute({ username, password, challenge, renew: false })
 
   const res = await api.otpReconfirm({ purpose, target: tgt, otpCode: out.code })
   const token = res?.data?.confirmToken

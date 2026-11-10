@@ -36,6 +36,14 @@ base64 = "0.22"
 zeroize = "1"
 # 续期时生成新种子。用 getrandom 而不是 rand：只需要"填满 20 字节"，不引入整棵 PRNG 树。
 getrandom = "0.2"
+# 挑战验签（防小数攻击）：HMAC-SHA256 与 sha2 同属 RustCrypto，版本线一致。
+hmac = "0.12"
+
+# DPAPI 解封装：客户端要用与服务端同一份「本机配对密钥」验签，
+# 而那份密钥是 DPAPI·CurrentUser 封装的。windows-sys 已在依赖树里（0.61），
+# 复用同版本可以少编译一份 FFI 绑定。
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Security_Cryptography", "Win32_Foundation"] }
 
 [profile.release]
 # 体积优先（生成的安装包更小），同时保持可接受的构建速度

@@ -90,3 +90,7 @@ tools/fixtures/
 # 因此不进公开仓库；装机/评测需要时按 AuthServer/face-models/README.md
 # 的说明下载并用 SHA-256 校验。YuNet/SFace 为 MIT/Apache-2.0，继续随仓库分发。
 AuthServer/face-models/face_recognition_arcface_w600k_r50.onnx
+
+# 本机演示启动器：里面写死了本机 Python 路径（C:\Users\<用户名>\...），
+# 属于个人环境配置而非项目产物，因此不入库。要重建见 .workbuddy/OTP-验收手册.md。
+演示-*.bat
