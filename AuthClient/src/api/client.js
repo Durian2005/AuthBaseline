@@ -26,10 +26,6 @@ function isTauri() {
   return typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window
 }
 
-export function getBackendBase() {
-  return BACKEND_BASE
-}
-
 export function setBackendBase(base) {
   BACKEND_BASE = typeof base === 'string' ? base.replace(/\/+$/, '') : ''
   API_ROOT = BACKEND_BASE ? `${BACKEND_BASE}/api` : '/api'

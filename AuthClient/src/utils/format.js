@@ -59,10 +59,6 @@ export function statusMeta(status) {
   return STATUS_META[status] || { label: status || '未知', tone: 'disabled', icon: 'question' }
 }
 
-export function statusLabel(status) {
-  return statusMeta(status).label
-}
-
 /**
  * 后端审计日志 Action -> 中文名 + 语义色
  *

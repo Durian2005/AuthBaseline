@@ -163,16 +163,6 @@ async function compute({ username, password, challenge, renew }) {
 /* ---------------- 对外：三条使用路径 ---------------- */
 
 /**
- * 本机能不能算一格 —— 只看桌面壳在不在（能不能调到 Rust 侧的实现）。
- *
- * P8 之前这里还要问"这个账号有没有链"，因为算不出来还能退回口令；
- * 现在没有退路，所以答案只剩一个：算不出来就登不上，界面必须直说。
- */
-export async function available() {
-  return !!(await getInvoke())
-}
-
-/**
  * 组装一次链值登录的请求体。
  *
  * 返回 `{ body, meta }`：`body` 直接交给 `api.loginOtp`，
