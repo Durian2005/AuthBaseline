@@ -274,6 +274,7 @@ AuthServer/bin/Debug/net8.0/AuthServer.exe --faceid-capture <目录> [帧数=60]
 | `renumber_chain.py` | 重排序号并重签（清理已删记录的序号空洞） | 默认 dry-run，`--apply` 才写 |
 | `faceid_purge_stale_templates.py` | 删掉 `FaceIdTemplates` 里 **modelId 与当前双模型身份不符**的作废模板（换模型后必然出现；旧模板缺第二组向量，无法迁移只能重录） | 默认 dry-run（只读不拦）→ `--apply` 才要 `--i-know-this-is-the-real-db`；备份+回读核对后才删；条件收窄到 `modelId != expected`；**权重缺失时硬拒执行**；删完复核 `FaceTemplates`/`Users` 条数不变 |
 | `repair_chain.py` | 修复审计哈希链 | 默认 dry-run，`--apply` 才写 |
+| `otp_set_k.py` | 把某个账号的链游标挪到指定 `k`（**链长 / 种子 / 迭代次数一律不动**）。用于验收演示「库里 `k` 是个位数，但登录、递减、续链表现与平时完全一致」。⚠️ 不能靠缩短链长达到同样效果：续链线是 `k ≤ N×5%`，`N=6` 折算不足 1 格，必然撞「已用尽」 | 默认 dry-run → `--apply` 才写；写前用**旧状态**校验口令（`H(x_k) == v`），不成立直接退出；自动备份到 `evidence/`；写入用 CAS（旧 `k` + 旧 `v`），期间有人登录就整体不写；**不写审计**（与 `--rechain` 同级，属运维动作） |
 
 > ⚠️ 这些脚本**不要**往通用门禁上合并 —— 它们比通用规则更严格（含备份核对、dry-run 预览），
 > 合并会**削弱**保护。
