@@ -26,7 +26,7 @@
 
 ```bash
 python tools/audit_e2e_test.py      # 四组测试全流程（57 项断言）
-python tools/verify_api.py          # 起后端并校验链完整性
+python tools/verify_chain_independent.py   # Python 从零复算整链（不依赖后端代码）
 ```
 
 

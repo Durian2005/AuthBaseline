@@ -307,16 +307,6 @@ AuthServer/bin/Debug/net8.0/AuthServer.exe --faceid-capture <目录> [帧数=60]
 | `launch_desktop.py` | 启动桌面端并输出 sidecar 动态端口 |
 | `port_watch.py` | 实时验证「桌面壳起来 → sidecar 起来 → 端口在 LISTENING」 |
 
-### H. 一次性诊断（历史遗留，**建议归档**）
-
-| 文件 | 情况 |
-|---|---|
-| `verify_api.py` | 起后端调 `/api/audit/verify`。功能已被 `transport_func_check.py` 与审计探针覆盖 |
-| `diag_api.py` | 起后端拉用户列表与审计统计。与 `verify_api.py` 重叠，无独有能力 |
-
-> 这两个脚本硬编码 `admin/Admin123` 且不接库名门禁 —— 若继续保留，至少要补上门禁；
-> 若确认不再使用，建议连同历史一起归档（需先确认无人引用）。
-
 ## 目录
 
 | 目录 | 内容 | 是否入库 |
@@ -342,6 +332,6 @@ AuthServer/bin/Debug/net8.0/AuthServer.exe --faceid-capture <目录> [帧数=60]
 
 - [x] 成功转头样本（`left-ok`，10-17 真机录制，46 帧）
 - [ ] 仍缺两份真机样本：**动作后不回正**（`FACE_NOT_RETURNED`）、**另一方向 right**（验证左右对称）
-- [ ] H 组两个脚本：补门禁或归档（需确认无引用）
+- [x] 原 H 组的两个脚本 `verify_api.py` / `diag_api.py`：确认无代码引用后归档删除（11-19）
 - [ ] 未走公共层的活跃脚本逐步收口：`cs_connect_check.py` / `cs_process_check.py` / `run_audit_e2e.py` / `email_e2e_test.py` / `verify_email.py`
 - [ ] 截图之外，`buildlogs/` 也应按月份清理（目前无轮转策略）

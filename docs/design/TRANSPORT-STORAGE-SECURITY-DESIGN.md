@@ -202,7 +202,7 @@
 
 **禁止**用 `verify=False` 绕过 —— 把信任锚固定成 `server.crt` 才是对的做法，而且这句话本身可以在评审时讲。
 
-涉及脚本（实测发 HTTP 到后端的那些）：`audit_e2e_test.py`、`cs_connect_check.py`、`desktop_e2e.py`、`diag_api.py`、`email_e2e_test.py`、`launch_desktop.py`、`lockout_clock_probe.py`、`password_event_probe.py`、`port_watch.py`、`race_storm_test.py`、`role_separation_test.py`、`run_audit_e2e.py`、`tamper_helper.py`、`ui_audit_check.py`、`ui_readonly_check.py`、`verify_api.py`、`verify_email.py`、`verify_install.py`、`ui_*.mjs`。
+涉及脚本（实测发 HTTP 到后端的那些）：`audit_e2e_test.py`、`cs_connect_check.py`、`desktop_e2e.py`、`email_e2e_test.py`、`launch_desktop.py`、`lockout_clock_probe.py`、`password_event_probe.py`、`port_watch.py`、`race_storm_test.py`、`role_separation_test.py`、`run_audit_e2e.py`、`tamper_helper.py`、`ui_audit_check.py`、`ui_readonly_check.py`、`verify_email.py`、`verify_install.py`、`ui_*.mjs`。
 
 ---
 

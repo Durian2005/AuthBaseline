@@ -221,9 +221,9 @@ store 只初始化一次、没有组件实例，`onUnmounted` 永不触发 —�
 
 - 仍未走 `_probe_common` 的活跃脚本：`cs_connect_check.py` / `cs_process_check.py` /
   `run_audit_e2e.py` / `email_e2e_test.py` / `verify_email.py`。
-- 一次性遗留（`tools/README.md` H 组）：`verify_api.py` / `diag_api.py`。
-  两者硬编码 `admin/Admin123` 且不接库名门禁 —— 若继续保留至少补门禁；
-  若确认不再使用则归档（**归档前需先确认无人引用**）。
+- ~~一次性遗留（原 `tools/README.md` H 组）：`verify_api.py` / `diag_api.py`。~~
+  已于 2026-11-19 归档删除：引用面仅文档、无代码调用；能力由 `audit_e2e_test.py`
+  对 `/api/audit/verify` 的断言与 `transport_func_check.py` 覆盖。
 - ⚠️ **收口时必须守住的边界**：
   ① 两套库名规则（探针硬拒真实库 / 验收脚本显式确认）**不得合并**；
   ② 管理脚本的自有保护（备份核对、dry-run + `--apply`）**不得被通用门禁替换** —— 那会削弱保护；
